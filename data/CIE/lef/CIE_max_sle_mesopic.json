@@ -1,0 +1,78 @@
+{
+  "titles": [
+    {
+      "title": "CIE maximum luminous efficacy for mesopic vision at varied adaptation coefficient values"
+    }
+  ],
+  "descriptions": [
+    {
+      "description": "Values of maximum luminous efficacy for mesopic vision, K_m,mes;m at varied adaptation coefficient values m (for other m values use Eq. (8) of CIE 018:2019), original source: CIE 018:2019, Table 4",
+      "descriptionType": "Abstract"
+    }
+  ],
+  "identifier": {
+    "identifier": "10.25039/CIE.DS.wh6zmd7r",
+    "identifierType": "DOI"
+  },
+  "creators": [
+    {
+      "name": "International Commission on Illumination (CIE)",
+      "nameType": "Organizational"
+    }
+  ],
+  "rightsList": [
+    {
+      "rights": "Creative Commons Attribution-ShareAlike 4.0 International",
+      "rightsURI": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "rightsIdentifier": "CC BY-SA 4.0"
+    }
+  ],
+  "publisher": "International Commission on Illumination (CIE), Vienna, AT",
+  "publicationYear": "2019",
+  "data": {
+    "m": {
+      "title": "m",
+      "unit": "dimensionless",
+      "quantity": "adaptation coefficient",
+      "description": "adaptation coefficient m",
+      "wavelength_first": ":unap",
+      "wavelength_last": ":unap",
+      "wavelength_step": ":unap",
+      "values": [
+        0,
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+        1
+      ]
+    },
+    "K_m,mes;m": {
+      "title": "K_m,mes;m",
+      "unit": "lm / W",
+      "quantity": "maximum luminous efficacy",
+      "description": "maximum luminous efficacy for a given adaptation coefficient m",
+      "wavelength_first": ":unap",
+      "wavelength_last": ":unap",
+      "wavelength_step": ":unap",
+      "values": [
+        1700.13,
+        1402.22,
+        1181.84,
+        1020.44,
+        902.64,
+        816.88,
+        757.24,
+        718.49,
+        695.95,
+        685.46,
+        683
+      ]
+    }
+  }
+}
