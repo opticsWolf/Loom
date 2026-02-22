@@ -35,13 +35,15 @@ Loom goes beyond simple Fresnel equations to provide research-grade accuracy:
 - **Interface Roughness**: Implements the **Névot-Croce** model, providing superior accuracy for high-frequency or X-ray reflectometry compared to standard Gaussian approximations.
     
 - **Ellipsometric Rigor**: Outputs (Ψ,Δ) parameters that strictly follow the **Azzam & Bashara** convention, ensuring direct compatibility with commercial ellipsometers (e.g., Woollam, Horiba).
+### Technical Specifications
 
-
-| **Feature**           | **Implementation**                       | **Engineering Benefit**                                     |
-| --------------------- | ---------------------------------------- | ----------------------------------------------------------- |
-| **Core Algorithm**    | 1D Scattering Matrix ($S$-matrix)        | Eliminates numerical swamping in thick/absorbing layers.    |
-| **Propagation Logic** | **Hybrid Mixed Coherence**               | Supports phase-accurate and intensity-only layers.          |
-| **Coherent Blocks**   | $2 \times 2$ Complex Field Matrices      | Maintains phase information for thin-film interference.     |
-| **Incoherent Blocks** | **Stokes-Mueller / Intensity Redheffer** | Prevents unphysical interference in macroscopic substrates. |
-| **Roughness Model**   | Névot-Croce (Exact Wavevector)           | Research-grade accuracy for X-ray/UV interfaces.            |
-| **Optimization**      | Numba-JIT / Parallelized `prange`        | Near-native C performance with Pythonic flexibility.        |
+|**Feature**|**Implementation & Engineering Benefit**|
+|---|---|
+|**Core Algorithm**|**1D Scattering Matrix ($S$-matrix)**: Utilizes the Redheffer Star Product to eliminate numerical divergence and precision loss in thick or highly absorbing layers.|
+|**Propagation Logic**|**Hybrid Mixed Coherence**: Sophisticated dual-stage engine supporting phase-accurate (coherent) and intensity-only (incoherent) layers within a single pass.|
+|**Coherent Blocks**|**$2 \times 2$ Complex Field Matrices**: Maintains full phase and amplitude information, ensuring rigorous calculation of thin-film interference and ellipsometric parameters.|
+|**Incoherent Blocks**|**Stokes-Mueller / Intensity Redheffer**: Prevents unphysical interference artifacts in macroscopic substrates by utilizing intensity-based propagation.|
+|**Roughness Model**|**Névot-Croce (Exact Wavevector)**: Achieves research-grade accuracy for X-ray and UV interfaces by modeling exact wavevector correlations across boundaries.|
+|**Optimization**|**Numba-JIT / Parallelized `prange`**: Delivers near-native C performance with Pythonic flexibility, optimized for high-concurrency simulation and real-time GUI responsiveness.|
+|**Polarization**|**Full $s$ and $p$ Support**: Comprehensive Jones and Stokes calculus integration, following standard commercial ellipsometry conventions (Azzam & Bashara).|
+|**Complexity**|**$O(N)$ Scaling**: Optimized linear time complexity relative to the number of layers, ensuring stable performance for complex multi-stack architectures.|
