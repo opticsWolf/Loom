@@ -35,3 +35,13 @@ Loom goes beyond simple Fresnel equations to provide research-grade accuracy:
 - **Interface Roughness**: Implements the **Névot-Croce** model, providing superior accuracy for high-frequency or X-ray reflectometry compared to standard Gaussian approximations.
     
 - **Ellipsometric Rigor**: Outputs (Ψ,Δ) parameters that strictly follow the **Azzam & Bashara** convention, ensuring direct compatibility with commercial ellipsometers (e.g., Woollam, Horiba).
+
+
+| **Feature**           | **Implementation**                       | **Engineering Benefit**                                     |
+| --------------------- | ---------------------------------------- | ----------------------------------------------------------- |
+| **Core Algorithm**    | 1D Scattering Matrix ($S$-matrix)        | Eliminates numerical swamping in thick/absorbing layers.    |
+| **Propagation Logic** | **Hybrid Mixed Coherence**               | Supports phase-accurate and intensity-only layers.          |
+| **Coherent Blocks**   | $2 \times 2$ Complex Field Matrices      | Maintains phase information for thin-film interference.     |
+| **Incoherent Blocks** | **Stokes-Mueller / Intensity Redheffer** | Prevents unphysical interference in macroscopic substrates. |
+| **Roughness Model**   | Névot-Croce (Exact Wavevector)           | Research-grade accuracy for X-ray/UV interfaces.            |
+| **Optimization**      | Numba-JIT / Parallelized `prange`        | Near-native C performance with Pythonic flexibility.        |
