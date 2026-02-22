@@ -3,8 +3,6 @@
 
 **Loom** is a high-performance, physically rigorous 1D optical engine designed for the simulation of light propagation in stratified media. Built on a modern **Scattering Matrix (S-matrix)** architecture, it offers a numerically stable and vectorized alternative to traditional Transfer Matrix Methods (TMM).
 
-Loom was engineered to solve the common pitfalls of optical modeling—specifically numerical instability in complex stacks and slow execution times for large-scale spectral or angular datasets.
-
 ### 1. Unconditional Numerical Stability
 
 Traditional TMM suffers from "numerical swamping" (exponentially growing evanescent waves) when dealing with thick layers or highly absorbing materials (like metals in the UV/X-ray range). Loom utilizes the **Redheffer Star Product** to propagate scattering matrices, ensuring that all matrix elements remain bounded and physically meaningful, regardless of layer thickness.
