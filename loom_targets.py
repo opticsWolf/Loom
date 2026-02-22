@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Loom: Weaving the mathematics of light in thin film systems
 Copyright (c) 2026 opticsWolf
@@ -307,5 +308,6 @@ def _compute_residual(
 
     if not np.any(mask):
         return 0.0
+
 
     return float(np.sum(np.square(diff[mask] / tol[mask])))
