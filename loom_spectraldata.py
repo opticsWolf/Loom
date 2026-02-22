@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Loom: Weaving the mathematics of light in thin film systems
 Copyright (c) 2026 opticsWolf
@@ -671,5 +672,6 @@ class OpticalWeaver(OpticalCollection):
                     plan.append((frm, slice(int(indices[0]), int(indices[-1]) + 1)))
                 else:
                     plan.append((frm, indices))
+
 
         return plan
