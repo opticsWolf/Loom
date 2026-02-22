@@ -1,6 +1,7 @@
-# Loom: Solving the mathematics of light in thin film systems
 <img width="280" height="280" alt="loom_logo" src="https://github.com/user-attachments/assets/e08705cf-d221-4aeb-bfe2-56ef9f23bf17" />
-
+# Loom: 
+### Weaving the mathematics of light in thin film systems
+---
 **Loom** is a high-performance, physically rigorous 1D optical engine designed for the simulation of light propagation in stratified media. Built on a modern **Scattering Matrix (S-matrix)** architecture, it offers a numerically stable and vectorized alternative to traditional Transfer Matrix Methods (TMM).
 
 ### 1. Unconditional Numerical Stability
