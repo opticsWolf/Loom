@@ -1,0 +1,23 @@
+materials:
+  - name: "SiO2"
+    code: "L"
+    model: "TableMaterial"
+    n_data:
+      wavelengths: [400, 500, 600, 700, 800]
+      values: [1.470, 1.465, 1.460, 1.456, 1.453]
+    k_data:
+      wavelengths: [400, 800]
+      values: [0, 0]
+    params:
+      n_factor: 1.0
+      k_factor: 1.0
+      interpolation_type_n: "spline"
+
+  - name: "Ta2O5"
+    code: "H"
+    model: "Sellmeier"
+    params:
+      B1: 1.4313
+      C1: 0.01
+      B2: 0.65
+      C2: 0.025
