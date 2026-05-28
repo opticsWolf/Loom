@@ -9,7 +9,7 @@ python -c "
 import loom_rs
 import numpy as np
 
-weaver = loom_rs.PyOpticalWeaver(cache_size=64)
+weaver = loom_spectral.PyOpticalWeaver(cache_size=64)
 key = (550.0, 'R', 's')
 wl = np.linspace(400, 800, 100)
 data = np.sin(wl / 100)

@@ -2,7 +2,7 @@ import loom_rs
 import numpy as np
 
 # Create a weaver
-weaver = loom_rs.PyOpticalWeaver(cache_size=64)
+weaver = loom_spectral.PyOpticalWeaver(cache_size=64)
 
 # Define a key
 key = (550.0, "R", "s")
