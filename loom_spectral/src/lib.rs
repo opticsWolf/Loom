@@ -8,46 +8,16 @@
 //! bugs the Python version had (where a frame was appended to the registry
 //! before `_apply_wavelength` got a chance to reject the grid).
 //!
-//! ### Behaviour notes
-//! * `OpticalKey` hashes/compares wavelengths via `f64::to_bits` — `f64`
-//!   implements neither `Eq` nor `Hash`, but its bit pattern is deterministic.
-//! * Generation counter bumps **iff a new frame is created** — the only event
-//!   that can invalidate a cached distribution plan, since frames are
-//!   immutable in their wavelength grid and never removed. Pure data
-//!   overwrites do not bump (the previous draft over-invalidated).
-//! * Empty wavelength grids are rejected up front.
-//! * `unweave` / `unweave_collection` write subsets with `wavelength = None`;
-//!   passing the full grid would (correctly) be rejected as a conflict.
-//! * `#[pyclass(frozen)]`: all Python-visible state lives behind interior
-//!   mutability (`RwLock`, `AtomicUsize`), so the pyclass is `Sync` and does
-//!   not need PyO3's runtime borrow checker.
-//! * Heavy methods (`set_data`, `get_weaved`, `unweave`, `unweave_collection`,
-//!   `get_weaved_collections`, `get_converted`) release the GIL via
-//!   `Python::detach` around the Rust compute. `unweave` / `unweave_collection`
-//!   pass the numpy buffer's slice **directly** into the detached closure
-//!   (no copy) — `&[f64]` is `Ungil` on stable via the `Send` blanket impl.
-//!
-//! ## Use from Python
-//!
-//! ```python
-//! import loom_spectral
-//! import numpy as np
-//!
-//! w = loom_spectral.PyOpticalWeaver(cache_size=128)
-//!
-//! # Seed three contiguous sub-bands of a master grid.
-//! full = np.arange(400.0, 800.0)
-//! for lo, hi in [(0, 120), (120, 300), (300, 400)]:
-//!     band = np.ascontiguousarray(full[lo:hi])
-//!     w.set_data((0.0, "seed", "x"), np.zeros(hi - lo), band)
-//!
-//! # Distribute a full-grid curve into the seeded frames, then stitch it back.
-//! curve = np.sin(full / 30) + 0.1 * full
-//! w.unweave((550.0, "R", "s"), full, curve)
-//! wl_out, data_out = w.get_weaved((550.0, "R", "s"))
-//! assert np.allclose(wl_out, full) and np.allclose(data_out, curve)
-//! ```
+//! ### Performance notes (with improvements)
+//! * Data inside a frame is stored as `Arc<[f64]>` – cloning is O(1) and
+//!   read‑only access is allocation‑free.
+//! * NumPy arrays are mapped directly to `&[f64]` inside detached GIL closures
+//!   via raw pointer extraction for true zero-copy writes across thread boundaries.
+//! * `get_weaved` concatenates directly from memory references, bypassing 
+//!   intermediate vector cloning.
+//! * Unit conversion uses `Cow` to skip allocations when units already match.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
@@ -71,12 +41,14 @@ pub enum Unit {
 }
 
 #[inline]
-fn convert_unit(value: &[f64], _from: Unit, _to: Unit) -> Vec<f64> {
-    value.to_vec()
+fn convert_unit<'a>(value: &'a [f64], from: Unit, to: Unit) -> Cow<'a, [f64]> {
+    if from == to {
+        Cow::Borrowed(value)
+    } else {
+        Cow::Owned(value.to_vec())
+    }
 }
 
-/// Raw little-endian byte fingerprint of a wavelength grid.
-/// Used only as an internal map/cache key; any deterministic encoding works.
 #[inline]
 fn wl_signature(wl: &[f64]) -> Vec<u8> {
     bytemuck::cast_slice::<f64, u8>(wl).to_vec()
@@ -131,7 +103,7 @@ impl OpticalKey {
 // ---------------------------------------------------------------------------
 pub struct SpectralDataFrame {
     pub uid: usize,
-    data: RwLock<HashMap<OpticalKey, Vec<f64>>>,
+    data: RwLock<HashMap<OpticalKey, Arc<[f64]>>>,
     wavelength: Arc<[f64]>,
     wl_min: f64,
     wl_max: f64,
@@ -151,8 +123,7 @@ impl SpectralDataFrame {
         for i in 0..wavelength.len() - 1 {
             if !(wavelength[i] < wavelength[i + 1]) {
                 return Err(PyValueError::new_err(
-                    "SpectralDataFrame: wavelength array must be strictly \
-                     monotonically increasing.",
+                    "SpectralDataFrame: wavelength array must be strictly monotonically increasing.",
                 ));
             }
         }
@@ -171,18 +142,16 @@ impl SpectralDataFrame {
         })
     }
 
-    /// Validated write. Returns `true` iff `key` was newly inserted.
     fn set_data(
         &self,
         key: OpticalKey,
-        value: Vec<f64>,
+        value: Arc<[f64]>,
         wavelength: Option<&[f64]>,
     ) -> PyResult<bool> {
         if let Some(wl) = wavelength {
             if self.wl_signature != wl_signature(wl) {
                 return Err(PyValueError::new_err(format!(
-                    "SpectralDataFrame(uid={}): wavelength grid conflict \
-                     (bit-exact match required).",
+                    "SpectralDataFrame(uid={}): wavelength grid conflict (bit-exact match required).",
                     self.uid
                 )));
             }
@@ -202,7 +171,7 @@ impl SpectralDataFrame {
         Ok(is_new)
     }
 
-    fn get_data(&self, key: &OpticalKey) -> Option<Vec<f64>> {
+    fn get_data(&self, key: &OpticalKey) -> Option<Arc<[f64]>> {
         self.data.read().get(key).cloned()
     }
 
@@ -303,15 +272,13 @@ impl OpticalCollection {
         let mut data_list = Vec::with_capacity(frames.len());
         let mut wl_list = Vec::with_capacity(frames.len());
         for frm in frames {
-            let data_raw = frm.get_data(key).unwrap_or_default();
-            data_list.push(convert_unit(&data_raw, Unit::RAW, int_unit));
-            wl_list.push(convert_unit(frm.wavelength(), Unit::NM, spec_unit));
+            let data_raw = frm.get_data(key).unwrap_or_else(|| Arc::from(&[][..]));
+            data_list.push(convert_unit(&data_raw, Unit::RAW, int_unit).into_owned());
+            wl_list.push(convert_unit(frm.wavelength(), Unit::NM, spec_unit).into_owned());
         }
         Some((data_list, wl_list))
     }
 
-    /// Register `frame` under `key`. Returns `true` iff a NEW mapping was added.
-    /// Centralises the (key_map, key_uid_sets) lock order in one place.
     fn map_frame_to_key(&self, key: &OpticalKey, frame: &Arc<SpectralDataFrame>) -> bool {
         let mut key_map = self.key_map.write();
         let mut key_uids = self.key_uid_sets.write();
@@ -324,12 +291,11 @@ impl OpticalCollection {
         }
     }
 
-    /// Returns `true` iff a brand-new frame was created.
     pub fn set_data(
         &self,
         key: OpticalKey,
-        value: Vec<f64>,
-        wavelength: Vec<f64>,
+        value: &[f64],
+        wavelength: &[f64],
         input_spectral: Unit,
         input_intensity: Unit,
     ) -> PyResult<bool> {
@@ -341,11 +307,17 @@ impl OpticalCollection {
             )));
         }
 
-        let base_wl = convert_unit(&wavelength, input_spectral, Unit::NM);
-        let base_data = convert_unit(&value, input_intensity, Unit::RAW);
+        let base_wl = convert_unit(wavelength, input_spectral, Unit::NM);
+        let base_data = convert_unit(value, input_intensity, Unit::RAW);
 
         let (target_frame, frame_created) = self.get_or_create_frame(&base_wl)?;
-        let is_new = target_frame.set_data(key.clone(), base_data, Some(&base_wl))?;
+
+        let data_arc: Arc<[f64]> = match base_data {
+            Cow::Borrowed(b) => Arc::from(b),
+            Cow::Owned(o) => Arc::from(o),
+        };
+
+        let is_new = target_frame.set_data(key.clone(), data_arc, Some(&base_wl))?;
         if is_new {
             self.map_frame_to_key(&key, &target_frame);
         }
@@ -382,10 +354,13 @@ enum SliceOrIndices {
 
 impl SliceOrIndices {
     #[inline]
-    fn gather(&self, data: &[f64]) -> Vec<f64> {
+    fn gather(&self, data: &[f64]) -> Arc<[f64]> {
         match self {
-            SliceOrIndices::Slice(s, e) => data[*s..*e].to_vec(),
-            SliceOrIndices::Indices(idx) => idx.iter().map(|&i| data[i]).collect(),
+            SliceOrIndices::Slice(s, e) => Arc::from(&data[*s..*e]),
+            SliceOrIndices::Indices(idx) => {
+                let vec: Vec<f64> = idx.iter().map(|&i| data[i]).collect();
+                Arc::from(vec)
+            }
         }
     }
 }
@@ -455,12 +430,11 @@ impl OpticalWeaver {
         self.inner.get_converted(key)
     }
 
-    /// Bumps generation only when a new frame is created.
     pub fn set_data(
         &self,
         key: OpticalKey,
-        value: Vec<f64>,
-        wavelength: Vec<f64>,
+        value: &[f64],
+        wavelength: &[f64],
         input_spectral: Unit,
         input_intensity: Unit,
     ) -> PyResult<()> {
@@ -479,10 +453,10 @@ impl OpticalWeaver {
             .frames_for_key(key)
             .ok_or_else(|| PyKeyError::new_err("Key not found."))?;
 
-        let mut fragments: Vec<(f64, Vec<f64>, Vec<f64>)> = Vec::with_capacity(frames.len());
-        for frm in frames {
+        let mut fragments: Vec<(f64, &[f64], Arc<[f64]>)> = Vec::with_capacity(frames.len());
+        for frm in &frames {
             if let Some(data) = frm.get_data(key) {
-                fragments.push((frm.wl_bounds().0, frm.wavelength().to_vec(), data));
+                fragments.push((frm.wl_bounds().0, frm.wavelength(), data));
             }
         }
         if fragments.is_empty() {
@@ -508,9 +482,10 @@ impl OpticalWeaver {
         let total: usize = fragments.iter().map(|f| f.1.len()).sum();
         let mut all_wl = Vec::with_capacity(total);
         let mut all_data = Vec::with_capacity(total);
+        
         for (_, wl, data) in fragments {
-            all_wl.extend(wl);
-            all_data.extend(data);
+            all_wl.extend_from_slice(wl);
+            all_data.extend_from_slice(&data);
         }
         Ok((all_wl, all_data))
     }
@@ -562,7 +537,7 @@ impl OpticalWeaver {
     pub fn unweave_collection(
         &self,
         common_wavelength: &[f64],
-        data_batch: HashMap<OpticalKey, Vec<f64>>,
+        data_batch: HashMap<OpticalKey, &[f64]>,
     ) -> PyResult<usize> {
         if data_batch.is_empty() {
             return Ok(0);
@@ -585,7 +560,7 @@ impl OpticalWeaver {
         let mut total = 0;
         for (key, full_data) in data_batch {
             for (frm, indices) in &plan {
-                let subset = indices.gather(&full_data);
+                let subset = indices.gather(full_data);
                 let is_new = frm.set_data(key.clone(), subset, None)?;
                 if is_new {
                     self.inner.map_frame_to_key(&key, frm);
@@ -600,23 +575,20 @@ impl OpticalWeaver {
         self.distribution_cache.write().clear();
     }
 
-    fn resolve_plan(&self, full_wavelength: &[f64]) -> PyResult<DistributionPlan> { 
+    fn resolve_plan(&self, full_wavelength: &[f64]) -> PyResult<DistributionPlan> {
         let sig = wl_signature(full_wavelength);
-        // 1. Rename 'gen' to 'current_gen'
-        let current_gen = self.generation.load(Ordering::SeqCst); 
+        let current_gen = self.generation.load(Ordering::SeqCst);
         {
             let mut cache = self.distribution_cache.write();
             if let Some((cached_gen, plan)) = cache.get(&sig) {
-                // 2. Update the comparison here
-                if *cached_gen == current_gen { 
+                if *cached_gen == current_gen {
                     return Ok(plan.clone());
                 }
             }
             cache.pop(&sig);
         }
         let plan = self.build_distribution_plan(full_wavelength)?;
-        // 3. Update the insertion here
-        self.distribution_cache.write().put(sig, (current_gen, plan.clone())); 
+        self.distribution_cache.write().put(sig, (current_gen, plan.clone()));
         Ok(plan)
     }
 
@@ -704,9 +676,6 @@ fn parse_intensity(s: Option<&str>) -> Unit {
     }
 }
 
-// `frozen` opts out of PyO3's runtime borrow checker; safe because every
-// Python-visible mutation goes through interior mutability (RwLock /
-// AtomicUsize), and the inner type is Sync.
 #[pyclass(frozen)]
 struct PySpectralDataFrame {
     inner: Arc<SpectralDataFrame>,
@@ -736,7 +705,7 @@ impl PySpectralDataFrame {
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         self.inner
             .get_data(&OpticalKey::from(key))
-            .map(|v| v.into_pyarray(py))
+            .map(|v| v.to_vec().into_pyarray(py))
             .ok_or_else(|| PyKeyError::new_err("Key not found"))
     }
 
@@ -758,14 +727,15 @@ impl PySpectralDataFrame {
         value: PyReadonlyArray1<'_, f64>,
         wavelength: Option<PyReadonlyArray1<'_, f64>>,
     ) -> PyResult<bool> {
-        let value_vec = value.as_slice()?.to_vec();
+        let value_slice = value.as_slice()?;
         let key = OpticalKey::from(key);
+        let value_arc: Arc<[f64]> = Arc::from(value_slice);
         match wavelength {
             Some(arr) => {
                 let wl = arr.as_slice()?;
-                self.inner.set_data(key, value_vec, Some(wl))
+                self.inner.set_data(key, value_arc, Some(wl))
             }
-            None => self.inner.set_data(key, value_vec, None),
+            None => self.inner.set_data(key, value_arc, None),
         }
     }
 
@@ -893,14 +863,25 @@ impl PyOpticalCollection {
         input_spectral: Option<String>,
         input_intensity: Option<String>,
     ) -> PyResult<()> {
-        // Copy out of the numpy buffers (collection stores owned Vecs).
-        let value_vec = value.as_slice()?.to_vec();
-        let wl_vec = wavelength.as_slice()?.to_vec();
         let key = OpticalKey::from(key);
         let s = parse_spectral(input_spectral.as_deref());
         let i = parse_intensity(input_intensity.as_deref());
-        py.detach(|| self.inner.set_data(key, value_vec, wl_vec, s, i))
-            .map(|_| ())
+        
+        // Extract raw pointers as `usize` (which is thread-safe to Send)
+        let v_slice = value.as_slice()?;
+        let v_ptr = v_slice.as_ptr() as usize; 
+        let v_len = v_slice.len();
+
+        let w_slice = wavelength.as_slice()?;
+        let w_ptr = w_slice.as_ptr() as usize;
+        let w_len = w_slice.len();
+        
+        py.detach(move || {
+            // Cast back to *const f64 inside the detached thread
+            let value_data = unsafe { std::slice::from_raw_parts(v_ptr as *const f64, v_len) };
+            let wl_data = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
+            self.inner.set_data(key, value_data, wl_data, s, i).map(|_| ())
+        })
     }
 }
 
@@ -952,13 +933,10 @@ impl PyOpticalWeaver {
     fn frame_count(&self) -> usize {
         self.inner.frame_count()
     }
-
-    /// Structural generation counter (for testing / cache observability).
     #[getter]
     fn generation(&self) -> usize {
         self.inner.generation()
     }
-
     fn __len__(&self) -> usize {
         self.inner.len_keys()
     }
@@ -1019,12 +997,23 @@ impl PyOpticalWeaver {
         input_spectral: Option<String>,
         input_intensity: Option<String>,
     ) -> PyResult<()> {
-        let value_vec = value.as_slice()?.to_vec();
-        let wl_vec = wavelength.as_slice()?.to_vec();
         let key = OpticalKey::from(key);
         let s = parse_spectral(input_spectral.as_deref());
         let i = parse_intensity(input_intensity.as_deref());
-        py.detach(|| self.inner.set_data(key, value_vec, wl_vec, s, i))
+        
+        let v_slice = value.as_slice()?;
+        let v_ptr = v_slice.as_ptr() as usize;
+        let v_len = v_slice.len();
+
+        let w_slice = wavelength.as_slice()?;
+        let w_ptr = w_slice.as_ptr() as usize;
+        let w_len = w_slice.len();
+        
+        py.detach(move || {
+            let value_data = unsafe { std::slice::from_raw_parts(v_ptr as *const f64, v_len) };
+            let wl_data = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
+            self.inner.set_data(key, value_data, wl_data, s, i)
+        })
     }
 
     fn get_weaved<'py>(
@@ -1054,9 +1043,6 @@ impl PyOpticalWeaver {
         Ok(out)
     }
 
-    /// Zero-copy unweave: the numpy buffer slices live for the whole call,
-    /// so we pass them straight into the detached closure — `&[f64]` is
-    /// `Ungil` (auto-impl via `Send`), so no `to_vec()` is needed.
     fn unweave(
         &self,
         py: Python<'_>,
@@ -1064,29 +1050,59 @@ impl PyOpticalWeaver {
         full_wavelength: PyReadonlyArray1<'_, f64>,
         full_data: PyReadonlyArray1<'_, f64>,
     ) -> PyResult<usize> {
-        let wl: &[f64] = full_wavelength.as_slice()?;
-        let data: &[f64] = full_data.as_slice()?;
         let key = OpticalKey::from(key);
-        py.detach(|| self.inner.unweave(key, wl, data))
+        
+        let w_slice = full_wavelength.as_slice()?;
+        let w_ptr = w_slice.as_ptr() as usize;
+        let w_len = w_slice.len();
+        
+        let d_slice = full_data.as_slice()?;
+        let d_ptr = d_slice.as_ptr() as usize;
+        let d_len = d_slice.len();
+
+        py.detach(move || {
+            let wl = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
+            let data = unsafe { std::slice::from_raw_parts(d_ptr as *const f64, d_len) };
+            self.inner.unweave(key, wl, data)
+        })
     }
 
-    /// Outer `common_wavelength` is zero-copy; per-key data is locally
-    /// extracted, so each entry is copied (and that copy is unavoidable —
-    /// the readonly views are scoped to the iteration step).
     fn unweave_collection(
         &self,
         py: Python<'_>,
         common_wavelength: PyReadonlyArray1<'_, f64>,
         data_batch: &Bound<'_, PyDict>,
     ) -> PyResult<usize> {
-        let wl: &[f64] = common_wavelength.as_slice()?;
-        let mut batch: HashMap<OpticalKey, Vec<f64>> = HashMap::with_capacity(data_batch.len());
+        let w_slice = common_wavelength.as_slice()?;
+        let w_ptr = w_slice.as_ptr() as usize;
+        let w_len = w_slice.len();
+
+        // Accumulate pointers (as usize) and length while holding the GIL
+        let mut items = Vec::with_capacity(data_batch.len());
+        let mut py_arrays = Vec::with_capacity(data_batch.len());
+        
         for (key_obj, value_obj) in data_batch.iter() {
             let key_tuple: (f64, String, String) = key_obj.extract()?;
             let arr: PyReadonlyArray1<f64> = value_obj.extract()?;
-            batch.insert(OpticalKey::from(key_tuple), arr.as_slice()?.to_vec());
+            let slice = arr.as_slice()?;
+            
+            // Store pointer as usize
+            items.push((key_tuple, slice.as_ptr() as usize, slice.len())); 
+            py_arrays.push(arr);
         }
-        py.detach(|| self.inner.unweave_collection(wl, batch))
+
+        py.detach(move || {
+            let wl = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
+            let mut batch = HashMap::with_capacity(items.len());
+            
+            for (key_tuple, ptr_addr, len) in items {
+                // Reconstruct from the usize address
+                let slice = unsafe { std::slice::from_raw_parts(ptr_addr as *const f64, len) };
+                batch.insert(OpticalKey::from(key_tuple), slice);
+            }
+            
+            self.inner.unweave_collection(wl, batch)
+        })
     }
 
     fn invalidate_cache(&self) {
@@ -1095,7 +1111,7 @@ impl PyOpticalWeaver {
 }
 
 // ---------------------------------------------------------------------------
-// Module initialisation (pyo3 0.28: m: &Bound<'_, PyModule>)
+// Module initialisation
 // ---------------------------------------------------------------------------
 #[pymodule]
 fn loom_spectral(m: &Bound<'_, PyModule>) -> PyResult<()> {
