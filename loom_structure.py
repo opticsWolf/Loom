@@ -24,6 +24,7 @@ Rework notes (v2):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import warnings
 from typing import (
     Any,
@@ -41,7 +42,9 @@ from typing import (
 
 import numpy as np
 
+from loom_unispline import UniSpline
 from optical_models.ema_models import looyenga_eps
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Standardised numeric types (Numba-friendly)
@@ -50,6 +53,30 @@ FLOAT_TYPE = np.float64
 COMPLEX_TYPE = np.complex128
 INT_TYPE = np.int32
 
+
+# -------------------------------------------------------------------------
+# InterpolationSettings – groups all UniSpline configuration
+# -------------------------------------------------------------------------
+@dataclass(frozen=True)
+class InterpolationSettings:
+    """
+    Settings for UniSpline interpolation inside WeaverMaterialProvider.
+
+    Attributes
+    ----------
+    method : str
+        Interpolation method: 'linear', 'pchip', 'makima', 'sprague',
+        'floater_hormann' (or 'fh'). Default 'linear'.
+    floater_hormann_d : int
+        Degree for Floater‑Hormann interpolation (ignored for other methods).
+        Must satisfy 0 <= d < len(source_wavelength). Default 3.
+    robust : bool
+        If True, use the numerically stable barycentric form for Sprague.
+        Default False (uses naive Lagrange).
+    """
+    method: str = "linear"
+    floater_hormann_d: int = 3
+    robust: bool = False
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1.  SolverArrays — typed return container
@@ -219,6 +246,8 @@ class WeaverMaterialProvider:
         Second element used for the real-part key (default 'n').
     k_label : str
         Second element used for the imaginary-part key (default 'k').
+    interp : InterpolationSettings
+        Interpolation method and its parameters.
     """
     __slots__ = (
         "_weaver", "_target_wl", "_cache",
@@ -232,6 +261,7 @@ class WeaverMaterialProvider:
         key_prefix: float = 0.0,
         n_label: str = "n",
         k_label: str = "k",
+        interp: InterpolationSettings = InterpolationSettings(),
     ) -> None:
         self._weaver = weaver
         self._target_wl = np.asarray(target_wavelength, dtype=np.float64)
@@ -239,6 +269,7 @@ class WeaverMaterialProvider:
         self._key_prefix = key_prefix
         self._n_label = n_label
         self._k_label = k_label
+        self._interp_settings = interp
 
     def get_nk(self, material_name: str) -> np.ndarray:
         cached = self._cache.get(material_name)
@@ -290,7 +321,14 @@ class WeaverMaterialProvider:
             return src_data.astype(np.float64)
 
         # Interpolate onto target grid
-        return np.interp(self._target_wl, src_wl, src_data).astype(np.float64)
+        # Create UniSpline with the stored settings
+        spline = UniSpline(
+            src_wl, src_data,
+            method=self._interp_settings.method,
+            robust=self._interp_settings.robust,
+            d=self._interp_settings.floater_hormann_d,
+        )
+        return spline(self._target_wl).astype(np.float64)
 
 
 def wrap_material_source(source: Any, **kwargs: Any) -> MaterialProvider:

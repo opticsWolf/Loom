@@ -1,0 +1,9 @@
+layers:
+  - material_code: "L"
+    thickness_nm: 100.0
+    coherent: true
+  - material_code: "H"
+    thickness_nm: 60.0
+    coherent: true
+  - material_code: "L"
+    thickness_nm: 100.0
