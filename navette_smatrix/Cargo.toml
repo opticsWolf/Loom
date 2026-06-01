@@ -1,0 +1,19 @@
+[package]
+name = "navette-smatrix"
+version = "0.2.0"
+edition = "2024"
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "num-complex"] }
+num-complex = "0.4"
+numpy = "0.28"
+rayon = "1.10"
+
+[lib]
+name = "navette_smatrix"
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1   # added: lets LTO inline the hot inner functions fully
