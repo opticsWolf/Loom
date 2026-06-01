@@ -1,675 +1,532 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Complete test suite for Rust‑accelerated eigenmode solver.
+Test + benchmark suite for the Loom eigenmode solver.
 
-Tests:
-1. Symmetric slab waveguide (analytic TE₀ comparison)
-2. Asymmetric slab (air/Si/SiO₂)
-3. Multi‑layer stack (5 layers)
-4. Lossy material
-5. Rough interface (Névot‑Croce model)
-6. Incoherent layer (handled coherently)
-7. scan_landscape() – coarse grid generation
-8. find_local_minima() – candidate detection
-9. nelder_mead() – local refinement
-10. field_profile() – |E(z)| inside stack
+Design goals (vs. the previous harness):
+  * Physics correctness is checked through the *same* public API
+    (``LoomEigenmodeSolver.find_modes``) regardless of which backend is active,
+    so a test never silently measures the wrong code path.
+  * Backend parity: for every physical case the Rust backend and the pure
+    Python/SciPy fallback must agree on the modes they find. This is what
+    actually pins the Rust implementation to the reference.
+  * The Rust primitives (scan_landscape / find_local_minima / nelder_mead /
+    field_profile) are exercised directly and cross-checked against Python.
+  * Regression tests for the bugs fixed in the rewrite:
+        - find_local_minima must threshold on the MEDIAN, not the mean
+        - the first/last real columns must be skipped
+        - hoisting inv_n must not change results
+  * The benchmark is an honest A/B: identical solver, identical algorithm,
+    identical settings — only the backend is toggled.
 
-Speed benchmark:
-- Three test cases (simple slab, asymmetric slab, 5‑layer stack)
-- Each benchmarked at 20 wavelengths
-- Compares Rust vs pure Python runtime
+Run standalone:
+    python test_eigenmode.py                 # tests + benchmark
+    python test_eigenmode.py --no-bench      # tests only
+    python test_eigenmode.py --bench-only    # benchmark only
+    python test_eigenmode.py --scan 160 --nwav 25   # heavier benchmark
+
+Exit status is non-zero if any test fails (CI-friendly).
 """
 
+import argparse
 import sys
 import time
+
 import numpy as np
-from typing import List, Tuple, Optional
 
-# ----------------------------------------------------------------------
-# Check Rust availability
-# ----------------------------------------------------------------------
-RUST_AVAILABLE = False
-try:
-    from navette_smatrix import (
-        scan_landscape,
-        find_local_minima,
-        nelder_mead,
-        field_profile
-    )
-    RUST_AVAILABLE = True
-    print("✓ Rust module (navette_smatrix) loaded.")
-except ImportError as e:
-    print(f"⚠ Rust module not available: {e}")
-    print("  Tests requiring Rust functions will be skipped.")
+import loom_eigenmode as le
+from loom_eigenmode import LoomEigenmodeSolver
 
-# Try to import the Python eigenmode solver (for fallback and field_profile)
-try:
-    from loom_eigenmode import LoomEigenmodeSolver
-except ImportError:
-    print("⚠ Python LoomEigenmodeSolver not found. Fallback may be limited.")
-    LoomEigenmodeSolver = None
+RUST = le._RUST_PRESENT
 
-# ----------------------------------------------------------------------
-# Helper: analytic TE₀ effective index for symmetric slab
-# ----------------------------------------------------------------------
-def analytic_symmetric_slab_te0(n_core: float, n_clad: float, d_core: float, lam: float) -> float:
-    """Solve symmetric slab TE₀ dispersion equation, return n_eff (real)."""
+
+# ───────────────────────── tiny test framework ──────────────────────────────
+
+class SkipTest(Exception):
+    pass
+
+
+def skip(msg):
+    raise SkipTest(msg)
+
+
+_TESTS = []
+
+
+def test(fn):
+    _TESTS.append(fn)
+    return fn
+
+
+def approx(a, b, atol=1e-8, rtol=0.0):
+    return abs(a - b) <= atol + rtol * abs(b)
+
+
+# ───────────────────────────── helpers ──────────────────────────────────────
+
+def analytic_slab_te0(n_core, n_clad, d_core, lam):
+    """TE0 effective index of a symmetric slab via the dispersion relation."""
     k0 = 2 * np.pi / lam
-    def func(neff):
+
+    def f(neff):
         if neff <= n_clad or neff >= n_core:
             return 1e6
-        kx = k0 * np.sqrt(n_core**2 - neff**2)
-        gamma = k0 * np.sqrt(neff**2 - n_clad**2)
+        kx = k0 * np.sqrt(n_core ** 2 - neff ** 2)
+        gamma = k0 * np.sqrt(neff ** 2 - n_clad ** 2)
         return kx * d_core / 2 - np.arctan(gamma / kx)
+
     lo, hi = n_clad + 1e-6, n_core - 1e-6
-    for _ in range(100):
+    for _ in range(200):
         mid = (lo + hi) / 2
-        fmid = func(mid)
-        if abs(fmid) < 1e-9:
+        if abs(f(mid)) < 1e-12:
             return mid
-        if func(lo) * fmid < 0:
+        if f(lo) * f(mid) < 0:
             hi = mid
         else:
             lo = mid
     return (lo + hi) / 2
 
-# ----------------------------------------------------------------------
-# Pure Python reference for speed benchmark (minimal, no Numba)
-# ----------------------------------------------------------------------
-_LOG_MIN = 1e-100
-def _redheffer_py(ra_rf, ra_tb, ra_tf, ra_rb, rb_rf, rb_tb, rb_tf, rb_rb):
-    denom = 1.0 - ra_rb * rb_rf
-    if abs(denom) < _LOG_MIN:
-        phase = denom / (abs(denom) + 1e-300)
-        denom = _LOG_MIN * phase + 1e-300
-    inv = 1.0 / denom
-    s_rf = ra_rf + ra_tb * rb_rf * ra_tf * inv
-    s_tb = ra_tb * rb_tb * inv
-    s_tf = rb_tf * ra_tf * inv
-    s_rb = rb_rb + rb_tf * ra_rb * rb_tb * inv
-    return s_rf, s_tb, s_tf, s_rb
 
-def _stack_reflection_py(n_stack, d_stack, rough_types, rough_vals, lam, N_eff, pol):
-    n_layers = len(n_stack)
-    sg_rf, sg_tb, sg_tf, sg_rb = 0.0+0j, 1.0+0j, 1.0+0j, 0.0+0j
-    two_pi_lam = 2.0 * np.pi / lam
-    def _admittance(N, cos_th):
-        if pol == 0:
-            return N * cos_th
-        else:
-            if abs(cos_th) < 1e-12:
-                cos_th = 1e-12 + 0j
-            return N / cos_th
-    def _safe_cos(N):
-        val = 1.0 - (N_eff / N) ** 2
-        c = np.sqrt(val.astype(complex))
-        if c.imag < 0.0:
-            c = -c
-        return c
-    N_curr = n_stack[0]
-    cos_curr = _safe_cos(N_curr)
-    Y_curr = _admittance(N_curr, cos_curr)
-    for idx in range(n_layers - 1):
-        N_next = n_stack[idx + 1]
-        cos_next = _safe_cos(N_next)
-        Y_next = _admittance(N_next, cos_next)
-        den = Y_curr + Y_next
-        if abs(den) < _LOG_MIN:
-            den = _LOG_MIN * (1.0 + 1.0j)
-        inv_den = 1.0 / den
-        r12 = (Y_curr - Y_next) * inv_den
-        r21 = -r12
-        t12 = 2.0 * Y_curr * inv_den
-        t21 = 2.0 * Y_next * inv_den
-        sigma = rough_vals[idx + 1]
-        rtype = rough_types[idx + 1]
-        if rtype != 0 and sigma > 0:
-            kz1 = two_pi_lam * N_curr * cos_curr
-            kz2 = two_pi_lam * N_next * cos_next
-            if rtype == 5:
-                nc = np.exp(-2.0 * kz1 * kz2 * sigma * sigma)
-                r12 *= nc; r21 *= nc; t12 *= nc; t21 *= nc
-        sg_rf, sg_tb, sg_tf, sg_rb = _redheffer_py(
-            sg_rf, sg_tb, sg_tf, sg_rb, r12, t21, t12, r21
-        )
-        if idx + 1 < n_layers - 1:
-            d = d_stack[idx + 1]
-            if d > 1e-12:
-                beta = two_pi_lam * d * N_next * cos_next
-                if beta.imag < 0.0:
-                    beta = complex(beta.real, -beta.imag)
-                phi = np.exp(1j * beta)
-                sg_rb *= phi * phi
-                sg_tb *= phi
-                sg_tf *= phi
-        N_curr = N_next
-        cos_curr = cos_next
-        Y_curr = Y_next
-    return sg_rf
+def build_solver(layer_n, thick, rtypes=None, rvals=None, wavls=None):
+    """Construct a solver from per-layer (wavelength-independent) indices."""
+    wavls = np.array([1550.0]) if wavls is None else np.asarray(wavls, float)
+    n_wavs = len(wavls)
+    layer_indices = np.vstack([np.full(n_wavs, complex(n)) for n in layer_n])
+    thick = np.asarray(thick, float)
+    nl = len(layer_n)
+    rtypes = np.zeros(nl, np.int32) if rtypes is None else np.asarray(rtypes, np.int32)
+    rvals = np.zeros(nl) if rvals is None else np.asarray(rvals, float)
+    inc = np.zeros(nl, np.int32)
+    return LoomEigenmodeSolver(layer_indices, thick, inc, rtypes, rvals, wavls)
 
-def _char_func_py(N_eff, n_stack, d_stack, rough_types, rough_vals, lam, pol):
-    r = _stack_reflection_py(n_stack, d_stack, rough_types, rough_vals, lam, N_eff, pol)
-    if abs(r) < 1e-15:
-        return 1e30
-    return (1.0 / abs(r)) ** 2
 
-class PurePythonEigenSolver:
-    """Very basic eigenmode locator via brute‑force grid scan (no polishing)."""
-    def __init__(self, layer_indices, thicknesses, inc_flags, r_types, r_vals, wavls):
-        self.layer_indices = layer_indices
-        self.thicknesses = thicknesses
-        self.inc_flags = inc_flags
-        self.r_types = r_types
-        self.r_vals = r_vals
-        self.wavls = wavls
+# standard stacks (callables so the benchmark can rebuild at many wavelengths)
+N_SI, N_AIR, N_SIO2 = 3.476, 1.0, 1.444
+D_CORE = 220.0
 
-    def find_modes(self, lam_idx, pol='s', scan_points=80, char_threshold=0.1, **kwargs):
-        lam = self.wavls[lam_idx]
-        n_stk = self.layer_indices[:, lam_idx]
-        p_int = 0 if pol == 's' else 1
-        n_clad = max(np.real(n_stk[0]), np.real(n_stk[-1]))
-        n_core_max = np.max(np.real(n_stk))
-        real_min = n_clad + 1e-4
-        real_max = n_core_max - 1e-4
-        imag_min, imag_max = 0.0, 0.02
-        Nr = np.linspace(real_min, real_max, scan_points)
-        Ni = np.linspace(imag_min, imag_max, scan_points)
-        best_val = 1e30
-        best_N = None
-        for nr in Nr:
-            for ni in Ni:
-                N_eff = complex(nr, ni)
-                val = _char_func_py(N_eff, n_stk, self.thicknesses, self.r_types, self.r_vals, lam, p_int)
-                if val < best_val:
-                    best_val = val
-                    best_N = N_eff
-        if best_val < char_threshold and best_N is not None:
-            # Return dummy object with N_eff attribute
-            class Dummy:
-                pass
-            d = Dummy()
-            d.N_eff = best_N
-            return [d]
-        return []
 
-# ----------------------------------------------------------------------
-# Test cases (using Rust functions if available)
-# ----------------------------------------------------------------------
-def test_symmetric_slab():
-    print("\n" + "="*70)
-    print("TEST 1: Symmetric Si slab (air cladding) – compare TE₀ with analytic")
-    print("="*70)
-    lam = 1550.0
-    n_si, n_air, d_core = 3.476, 1.0, 220.0
-    n_wavs = 1
-    wavls = np.array([lam])
-    layer_indices = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si  + 0j),
-        np.full(n_wavs, n_air + 0j)
-    ])
-    thicknesses = np.array([0.0, d_core, 0.0])
-    inc_flags = np.zeros(3, dtype=np.int32)
-    r_types = np.zeros(3, dtype=np.int32)
-    r_vals = np.zeros(3)
+def sym_slab(wavls=None):
+    return build_solver([N_AIR, N_SI, N_AIR], [0.0, D_CORE, 0.0], wavls=wavls)
 
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        solver = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavls)
-        modes = solver.find_modes(lam_idx=0, pol='s', scan_points=120, char_threshold=0.1)
-        if modes:
-            neff_rust = modes[0].N_eff.real
-            neff_ana = analytic_symmetric_slab_te0(n_si, n_air, d_core, lam)
-            print(f"  Rust n_eff      = {neff_rust:.6f}")
-            print(f"  Analytic n_eff  = {neff_ana:.6f}")
-            print(f"  Difference      = {abs(neff_rust - neff_ana):.2e}")
-            assert abs(neff_rust - neff_ana) < 1e-5, "TE₀ mode mismatch"
-            return True
-        else:
-            print("  No mode found – test failed")
-            return False
-    else:
-        print("  SKIP: Rust solver not available")
-        return False
 
-def test_asymmetric_slab():
-    print("\n" + "="*70)
-    print("TEST 2: Asymmetric slab (air / Si / SiO₂)")
-    print("="*70)
-    lam = 1550.0
-    n_si, n_air, n_sio2, d_core = 3.476, 1.0, 1.444, 220.0
-    n_wavs = 1
-    wavls = np.array([lam])
-    layer_indices = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si + 0j),
-        np.full(n_wavs, n_sio2 + 0j)
-    ])
-    thicknesses = np.array([0.0, d_core, 0.0])
-    inc_flags = np.zeros(3, dtype=np.int32)
-    r_types = np.zeros(3, dtype=np.int32)
-    r_vals = np.zeros(3)
+def asym_slab(wavls=None):
+    return build_solver([N_AIR, N_SI, N_SIO2], [0.0, D_CORE, 0.0], wavls=wavls)
 
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        solver = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavls)
-        modes = solver.find_modes(lam_idx=0, pol='both', scan_points=120, char_threshold=0.1)
-        print(f"  Found {len(modes)} mode(s):")
-        for m in modes:
-            print(f"    {m}")
-        assert len(modes) >= 1, "Asymmetric slab should have at least one mode"
-        return True
-    else:
-        print("  SKIP: Rust solver not available")
-        return False
 
-def test_multilayer():
-    print("\n" + "="*70)
-    print("TEST 3: 5‑layer stack (air / Si / SiO₂ / Si / air)")
-    print("="*70)
-    lam = 1550.0
-    n_si, n_sio2, n_air = 3.476, 1.444, 1.0
-    d_si, d_sio2 = 100.0, 200.0
-    n_wavs = 1
-    wavls = np.array([lam])
-    layer_indices = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si + 0j),
-        np.full(n_wavs, n_sio2 + 0j),
-        np.full(n_wavs, n_si + 0j),
-        np.full(n_wavs, n_air + 0j)
-    ])
-    thicknesses = np.array([0.0, d_si, d_sio2, d_si, 0.0])
-    inc_flags = np.zeros(5, dtype=np.int32)
-    r_types = np.zeros(5, dtype=np.int32)
-    r_vals = np.zeros(5)
+def five_layer(wavls=None):
+    return build_solver([N_AIR, N_SI, N_SIO2, N_SI, N_AIR],
+                        [0.0, 100.0, 200.0, 100.0, 0.0], wavls=wavls)
 
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        solver = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavls)
-        modes = solver.find_modes(lam_idx=0, pol='s', scan_points=120, char_threshold=0.1)
-        print(f"  Found {len(modes)} s‑polarised mode(s).")
-        assert isinstance(modes, list)
-        return True
-    else:
-        print("  SKIP: Rust solver not available")
-        return False
 
-def test_lossy_material():
-    print("\n" + "="*70)
-    print("TEST 4: Lossy Si slab (n = 3.476 + 0.001j)")
-    print("="*70)
-    lam = 1550.0
-    n_si = 3.476 + 0.001j
-    n_air, d_core = 1.0, 220.0
-    n_wavs = 1
-    wavls = np.array([lam])
-    layer_indices = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si),
-        np.full(n_wavs, n_air + 0j)
-    ])
-    thicknesses = np.array([0.0, d_core, 0.0])
-    inc_flags = np.zeros(3, dtype=np.int32)
-    r_types = np.zeros(3, dtype=np.int32)
-    r_vals = np.zeros(3)
+def lossy_slab(wavls=None):
+    return build_solver([N_AIR, N_SI + 0.001j, N_AIR], [0.0, D_CORE, 0.0], wavls=wavls)
 
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        solver = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavls)
-        modes = solver.find_modes(lam_idx=0, pol='s', scan_points=120, char_threshold=0.1)
-        if modes:
-            print(f"  Mode: {modes[0]}")
-            print(f"  Im(N_eff) = {modes[0].N_eff.imag:.4e} (should be >0)")
-            assert modes[0].N_eff.imag > 0, "Lossy material should give Im(N_eff) > 0"
-            return True
-        else:
-            print("  No mode found – test inconclusive")
-            return False
-    else:
-        print("  SKIP: Rust solver not available")
-        return False
 
-def test_rough_interface():
-    print("\n" + "="*70)
-    print("TEST 5: Rough interface (Névot‑Croce, σ = 2 nm)")
-    print("="*70)
-    lam = 1550.0
-    n_si, n_air, d_core = 3.476, 1.0, 220.0
-    sigma = 2.0
-    n_wavs = 1
-    wavls = np.array([lam])
-    layer_indices = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si + 0j),
-        np.full(n_wavs, n_air + 0j)
-    ])
-    thicknesses = np.array([0.0, d_core, 0.0])
-    inc_flags = np.zeros(3, dtype=np.int32)
-    r_types = np.array([0, 5, 0], dtype=np.int32)
-    r_vals = np.array([0.0, sigma, 0.0])
+def rough_slab(wavls=None):
+    # Névot–Croce (type 5), σ = 2 nm on both core interfaces (indices 1 and 2).
+    return build_solver([N_AIR, N_SI, N_AIR], [0.0, D_CORE, 0.0],
+                        rtypes=[0, 5, 5], rvals=[0.0, 2.0, 2.0], wavls=wavls)
 
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        solver_rough = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavls)
-        modes_rough = solver_rough.find_modes(lam_idx=0, pol='s', scan_points=120, char_threshold=0.1)
-        r_types_smooth = np.zeros(3, dtype=np.int32)
-        r_vals_smooth = np.zeros(3)
-        solver_smooth = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types_smooth, r_vals_smooth, wavls)
-        modes_smooth = solver_smooth.find_modes(lam_idx=0, pol='s', scan_points=120, char_threshold=0.1)
-        if modes_rough and modes_smooth:
-            n_rough = modes_rough[0].N_eff
-            n_smooth = modes_smooth[0].N_eff
-            print(f"  Smooth:        N_eff = {n_smooth.real:.6f}{n_smooth.imag:+.2e}j")
-            print(f"  Rough (σ=2nm): N_eff = {n_rough.real:.6f}{n_rough.imag:+.2e}j")
-            assert n_rough.imag >= n_smooth.imag - 1e-8, "Roughness should increase imaginary part"
-            return True
-        else:
-            print("  Mode not found in one case – test incomplete")
-            return False
-    else:
-        print("  SKIP: Rust solver not available")
-        return False
 
-def test_incoherent_layer():
-    print("\n" + "="*70)
-    print("TEST 6: Incoherent layer (flag=1) – still finds modes coherently")
-    print("="*70)
-    lam = 1550.0
-    n_si, n_sio2, n_air = 3.476, 1.444, 1.0
-    d_si, d_sio2 = 220.0, 500.0
-    n_wavs = 1
-    wavls = np.array([lam])
-    layer_indices = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si + 0j),
-        np.full(n_wavs, n_sio2 + 0j),
-        np.full(n_wavs, n_air + 0j)
-    ])
-    thicknesses = np.array([0.0, d_si, d_sio2, 0.0])
-    inc_flags = np.array([0, 0, 1, 0], dtype=np.int32)
-    r_types = np.zeros(4, dtype=np.int32)
-    r_vals = np.zeros(4)
+def find_both_backends(factory, **kw):
+    """Return (python_modes, rust_modes) for the same stack/settings."""
+    le.use_rust_backend(False)
+    py = factory().find_modes(**kw)
+    le.use_rust_backend(True)
+    rs = factory().find_modes(**kw)
+    return py, rs
 
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        solver = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavls)
-        modes = solver.find_modes(lam_idx=0, pol='both', scan_points=100, char_threshold=0.1)
-        print(f"  Found {len(modes)} mode(s) despite incoherent flag.")
-        assert isinstance(modes, list)
-        return True
-    else:
-        print("  SKIP: Rust solver not available")
-        return False
 
-def test_scan_landscape():
-    print("\n" + "="*70)
-    print("TEST 7: scan_landscape() – coarse grid generation")
-    print("="*70)
-    if not RUST_AVAILABLE:
-        print("  SKIP: Rust navette_smatrix not available")
-        return False
-    lam = 1550.0
-    n_si, n_air, d_core = 3.476, 1.0, 220.0
-    n_stack = np.array([n_air + 0j, n_si + 0j, n_air + 0j])
-    thicknesses = np.array([0.0, d_core, 0.0])
-    r_types = np.zeros(3, dtype=np.int32)
-    r_vals = np.zeros(3)
-    pol = 0  # s-polarisation
-    real_min, real_max = n_air + 1e-4, n_si - 1e-4
-    imag_min, imag_max = 0.0, 0.02
-    points_real, points_imag = 10, 8
-    result = scan_landscape(
-        n_stack, thicknesses, r_types, r_vals,
-        lam, pol, real_min, real_max, imag_min, imag_max, points_real, points_imag
-    )
-    # result is (real_vals, imag_vals, landscape_array)
-    real_vals, imag_vals, land_arr = result
-    print(f"  Real grid shape: {len(real_vals)}, Imag grid shape: {len(imag_vals)}")
-    print(f"  Landscape array shape: {land_arr.shape}")
-    assert len(real_vals) == points_real
-    assert len(imag_vals) == points_imag
-    assert land_arr.shape == (points_imag, points_real)
-    print("  ✓ scan_landscape works")
-    return True
+def assert_modes_match(py, rs, atol=1e-4):
+    assert len(py) == len(rs), f"mode count differs: py={len(py)} rs={len(rs)}"
+    for a, b in zip(py, rs):
+        d = abs(a.N_eff - b.N_eff)
+        assert d < atol, f"N_eff differs by {d:.2e}: py={a.N_eff} rs={b.N_eff}"
 
-def test_find_local_minima():
-    print("\n" + "="*70)
-    print("TEST 8: find_local_minima() – candidate detection")
-    print("="*70)
-    if not RUST_AVAILABLE:
-        print("  SKIP: Rust navette_smatrix not available")
-        return False
-    # Create a simple 2D array with a known minimum
-    real_vals = np.linspace(1.4, 1.5, 5)
-    imag_vals = np.linspace(0.0, 0.02, 4)
-    landscape = np.zeros((len(imag_vals), len(real_vals)))
-    # Put a deep minimum at (2,2) in indices
-    landscape[2, 2] = 0.01
-    # Surrounding values higher
-    for i in range(landscape.shape[0]):
-        for j in range(landscape.shape[1]):
-            if (i, j) != (2, 2):
-                landscape[i, j] = 0.1
-    median_factor = 0.5  # threshold = median * 0.5
-    candidates = find_local_minima(landscape, real_vals, imag_vals, median_factor)
-    print(f"  Found candidates: {candidates}")
-    # We expect one candidate at (real_vals[2], imag_vals[2])
-    expected = (real_vals[2], imag_vals[2])
-    assert len(candidates) == 1
-    assert abs(candidates[0][0] - expected[0]) < 1e-6
-    assert abs(candidates[0][1] - expected[1]) < 1e-6
-    print("  ✓ find_local_minima works")
-    return True
 
-def test_nelder_mead():
-    print("\n" + "="*70)
-    print("TEST 9: nelder_mead() – local refinement")
-    print("="*70)
-    if not RUST_AVAILABLE:
-        print("  SKIP: Rust navette_smatrix not available")
-        return False
-    lam = 1550.0
-    n_si, n_air, d_core = 3.476, 1.0, 220.0
-    n_stack = np.array([n_air + 0j, n_si + 0j, n_air + 0j])
-    thicknesses = np.array([0.0, d_core, 0.0])
-    r_types = np.zeros(3, dtype=np.int32)
-    r_vals = np.zeros(3)
-    pol = 0
-    # Start from a guess near the true TE₀ effective index
-    neff_ana = analytic_symmetric_slab_te0(n_si, n_air, d_core, lam)
-    x0 = (neff_ana + 0.001, 0.001)
-    step = 0.001
-    tol = 1e-8
-    max_iter = 2000
-    result = nelder_mead(n_stack, thicknesses, r_types, r_vals, lam, pol, x0, step, tol, max_iter)
-    n_eff_opt = complex(result[0], result[1])
-    final_val = result[2]
-    print(f"  Analytic n_eff: {neff_ana:.6f}")
-    print(f"  Optimised n_eff: {n_eff_opt.real:.6f}{n_eff_opt.imag:+.2e}j")
-    print(f"  Final char value: {final_val:.4e}")
-    assert abs(n_eff_opt.real - neff_ana) < 1e-5
-    assert final_val < 1e-6
-    print("  ✓ nelder_mead works")
-    return True
+# ─────────────────────── backend-agnostic physics ───────────────────────────
 
-def test_field_profile():
-    print("\n" + "="*70)
-    print("TEST 10: field_profile() – electric field inside stack")
-    print("="*70)
-    if not RUST_AVAILABLE:
-        print("  SKIP: Rust navette_smatrix not available")
-        return False
-    lam = 1550.0
-    n_si, n_air, d_core = 3.476, 1.0, 220.0
-    n_stack = np.array([n_air + 0j, n_si + 0j, n_air + 0j])
-    thicknesses = np.array([0.0, d_core, 0.0])
-    r_types = np.zeros(3, dtype=np.int32)
-    r_vals = np.zeros(3)
-    pol = 0
-    # First find a mode using nelder_mead
-    neff_ana = analytic_symmetric_slab_te0(n_si, n_air, d_core, lam)
-    # Run minimisation to get accurate N_eff
-    x0 = (neff_ana, 0.0)
-    step = 0.001
-    tol = 1e-9
-    max_iter = 2000
-    res = nelder_mead(n_stack, thicknesses, r_types, r_vals, lam, pol, x0, step, tol, max_iter)
-    N_eff = complex(res[0], res[1])
-    points_per_layer = 50
-    result = field_profile(n_stack, thicknesses, r_types, r_vals, lam, N_eff, pol, points_per_layer)
-    z, e_mag, layer_start, layer_end, layer_n = result
-    print(f"  Field computed at {len(z)} points over total thickness {z[-1]:.1f} nm")
-    print(f"  Max |E| = {max(e_mag):.3f} (normalised to 1 expected)")
-    assert len(z) > 0
+@test
+def test_backend_toggle_is_consistent():
+    """use_rust_backend reports the truth; can't force-on a missing extension."""
+    assert le.use_rust_backend(False) is False
+    forced = le.use_rust_backend(True)
+    assert forced == RUST, "force-on result must match extension presence"
+    assert le.rust_backend_available() == forced
+
+
+@test
+def test_symmetric_slab_matches_analytic():
+    """TE0 of the symmetric Si slab must match the analytic dispersion root."""
+    ana = analytic_slab_te0(N_SI, N_AIR, D_CORE, 1550.0)
+    modes = sym_slab().find_modes(lam_idx=0, pol='s', scan_points=120,
+                                  char_threshold=0.1, compute_group_index=False)
+    assert modes, "no TE mode found"
+    assert approx(modes[0].N_eff.real, ana, atol=1e-5), \
+        f"n_eff={modes[0].N_eff.real:.6f} vs analytic {ana:.6f}"
+
+
+@test
+def test_asymmetric_slab_finds_modes():
+    modes = asym_slab().find_modes(lam_idx=0, pol='both', scan_points=120,
+                                   char_threshold=0.1, compute_group_index=False)
+    assert modes, "expected at least one guided mode"
+    for m in modes:
+        assert N_SIO2 < m.N_eff.real < N_SI, \
+            f"n_eff {m.N_eff.real:.4f} outside cladding/core window"
+
+
+@test
+def test_multilayer_finds_modes():
+    modes = five_layer().find_modes(lam_idx=0, pol='s', scan_points=140,
+                                    char_threshold=0.1, compute_group_index=False)
+    assert modes, "expected guided modes in the 5-layer stack"
+
+
+@test
+def test_lossy_material_has_positive_imag():
+    modes = lossy_slab().find_modes(lam_idx=0, pol='s', scan_points=120,
+                                    char_threshold=0.2, compute_group_index=False)
+    assert modes, "no mode found in lossy slab"
+    assert modes[0].N_eff.imag > 1e-6, \
+        f"lossy mode should have Im(N_eff)>0, got {modes[0].N_eff.imag:.2e}"
+    assert modes[0].loss_dB_per_unit > 0
+
+
+@test
+def test_roughness_perturbs_index_slightly():
+    smooth = sym_slab().find_modes(lam_idx=0, pol='s', scan_points=120,
+                                   char_threshold=0.1, compute_group_index=False)
+    rough = rough_slab().find_modes(lam_idx=0, pol='s', scan_points=120,
+                                    char_threshold=0.1, compute_group_index=False)
+    assert smooth and rough, "both smooth and rough must find a mode"
+    shift = smooth[0].N_eff.real - rough[0].N_eff.real
+    assert 0.0 < shift < 1e-2, f"unexpected roughness shift: {shift:.2e}"
+
+
+@test
+def test_field_profile_normalised_and_monotonic():
+    m = sym_slab().find_modes(lam_idx=0, pol='s', scan_points=120,
+                              char_threshold=0.1, compute_group_index=False)[0]
+    assert len(m.z) > 1
+    assert np.all(np.diff(m.z) >= 0), "z grid must be non-decreasing"
+    assert approx(float(np.max(m.E_profile)), 1.0, atol=1e-6), "max|E| must be 1"
+    assert np.all(m.E_profile >= 0)
+    assert m.layer_bounds, "layer_bounds must be populated"
+
+
+@test
+def test_char_value_below_threshold_for_real_mode():
+    thr = 0.05
+    modes = sym_slab().find_modes(lam_idx=0, pol='s', scan_points=120,
+                                  char_threshold=thr, compute_group_index=False)
+    assert modes
+    assert modes[0].char_value < thr, \
+        f"converged char value {modes[0].char_value:.2e} should be < {thr}"
+
+
+@test
+def test_incoherent_flags_are_ignored_by_mode_solver():
+    """The eigenmode solver works per coherent block; inc flags must not matter."""
+    s0 = sym_slab()
+    s1 = build_solver([N_AIR, N_SI, N_AIR], [0.0, D_CORE, 0.0])
+    s1.inc_flags = np.array([0, 1, 0])  # flag the core incoherent
+    kw = dict(lam_idx=0, pol='s', scan_points=120, char_threshold=0.1,
+              compute_group_index=False)
+    m0 = s0.find_modes(**kw)
+    m1 = s1.find_modes(**kw)
+    assert len(m0) == len(m1)
+    assert approx(m0[0].N_eff.real, m1[0].N_eff.real, atol=1e-9)
+
+
+@test
+def test_no_guiding_returns_empty():
+    """Core index below cladding ⇒ no guided modes, graceful empty list."""
+    import warnings
+    s = build_solver([1.5, 1.4, 1.5], [0.0, 200.0, 0.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        modes = s.find_modes(lam_idx=0, pol='s', compute_group_index=False)
+    assert modes == []
+
+
+@test
+def test_group_index_computed_with_multiple_wavelengths():
+    wavls = np.linspace(1500.0, 1600.0, 11)
+    s = sym_slab(wavls=wavls)
+    lam_idx = int(np.argmin(np.abs(wavls - 1550.0)))
+    modes = s.find_modes(lam_idx=lam_idx, pol='s', scan_points=120,
+                         char_threshold=0.1, compute_group_index=True,
+                         delta_lam_nm=5.0)
+    assert modes
+    assert modes[0].n_group is not None, "group index should be available"
+    assert np.isfinite(modes[0].n_group)
+
+
+# ───────────────────── Rust ↔ Python backend parity ─────────────────────────
+
+def _parity(factory, **kw):
+    if not RUST:
+        skip("Rust extension not compiled")
+    py, rs = find_both_backends(factory, **kw)
+    assert py, "Python fallback found no modes (test stack is wrong)"
+    assert_modes_match(py, rs)
+
+
+@test
+def test_parity_symmetric():
+    _parity(sym_slab, lam_idx=0, pol='both', scan_points=120,
+            char_threshold=0.1, compute_group_index=False)
+
+
+@test
+def test_parity_asymmetric():
+    _parity(asym_slab, lam_idx=0, pol='both', scan_points=120,
+            char_threshold=0.1, compute_group_index=False)
+
+
+@test
+def test_parity_multilayer():
+    _parity(five_layer, lam_idx=0, pol='s', scan_points=140,
+            char_threshold=0.1, compute_group_index=False)
+
+
+@test
+def test_parity_lossy():
+    _parity(lossy_slab, lam_idx=0, pol='s', scan_points=120,
+            char_threshold=0.2, compute_group_index=False)
+
+
+@test
+def test_parity_rough():
+    _parity(rough_slab, lam_idx=0, pol='s', scan_points=120,
+            char_threshold=0.1, compute_group_index=False)
+
+
+# ───────────────────────── Rust primitives ──────────────────────────────────
+
+def _rust_prims():
+    from navette_smatrix import (scan_landscape, find_local_minima,
+                                 nelder_mead, field_profile)
+    return scan_landscape, find_local_minima, nelder_mead, field_profile
+
+
+@test
+def test_prim_scan_matches_python_charfunc():
+    """Rust scan_landscape values must equal Python _char_func evaluations."""
+    if not RUST:
+        skip("Rust extension not compiled")
+    scan_landscape, *_ = _rust_prims()
+    n = np.ascontiguousarray([N_AIR + 0j, N_SI + 0j, N_AIR + 0j])
+    th = np.array([0.0, D_CORE, 0.0])
+    rt = np.zeros(3, np.int32)
+    rv = np.zeros(3)
+    rmin, rmax, imin, imax, pr, pi = 1.0001, 3.4759, 0.0, 0.02, 12, 10
+    Nr, Ni, land = scan_landscape(n, th, rt, rv, 1550.0, 0,
+                                  rmin, rmax, imin, imax, pr, pi)
+    land = np.asarray(land)
+    assert land.shape == (pi, pr)
+    # Compare a handful of cells to the Python characteristic function.
+    args = (n, th, rt.astype(int), rv, 1550.0, 0)
+    for i in (0, pi // 2, pi - 1):
+        for j in (0, pr // 2, pr - 1):
+            ref = le._char_func_xy([Nr[j], Ni[i]], *args)
+            assert approx(land[i, j], ref, rtol=1e-9, atol=1e-12), \
+                f"scan[{i},{j}]={land[i, j]:.6e} vs python {ref:.6e}"
+
+
+@test
+def test_prim_find_minima_uses_median_not_mean():
+    """
+    Regression: the threshold is the MEDIAN scaled by median_factor.
+
+    Construct a landscape whose mean is wrecked by a few sentinel cells.
+      * deep genuine well  (value 1e-3) -> below median -> accepted
+      * shallow dip         (value 0.7) -> above median (~0.5) -> REJECTED,
+        even though it sits far below the mean.
+    A mean-based threshold would wrongly accept the shallow dip.
+    """
+    nimag, nreal = 9, 9
+    Nr = np.linspace(2.0, 3.0, nreal)
+    Ni = np.linspace(0.0, 0.02, nimag)
+    land = np.full((nimag, nreal), 0.5)
+    land[4, 4] = 1e-3                 # deep well (interior)
+    land[1:4, 5:8] = 1.0             # plateau so the dip is a strict local min
+    land[2, 6] = 0.7                 # shallow dip (interior)
+    land[0, 0] = land[0, 1] = land[8, 8] = 1e30  # sentinels inflate the mean
+
+    well = (round(Nr[4], 9), round(Ni[4], 9))
+    dip = (round(Nr[6], 9), round(Ni[2], 9))
+
+    le.use_rust_backend(False)
+    py = {(round(r, 9), round(i, 9)) for r, i in
+          le._find_local_minima_backend(land, Nr, Ni)}
+    assert well in py, "deep well must be detected (median path)"
+    assert dip not in py, "shallow dip must be rejected by median threshold"
+
+    if RUST:
+        _, find_local_minima, *_ = _rust_prims()
+        rs = {(round(r, 9), round(i, 9)) for r, i in
+              find_local_minima(np.ascontiguousarray(land, float), Nr, Ni, 1.0)}
+        assert rs == py, f"Rust minima {rs} != Python {py}"
+
+
+@test
+def test_prim_find_minima_skips_edge_columns():
+    """A minimum sitting in the first/last real column must not be reported."""
+    nimag, nreal = 9, 9
+    Nr = np.linspace(2.0, 3.0, nreal)
+    Ni = np.linspace(0.0, 0.02, nimag)
+    land = np.full((nimag, nreal), 0.5)
+    land[4, 0] = 1e-4           # well in the first column (should be skipped)
+    land[5, nreal - 1] = 1e-4   # well in the last column (should be skipped)
+
+    le.use_rust_backend(False)
+    cands = le._find_local_minima_backend(land, Nr, Ni)
+    reals = {round(r, 9) for r, _ in cands}
+    assert round(Nr[0], 9) not in reals
+    assert round(Nr[-1], 9) not in reals
+
+    if RUST:
+        _, find_local_minima, *_ = _rust_prims()
+        rc = find_local_minima(np.ascontiguousarray(land, float), Nr, Ni, 1.0)
+        rreals = {round(r, 9) for r, _ in rc}
+        assert round(Nr[0], 9) not in rreals
+        assert round(Nr[-1], 9) not in rreals
+
+
+@test
+def test_prim_nelder_mead_matches_scipy():
+    """Rust Nelder–Mead and SciPy must converge to the same minimum."""
+    if not RUST:
+        skip("Rust extension not compiled")
+    *_, nelder_mead, _ = _rust_prims()
+    n = np.ascontiguousarray([N_AIR + 0j, N_SI + 0j, N_AIR + 0j])
+    th = np.array([0.0, D_CORE, 0.0])
+    rt = np.zeros(3, np.int32)
+    rv = np.zeros(3)
+    ana = analytic_slab_te0(N_SI, N_AIR, D_CORE, 1550.0)
+    x0 = (ana + 1e-3, 1e-3)
+    xr, xi, cv = nelder_mead(n, th, rt, rv, 1550.0, 0, x0, 1e-3, 1e-9, 2000)
+    assert approx(xr, ana, atol=1e-5), f"rust n_eff {xr:.6f} vs analytic {ana:.6f}"
+    assert cv < 1e-6, f"char value not minimised: {cv:.2e}"
+    # cross-check against the SciPy fallback from the identical seed
+    le.use_rust_backend(False)
+    pr, pi, pcv = le._polish_backend(
+        [N_AIR + 0j, N_SI + 0j, N_AIR + 0j], th, np.zeros(3, int), rv,
+        1550.0, 0, x0, 1e-3, 1e-9, 5000)
+    assert approx(xr, pr, atol=1e-4), f"rust {xr:.6f} vs scipy {pr:.6f}"
+
+
+@test
+def test_prim_field_profile():
+    if not RUST:
+        skip("Rust extension not compiled")
+    *_, nelder_mead, field_profile = _rust_prims()
+    n = np.ascontiguousarray([N_AIR + 0j, N_SI + 0j, N_AIR + 0j])
+    th = np.array([0.0, D_CORE, 0.0])
+    rt = np.zeros(3, np.int32)
+    rv = np.zeros(3)
+    ana = analytic_slab_te0(N_SI, N_AIR, D_CORE, 1550.0)
+    xr, xi, _ = nelder_mead(n, th, rt, rv, 1550.0, 0, (ana, 0.0), 1e-3, 1e-9, 2000)
+    z, e_mag, lstart, lend, ln = field_profile(
+        n, th, rt, rv, 1550.0, complex(xr, xi), 0, 50)
+    z = np.asarray(z, float)
+    e_mag = np.asarray(e_mag, float)
+    assert len(z) > 0 and len(z) == len(e_mag)
     assert np.max(e_mag) <= 1.0 + 1e-6
-    assert len(layer_start) == len(layer_end) == len(layer_n)
-    print("  ✓ field_profile works")
-    return True
+    assert len(lstart) == len(lend) == len(ln)
 
-# ----------------------------------------------------------------------
-# Speed benchmark: compares Rust vs pure Python on multiple cases
-# ----------------------------------------------------------------------
-def benchmark_case(name, layer_indices, thicknesses, inc_flags, r_types, r_vals,
-                   wavelengths, scan_points=80, repeat=2):
-    print(f"\nBenchmark: {name}")
-    n_wavs = len(wavelengths)
-    results = {}
-    # Rust solver
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        solver_rust = LoomEigenmodeSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavelengths)
-        t0 = time.perf_counter()
-        for _ in range(repeat):
-            for i in range(n_wavs):
-                solver_rust.find_modes(lam_idx=i, pol='s', scan_points=scan_points, char_threshold=0.1,
-                                       compute_group_index=False)
-        t1 = time.perf_counter()
-        rust_time = (t1 - t0) / repeat
-        results['Rust'] = rust_time
-        print(f"  Rust:      {rust_time:.3f} s total")
-    else:
-        print("  Rust solver not available – skipping")
-    # Pure Python solver
-    py_solver = PurePythonEigenSolver(layer_indices, thicknesses, inc_flags, r_types, r_vals, wavelengths)
+
+# ─────────────────────────── test runner ────────────────────────────────────
+
+def run_tests():
+    print("=" * 70)
+    print(f"EIGENMODE TEST SUITE   (Rust backend {'PRESENT' if RUST else 'ABSENT'})")
+    print("=" * 70)
+    npass = nfail = nskip = 0
+    for fn in _TESTS:
+        name = fn.__name__
+        try:
+            fn()
+        except SkipTest as e:
+            nskip += 1
+            print(f"  SKIP  {name}  ({e})")
+        except AssertionError as e:
+            nfail += 1
+            print(f"  FAIL  {name}  -> {e}")
+        except Exception as e:  # noqa: BLE001
+            nfail += 1
+            print(f"  ERROR {name}  -> {type(e).__name__}: {e}")
+        else:
+            npass += 1
+            print(f"  PASS  {name}")
+        finally:
+            le.use_rust_backend(RUST)  # restore default between tests
+    print("-" * 70)
+    print(f"  {npass} passed, {nfail} failed, {nskip} skipped "
+          f"(of {len(_TESTS)})")
+    return nfail == 0
+
+
+# ──────────────────────────── benchmark ─────────────────────────────────────
+
+def _time_solver(factory, wavls, scan_points, repeat):
+    s = factory(wavls=wavls)
+    # warm-up (thread pool spin-up etc.), result discarded
+    s.find_modes(lam_idx=0, pol='s', scan_points=scan_points,
+                 char_threshold=0.1, compute_group_index=False)
     t0 = time.perf_counter()
     for _ in range(repeat):
-        for i in range(n_wavs):
-            py_solver.find_modes(lam_idx=i, pol='s', scan_points=scan_points, char_threshold=0.1)
-    t1 = time.perf_counter()
-    py_time = (t1 - t0) / repeat
-    results['Pure Python'] = py_time
-    print(f"  Pure Python: {py_time:.3f} s total")
-    if 'Rust' in results:
-        speedup = py_time / rust_time
-        print(f"  Speedup:   {speedup:.1f}x")
-        results['speedup'] = speedup
-    return results
+        for i in range(len(wavls)):
+            s.find_modes(lam_idx=i, pol='s', scan_points=scan_points,
+                         char_threshold=0.1, compute_group_index=False)
+    return (time.perf_counter() - t0) / repeat
 
-def run_benchmarks():
-    print("\n" + "="*70)
-    print("SPEED BENCHMARK (multiple waveguide cases)")
-    print("="*70)
-    wavelengths = np.linspace(1400, 1700, 20)  # 20 wavelengths
-    scan_points = 80
-    results = {}
-    # Case 1: Symmetric Si slab (air cladding)
-    n_si = 3.476
-    n_air = 1.0
-    d_core = 220.0
-    n_wavs = len(wavelengths)
-    layer_indices_slab = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si  + 0j),
-        np.full(n_wavs, n_air + 0j)
-    ])
-    thicknesses_slab = np.array([0.0, d_core, 0.0])
-    inc_flags = np.zeros(3, dtype=np.int32)
-    r_types = np.zeros(3, dtype=np.int32)
-    r_vals = np.zeros(3)
-    results['Symmetric slab'] = benchmark_case(
-        "Symmetric slab (air/Si/air)",
-        layer_indices_slab, thicknesses_slab, inc_flags, r_types, r_vals,
-        wavelengths, scan_points, repeat=2
-    )
-    # Case 2: Asymmetric slab (air/Si/SiO₂)
-    n_sio2 = 1.444
-    layer_indices_asym = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si  + 0j),
-        np.full(n_wavs, n_sio2 + 0j)
-    ])
-    thicknesses_asym = np.array([0.0, d_core, 0.0])
-    results['Asymmetric slab'] = benchmark_case(
-        "Asymmetric slab (air/Si/SiO₂)",
-        layer_indices_asym, thicknesses_asym, inc_flags, r_types, r_vals,
-        wavelengths, scan_points, repeat=2
-    )
-    # Case 3: 5‑layer stack (air/Si/SiO₂/Si/air)
-    d_si = 100.0
-    d_sio2 = 200.0
-    layer_indices_5l = np.vstack([
-        np.full(n_wavs, n_air + 0j),
-        np.full(n_wavs, n_si  + 0j),
-        np.full(n_wavs, n_sio2 + 0j),
-        np.full(n_wavs, n_si  + 0j),
-        np.full(n_wavs, n_air + 0j)
-    ])
-    thicknesses_5l = np.array([0.0, d_si, d_sio2, d_si, 0.0])
-    inc_flags_5l = np.zeros(5, dtype=np.int32)
-    r_types_5l = np.zeros(5, dtype=np.int32)
-    r_vals_5l = np.zeros(5)
-    results['5‑layer stack'] = benchmark_case(
-        "5‑layer (air/Si/SiO₂/Si/air)",
-        layer_indices_5l, thicknesses_5l, inc_flags_5l, r_types_5l, r_vals_5l,
-        wavelengths, scan_points, repeat=2
-    )
-    return results
 
-# ----------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------
-def main():
-    print("\n" + "#"*70)
-    print("# COMPLETE EIGENMODE TEST SUITE (Rust backend)")
-    print("#"*70)
-    if not RUST_AVAILABLE:
-        print("\n⚠ Running without Rust module – many tests will be skipped.")
-        print("  To enable Rust, compile the module and ensure navette_smatrix is importable.\n")
-    else:
-        print("\n✓ Using Rust-accelerated backend.\n")
+def run_benchmark(scan_points=120, n_wav=20, repeat=2):
+    print("\n" + "=" * 70)
+    print("HONEST BENCHMARK  (same solver / same algorithm, backend toggled)")
+    print(f"  scan_points={scan_points}, wavelengths={n_wav}, repeat={repeat}")
+    print("=" * 70)
+    wavls = np.linspace(1400.0, 1700.0, n_wav)
+    cases = [("Symmetric slab (air/Si/air)", sym_slab),
+             ("Asymmetric slab (air/Si/SiO2)", asym_slab),
+             ("5-layer (air/Si/SiO2/Si/air)", five_layer)]
 
-    tests = [
-        ("Symmetric slab", test_symmetric_slab),
-        ("Asymmetric slab", test_asymmetric_slab),
-        ("Multilayer", test_multilayer),
-        ("Lossy material", test_lossy_material),
-        ("Rough interface", test_rough_interface),
-        ("Incoherent layer", test_incoherent_layer),
-        ("scan_landscape", test_scan_landscape),
-        ("find_local_minima", test_find_local_minima),
-        ("nelder_mead", test_nelder_mead),
-        ("field_profile", test_field_profile),
-    ]
-    passed = 0
-    for name, test_func in tests:
-        try:
-            if test_func():
-                passed += 1
-        except Exception as e:
-            print(f"  ✗ {name} failed: {e}")
+    for name, factory in cases:
+        print(f"\n{name}")
+        le.use_rust_backend(False)
+        py_t = _time_solver(factory, wavls, scan_points, repeat)
+        print(f"  Python : {py_t:.3f} s")
+        if RUST:
+            le.use_rust_backend(True)
+            rs_t = _time_solver(factory, wavls, scan_points, repeat)
+            print(f"  Rust   : {rs_t:.3f} s")
+            print(f"  Speedup: {py_t / rs_t:.2f}x")
+        else:
+            print("  Rust   : (extension not compiled — skipped)")
+    le.use_rust_backend(RUST)
 
-    print(f"\nTests passed: {passed}/{len(tests)}")
 
-    # Run speed benchmarks
-    if RUST_AVAILABLE and LoomEigenmodeSolver is not None:
-        bench_results = run_benchmarks()
-        print("\n" + "="*70)
-        print("Speed benchmark summary:")
-        for case, res in bench_results.items():
-            if 'speedup' in res:
-                print(f"  {case:20s} : {res['speedup']:.1f}x speedup (Rust vs Python)")
-            else:
-                print(f"  {case:20s} : Rust not available")
-    else:
-        print("\n⚠ Speed benchmark skipped (Rust solver missing).")
+# ────────────────────────────── main ────────────────────────────────────────
 
-    print("\n" + "#"*70)
-    print("# Test suite completed.")
-    print("#"*70)
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--no-bench", action="store_true", help="run tests only")
+    ap.add_argument("--bench-only", action="store_true", help="benchmark only")
+    ap.add_argument("--scan", type=int, default=120, help="benchmark scan points")
+    ap.add_argument("--nwav", type=int, default=20, help="benchmark wavelengths")
+    ap.add_argument("--repeat", type=int, default=2, help="benchmark repeats")
+    args = ap.parse_args(argv)
+
+    ok = True
+    if not args.bench_only:
+        ok = run_tests()
+    if not args.no_bench:
+        run_benchmark(scan_points=args.scan, n_wav=args.nwav, repeat=args.repeat)
+    return 0 if ok else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
