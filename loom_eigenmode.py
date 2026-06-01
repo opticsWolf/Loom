@@ -69,6 +69,168 @@ from typing import List, Optional, Tuple
 import warnings
 
 
+# ─── Optional Rust backend ───────────────────────────────────────────────────
+# If the compiled extension is importable we route the three hot phases
+# (coarse scan, candidate detection, Nelder–Mead polish) and the field profile
+# through it. Each call does a whole *phase* in one FFI crossing — there is no
+# per-evaluation boundary crossing — so the parallel (rayon) scan and the
+# allocation-free polish are the actual win. If the module is missing we fall
+# back to the pure-NumPy/SciPy path below, byte-for-byte the original behaviour.
+
+try:
+    from navette_smatrix import (
+        scan_landscape as _rs_scan_landscape,
+        find_local_minima as _rs_find_local_minima,
+        nelder_mead as _rs_nelder_mead,
+        field_profile as _rs_field_profile,
+    )
+    _RUST_OK = True
+    _RUST_PRESENT = True
+except ImportError:
+    _RUST_OK = False
+    _RUST_PRESENT = False
+
+
+def rust_backend_available() -> bool:
+    """True if mode-finding is using the compiled navette_smatrix backend."""
+    return _RUST_OK
+
+
+def use_rust_backend(flag: bool) -> bool:
+    """Force the backend on/off (e.g. for an honest Rust-vs-Python A/B).
+
+    Returns the value actually set: requesting the Rust path while the
+    extension is unimportable stays False.
+    """
+    global _RUST_OK
+    if flag and not _RUST_PRESENT:
+        _RUST_OK = False
+    else:
+        _RUST_OK = bool(flag)
+    return _RUST_OK
+
+
+def _as_rust_inputs(n_stk, thicknesses, r_types, r_vals):
+    """Coerce solver arrays into the dtypes/layout the extension requires.
+
+    The column slice ``layer_indices[:, k]`` is non-contiguous and the solver
+    stores roughness types as int64; the PyO3 signatures need a C-contiguous
+    complex128 stack and an int32 type array.
+    """
+    return (
+        np.ascontiguousarray(n_stk, dtype=np.complex128),
+        np.ascontiguousarray(thicknesses, dtype=np.float64),
+        np.ascontiguousarray(r_types, dtype=np.int32),
+        np.ascontiguousarray(r_vals, dtype=np.float64),
+    )
+
+
+def _scan_landscape_backend(n_stk, thicknesses, r_types, r_vals, lam, p_int,
+                            real_range, imag_range, scan_points):
+    """Return (Nr, Ni, landscape) of raw |1/r|^2 values (NOT log-scaled)."""
+    if _RUST_OK:
+        n_c, th_c, rt_c, rv_c = _as_rust_inputs(n_stk, thicknesses, r_types, r_vals)
+        Nr, Ni, land = _rs_scan_landscape(
+            n_c, th_c, rt_c, rv_c, lam, int(p_int),
+            float(real_range[0]), float(real_range[1]),
+            float(imag_range[0]), float(imag_range[1]),
+            int(scan_points), int(scan_points),
+        )
+        return np.asarray(Nr, float), np.asarray(Ni, float), np.asarray(land, float)
+
+    # Pure-Python fallback (identical grid to np.linspace).
+    Nr = np.linspace(real_range[0], real_range[1], scan_points)
+    Ni = np.linspace(imag_range[0], imag_range[1], scan_points)
+    args = (n_stk, thicknesses, r_types, r_vals, lam, p_int)
+    land = np.zeros((len(Ni), len(Nr)))
+    for i, ni in enumerate(Ni):
+        for j, nr in enumerate(Nr):
+            land[i, j] = _char_func_xy([nr, ni], *args)
+    return Nr, Ni, land
+
+
+def _find_local_minima_backend(landscape, Nr, Ni):
+    """Return list of (Re, Im) candidate seeds. Threshold = median (factor 1.0)."""
+    if _RUST_OK:
+        land_c = np.ascontiguousarray(landscape, dtype=np.float64)
+        return list(_rs_find_local_minima(
+            land_c, np.asarray(Nr, float), np.asarray(Ni, float), 1.0))
+
+    # Pure-Python fallback: strictly-smaller-than-neighbours, below the median,
+    # skipping the first/last real columns (lossless modes on the Im=0 edge are
+    # still picked up because every imag row is scanned).
+    median_val = float(np.median(landscape))
+    candidates = []
+    n_imag, n_real = landscape.shape
+
+    def _is_local_min(i, j):
+        v = landscape[i, j]
+        if v >= median_val:
+            return False
+        i0 = max(i - 1, 0); i1 = min(i + 1, n_imag - 1)
+        j0 = max(j - 1, 0); j1 = min(j + 1, n_real - 1)
+        for ii in range(i0, i1 + 1):
+            for jj in range(j0, j1 + 1):
+                if ii == i and jj == j:
+                    continue
+                if landscape[ii, jj] <= v:
+                    return False
+        return True
+
+    for i in range(n_imag):
+        for j in range(1, n_real - 1):
+            if _is_local_min(i, j):
+                candidates.append((Nr[j], Ni[i]))
+    return candidates
+
+
+def _polish_backend(n_stk, thicknesses, r_types, r_vals, lam, p_int,
+                    x0, step, tol, max_iter):
+    """Refine one candidate. Returns (Re, Im, char_value)."""
+    if _RUST_OK:
+        n_c, th_c, rt_c, rv_c = _as_rust_inputs(n_stk, thicknesses, r_types, r_vals)
+        xr, xi, cv = _rs_nelder_mead(
+            n_c, th_c, rt_c, rv_c, lam, int(p_int),
+            (float(x0[0]), float(x0[1])),
+            float(step), float(tol), int(max_iter),
+        )
+        return float(xr), float(xi), float(cv)
+
+    args = (n_stk, thicknesses, r_types, r_vals, lam, p_int)
+    res = minimize(
+        _char_func_xy, x0=[x0[0], x0[1]], args=args, method='Nelder-Mead',
+        options={
+            'xatol': tol, 'fatol': tol * 1e-3,
+            'maxiter': max_iter, 'adaptive': True,
+            'initial_simplex': np.array([
+                [x0[0],        x0[1]],
+                [x0[0] + step, x0[1]],
+                [x0[0],        x0[1] + step * 0.1],
+            ]),
+        },
+    )
+    return float(res.x[0]), float(res.x[1]), float(res.fun)
+
+
+def _field_profile_backend(n_stk, thicknesses, r_types, r_vals, lam, N_eff,
+                           p_int, n_points_per_layer):
+    """Return (z, |E|, layer_bounds) where layer_bounds = [(z0, z1, n), ...]."""
+    if _RUST_OK:
+        n_c, th_c, rt_c, rv_c = _as_rust_inputs(n_stk, thicknesses, r_types, r_vals)
+        z, e_mag, lstart, lend, ln = _rs_field_profile(
+            n_c, th_c, rt_c, rv_c, lam, complex(N_eff), int(p_int),
+            int(n_points_per_layer),
+        )
+        z = np.asarray(z, float)
+        e_mag = np.asarray(e_mag, float)
+        layer_bounds = [(float(a), float(b), complex(c))
+                        for a, b, c in zip(lstart, lend, ln)]
+        return z, e_mag, layer_bounds
+
+    return _field_profile(n_stk, thicknesses, r_types, r_vals, lam, N_eff,
+                          p_int, n_points_per_layer)
+
+
 # ─── Reuse low-level helpers from loom_matrix ────────────────────────────────
 # We re-implement the scalar (single-wavelength, single-angle) S-matrix
 # accumulation in pure NumPy so this module works standalone without Numba
@@ -555,16 +717,12 @@ class LoomEigenmodeSolver:
         if N_eff_real_range is None:
             N_eff_real_range = (n_cladding + 1e-4, n_core_max - 1e-4)
 
-        Nr = np.linspace(N_eff_real_range[0], N_eff_real_range[1], scan_points)
-        Ni = np.linspace(N_eff_imag_range[0],  N_eff_imag_range[1], scan_points)
-
-        landscape = np.zeros((len(Ni), len(Nr)))
-        args = (n_stk, self.thicknesses, self.r_types, self.r_vals, lam, p_int)
-        for i, ni in enumerate(Ni):
-            for j, nr in enumerate(Nr):
-                landscape[i, j] = np.log10(
-                    _char_func_xy([nr, ni], *args) + 1e-30
-                )
+        Nr, Ni, landscape = _scan_landscape_backend(
+            n_stk, self.thicknesses, self.r_types, self.r_vals, lam, p_int,
+            N_eff_real_range, N_eff_imag_range, scan_points,
+        )
+        # Public landscape is returned log-scaled for visualisation.
+        landscape = np.log10(landscape + 1e-30)
 
         return Nr, Ni, landscape
 
@@ -577,42 +735,14 @@ class LoomEigenmodeSolver:
         n_points_per_layer, compute_group_index, delta_lam_nm,
     ) -> List[Eigenmode]:
 
-        args = (n_stk, self.thicknesses, self.r_types, self.r_vals, lam, p_int)
+        # ── Coarse 2-D scan (parallel Rust backend when available) ────────
+        Nr, Ni, landscape = _scan_landscape_backend(
+            n_stk, self.thicknesses, self.r_types, self.r_vals, lam, p_int,
+            N_eff_real_range, N_eff_imag_range, scan_points,
+        )
 
-        # ── Coarse 2-D scan ───────────────────────────────────────────────
-        Nr = np.linspace(N_eff_real_range[0], N_eff_real_range[1], scan_points)
-        Ni = np.linspace(N_eff_imag_range[0],  N_eff_imag_range[1], scan_points)
-
-        landscape = np.zeros((len(Ni), len(Nr)))
-        for i, ni in enumerate(Ni):
-            for j, nr in enumerate(Nr):
-                landscape[i, j] = _char_func_xy([nr, ni], *args)
-
-        # Local minima: a cell is a local minimum if strictly smaller than
-        # all available neighbours AND below the global median.
-        # The Im=0 boundary (i=0) must also be checked: lossless guided modes
-        # sit on the real axis, so the minimum appears in the edge row.
-        median_val = float(np.median(landscape))
-        candidates = []
-
-        def _is_local_min(i, j):
-            v = landscape[i, j]
-            if v >= median_val:
-                return False
-            i0 = max(i - 1, 0);  i1 = min(i + 1, len(Ni) - 1)
-            j0 = max(j - 1, 0);  j1 = min(j + 1, len(Nr) - 1)
-            for ii in range(i0, i1 + 1):
-                for jj in range(j0, j1 + 1):
-                    if ii == i and jj == j:
-                        continue
-                    if landscape[ii, jj] <= v:
-                        return False
-            return True
-
-        for i in range(len(Ni)):
-            for j in range(1, len(Nr) - 1):
-                if _is_local_min(i, j):
-                    candidates.append((Nr[j], Ni[i]))
+        # ── Candidate detection (strict local minima below the median) ────
+        candidates = _find_local_minima_backend(landscape, Nr, Ni)
 
         if not candidates:
             return []
@@ -624,27 +754,15 @@ class LoomEigenmodeSolver:
         seen_N: List[complex] = []
 
         for x0_r, x0_i in candidates:
-            res = minimize(
-                _char_func_xy,
-                x0=[x0_r, x0_i],
-                args=args,
-                method='Nelder-Mead',
-                options={
-                    'xatol': tol, 'fatol': tol * 1e-3,
-                    'maxiter': 5000, 'adaptive': True,
-                    'initial_simplex': np.array([
-                        [x0_r,        x0_i],
-                        [x0_r + step, x0_i],
-                        [x0_r,        x0_i + step * 0.1],
-                    ]),
-                }
+            xr, xi, cv = _polish_backend(
+                n_stk, self.thicknesses, self.r_types, self.r_vals, lam, p_int,
+                (x0_r, x0_i), step, tol, 5000,
             )
 
-            cv = res.fun
             if cv > char_threshold:
                 continue                  # not a genuine mode
 
-            N_eff = complex(res.x[0], res.x[1])
+            N_eff = complex(xr, xi)
 
             # Guard: N_eff must lie in the physically sensible region
             if (N_eff.real < N_eff_real_range[0] - 1e-3 or
@@ -681,21 +799,16 @@ class LoomEigenmodeSolver:
                     lam_hi_v = float(self.wavls[idx_hi])
                     lam_lo_v = float(self.wavls[idx_lo])
 
-                    args_hi = (n_stk_hi, self.thicknesses, self.r_types, self.r_vals,
-                               lam_hi_v, p_int)
-                    args_lo = (n_stk_lo, self.thicknesses, self.r_types, self.r_vals,
-                               lam_lo_v, p_int)
-
                     # Re-polish at neighbouring wavelengths using same x0
-                    def _refine(xargs, x0):
-                        r2 = minimize(_char_func_xy, x0=x0, args=xargs,
-                                      method='Nelder-Mead',
-                                      options={'xatol': tol, 'fatol': tol * 1e-3,
-                                               'maxiter': 3000, 'adaptive': True})
-                        return complex(r2.x[0], r2.x[1]) if r2.fun < char_threshold else None
+                    def _refine(n_stk_w, lam_w, x0):
+                        xr2, xi2, cv2 = _polish_backend(
+                            n_stk_w, self.thicknesses, self.r_types, self.r_vals,
+                            lam_w, p_int, x0, step, tol, 3000,
+                        )
+                        return complex(xr2, xi2) if cv2 < char_threshold else None
 
-                    N_hi = _refine(args_hi, res.x)
-                    N_lo = _refine(args_lo, res.x)
+                    N_hi = _refine(n_stk_hi, lam_hi_v, (xr, xi))
+                    N_lo = _refine(n_stk_lo, lam_lo_v, (xr, xi))
 
                     if N_hi is not None and N_lo is not None:
                         dlam   = lam_hi_v - lam_lo_v
@@ -703,7 +816,7 @@ class LoomEigenmodeSolver:
                         n_group = float(N_eff.real - lam * dN_dlam)
 
             # ── Field profile ─────────────────────────────────────────────
-            z, E_mag, lbounds = _field_profile(
+            z, E_mag, lbounds = _field_profile_backend(
                 n_stk, self.thicknesses, self.r_types, self.r_vals,
                 lam, N_eff, p_int, n_points_per_layer
             )
