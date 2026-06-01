@@ -16,6 +16,7 @@ use crate::func_3::solve_coherent_block_fields_inner;
 #[inline]
 fn reflection_coefficient_helper(
     n_stack: &[Complex64],
+    inv_n: &[Complex64],
     thicknesses: &[f64],
     rough_types: &[i32],
     rough_vals: &[f64],
@@ -23,12 +24,13 @@ fn reflection_coefficient_helper(
     n_eff: Complex64,
     pol: i32,
 ) -> Complex64 {
-    let inv_n: Vec<Complex64> = n_stack.iter().map(|n| n.recip()).collect();
+    // inv_n is computed once per wavelength by the caller and shared read-only
+    // across all grid points / simplex evaluations (and across rayon threads).
     let (r_front, _, _, _, _, _, _, _) = solve_coherent_block_fields_inner(
         0,
         n_stack.len() - 1,
         n_stack,
-        &inv_n,
+        inv_n,
         thicknesses,
         rough_vals,
         rough_types,
@@ -45,6 +47,7 @@ fn reflection_coefficient_helper(
 #[inline]
 fn char_func(
     n_stack: &[Complex64],
+    inv_n: &[Complex64],
     thicknesses: &[f64],
     rough_types: &[i32],
     rough_vals: &[f64],
@@ -52,7 +55,9 @@ fn char_func(
     n_eff: Complex64,
     pol: i32,
 ) -> f64 {
-    let r = reflection_coefficient_helper(n_stack, thicknesses, rough_types, rough_vals, lam, n_eff, pol);
+    let r = reflection_coefficient_helper(
+        n_stack, inv_n, thicknesses, rough_types, rough_vals, lam, n_eff, pol,
+    );
     let abs_r = r.norm();
     if abs_r < 1e-15 {
         1e30
@@ -62,9 +67,11 @@ fn char_func(
 }
 
 /// Real‑valued wrapper for minimisation (expects [Re, Im] slice)
+#[allow(clippy::too_many_arguments)]
 fn char_func_xy(
     xy: &[f64],
     n_stack: &[Complex64],
+    inv_n: &[Complex64],
     thicknesses: &[f64],
     rough_types: &[i32],
     rough_vals: &[f64],
@@ -72,7 +79,7 @@ fn char_func_xy(
     pol: i32,
 ) -> f64 {
     let n_eff = Complex64::new(xy[0], xy[1]);
-    char_func(n_stack, thicknesses, rough_types, rough_vals, lam, n_eff, pol)
+    char_func(n_stack, inv_n, thicknesses, rough_types, rough_vals, lam, n_eff, pol)
 }
 
 // -----------------------------------------------------------------------------
@@ -100,6 +107,11 @@ pub fn scan_landscape(
     let rt_slice = rough_types.as_slice()?;
     let rv_slice = rough_vals.as_slice()?;
 
+    // Reciprocals computed ONCE per wavelength and shared read-only across all
+    // grid points (and all rayon threads). Previously this Vec was allocated
+    // inside every char_func call — thousands of heap allocations per scan.
+    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
+
     let real_vals: Vec<f64> = (0..points_real)
         .map(|i| real_min + (i as f64) * (real_max - real_min) / ((points_real - 1) as f64))
         .collect();
@@ -116,7 +128,7 @@ pub fn scan_landscape(
                 let nr = real_vals[j];
                 let ni = imag_vals[i];
                 let n_eff = Complex64::new(nr, ni);
-                char_func(n_slice, d_slice, rt_slice, rv_slice, lam, n_eff, pol)
+                char_func(n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, n_eff, pol)
             })
             .collect()
     });
@@ -138,12 +150,32 @@ pub fn find_local_minima(
 ) -> Vec<(f64, f64)> {
     let land = landscape.as_array();
     let (n_imag, n_real) = (land.shape()[0], land.shape()[1]);
-    let median = land.iter().copied().fold(0.0, |a, b| a + b) / (n_imag * n_real) as f64;
+
+    // True median of the landscape (the previous code averaged, which the
+    // `median_factor` name and the Python reference (`np.median`) do not).
+    // Sentinel 1e30 cells sort to the top and so don't perturb the median,
+    // whereas they badly skewed the mean.
+    let mut sorted: Vec<f64> = land.iter().copied().collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let len = sorted.len();
+    let median = if len == 0 {
+        0.0
+    } else if len % 2 == 1 {
+        sorted[len / 2]
+    } else {
+        0.5 * (sorted[len / 2 - 1] + sorted[len / 2])
+    };
     let threshold = median * median_factor;
 
     let mut candidates = Vec::new();
+    if n_real < 2 {
+        return candidates;
+    }
     for i in 0..n_imag {
-        for j in 0..n_real {
+        // Skip the first/last real columns, matching the reference
+        // (`for j in range(1, len(Nr) - 1)`); all imag rows are scanned so
+        // lossless modes on the Im=0 edge are still detected.
+        for j in 1..n_real - 1 {
             let val = land[[i, j]];
             if val >= threshold {
                 continue;
@@ -194,6 +226,9 @@ pub fn nelder_mead(
     let rt_slice = rough_types.as_slice().unwrap();
     let rv_slice = rough_vals.as_slice().unwrap();
 
+    // Reciprocals computed once and reused across every simplex evaluation.
+    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
+
     let mut simplex = vec![
         [x0.0, x0.1],
         [x0.0 + step, x0.1],
@@ -201,7 +236,7 @@ pub fn nelder_mead(
     ];
     let mut values: Vec<f64> = simplex
         .iter()
-        .map(|x| char_func_xy(x, n_slice, d_slice, rt_slice, rv_slice, lam, pol))
+        .map(|x| char_func_xy(x, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol))
         .collect();
 
     let alpha = 1.0;
@@ -223,14 +258,14 @@ pub fn nelder_mead(
             centroid[0] + alpha * (centroid[0] - simplex[worst][0]),
             centroid[1] + alpha * (centroid[1] - simplex[worst][1]),
         ];
-        let f_ref = char_func_xy(&reflected, n_slice, d_slice, rt_slice, rv_slice, lam, pol);
+        let f_ref = char_func_xy(&reflected, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
 
         if f_ref < values[best] {
             let expanded = [
                 centroid[0] + gamma * (reflected[0] - centroid[0]),
                 centroid[1] + gamma * (reflected[1] - centroid[1]),
             ];
-            let f_exp = char_func_xy(&expanded, n_slice, d_slice, rt_slice, rv_slice, lam, pol);
+            let f_exp = char_func_xy(&expanded, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
             if f_exp < f_ref {
                 simplex[worst] = expanded;
                 values[worst] = f_exp;
@@ -246,7 +281,7 @@ pub fn nelder_mead(
                 centroid[0] + rho * (simplex[worst][0] - centroid[0]),
                 centroid[1] + rho * (simplex[worst][1] - centroid[1]),
             ];
-            let f_con = char_func_xy(&contracted, n_slice, d_slice, rt_slice, rv_slice, lam, pol);
+            let f_con = char_func_xy(&contracted, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
             if f_con < values[worst] {
                 simplex[worst] = contracted;
                 values[worst] = f_con;
@@ -255,7 +290,7 @@ pub fn nelder_mead(
                     if i != best {
                         simplex[i][0] = simplex[best][0] + sigma * (simplex[i][0] - simplex[best][0]);
                         simplex[i][1] = simplex[best][1] + sigma * (simplex[i][1] - simplex[best][1]);
-                        values[i] = char_func_xy(&simplex[i], n_slice, d_slice, rt_slice, rv_slice, lam, pol);
+                        values[i] = char_func_xy(&simplex[i], n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
                     }
                 }
             }
