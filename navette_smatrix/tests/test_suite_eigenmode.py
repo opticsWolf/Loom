@@ -413,8 +413,7 @@ def test_prim_nelder_mead_matches_scipy():
     # cross-check against the SciPy fallback from the identical seed
     le.use_rust_backend(False)
     pr, pi, pcv = le._polish_backend(
-        [N_AIR + 0j, N_SI + 0j, N_AIR + 0j], th, np.zeros(3, int), rv,
-        1550.0, 0, x0, 1e-3, 1e-9, 5000)
+        n, th, np.zeros(3, int), rv, 1550.0, 0, x0, 1e-3, 1e-9, 5000)
     assert approx(xr, pr, atol=1e-4), f"rust {xr:.6f} vs scipy {pr:.6f}"
 
 
