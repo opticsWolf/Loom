@@ -10,7 +10,7 @@ mod func_5; // core_engine_photometry_only
 mod func_eigenmode; // eigenmode_solver
 
 #[pymodule]
-fn navette_smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register all public functions under their original Python names
     m.add_function(wrap_pyfunction!(func_0::w_function, m)?)?;
     m.add_function(wrap_pyfunction!(func_1::redheffer_product_complex_field, m)?)?;
