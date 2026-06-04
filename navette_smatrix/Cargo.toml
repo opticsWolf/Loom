@@ -10,7 +10,7 @@ numpy = "0.28"
 rayon = "1.10"
 
 [lib]
-name = "navette_smatrix"
+name = "smatrix"
 crate-type = ["cdylib"]
 
 [profile.release]
