@@ -32,6 +32,15 @@ pub type BlockResult = (
 /// polar result by at most ~1 ULP, and `cos θ` is taken every interface so the
 /// saving compounds. Both solvers normalize the sign afterwards (`im >= 0`),
 /// so the branch convention matches the reference exactly.
+///
+/// `|z|` is taken via `hypot`, which is correctly rounded and avoids the
+/// `a*a + b*b` intermediate (a couple of ULP of error plus over/underflow
+/// risk). The earlier naive form was chosen to mirror the reference's
+/// `fastmath` magnitude; with `fastmath` disabled this accurate form both
+/// matches the stricter reference better and lowers the component-level
+/// rounding that the `arg()` in `Delta` amplifies by `1/|cross|`. Cost is one
+/// libm `hypot` instead of one `sqrt`-of-a-sum — no `atan2`, so the hot-loop
+/// transcendental budget is unchanged in practice.
 #[inline(always)]
 fn csqrt_fast(z: Complex64) -> Complex64 {
     let a = z.re;
@@ -39,7 +48,7 @@ fn csqrt_fast(z: Complex64) -> Complex64 {
     if a == 0.0 && b == 0.0 {
         return Complex64::new(0.0, 0.0);
     }
-    let m = (a * a + b * b).sqrt(); // |z|, naive form (matches fastmath)
+    let m = a.hypot(b); // |z|, correctly-rounded (accurate, no a^2+b^2 intermediate)
     if a >= 0.0 {
         let re = ((m + a) * 0.5).sqrt();
         Complex64::new(re, b / (2.0 * re))
