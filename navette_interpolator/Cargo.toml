@@ -1,6 +1,6 @@
 [package]
-name = "navette-interpolator"
-version = "0.1.0"
+name = "navette-interpolate"
+version = "0.2.0"
 edition = "2024"
 authors = ["opticswolf"]
 description = "Fast univariate interpolation with multiple methods and batch support"
@@ -8,7 +8,7 @@ license = "LGPL-3.0"
 repository = "https://github.com/opticswolf/navette-interpolator"
 
 [lib]
-name = "navette_interpolator"
+name = "interpolate"
 crate-type = ["cdylib"]
 
 [dependencies]
