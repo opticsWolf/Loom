@@ -1,8 +1,8 @@
-import navette_spectralweave
+import navette.spectralweave
 import numpy as np
 
 # Create a weaver
-weaver = navette_spectralweave.OpticalWeaver(cache_size=64)
+weaver = navette.spectralweave.OpticalWeaver(cache_size=64)
 
 # Define a key
 key = (550.0, "R", "s")
