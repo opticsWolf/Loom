@@ -37,7 +37,7 @@ except ImportError:
 
 # 3. Rust Backend (Navette)
 try:
-    import navette_interpolator as unispline_rs
+    import navette_interpolat as unispline_rs
     HAS_RS = True
 except ImportError:
     HAS_RS = False
@@ -156,7 +156,7 @@ def run_functional_tests():
     try:
         x = np.array([0.0, 1.0, 2.0, 3.0])
         y = np.array([0.0, 1.0, 4.0, 9.0])
-        spline = unispline_rs.UniSpline(x, y, method="pchip")
+        spline = unispline_rs.UniInterpolator(x, y, method="pchip")
         t_unsorted = np.array([2.5, 0.5, 1.5, 3.5])
         result = spline.eval(t_unsorted)
         expected = np.array([6.21875, 0.3125, 2.21875, 12.0])   
@@ -171,7 +171,7 @@ def run_functional_tests():
         y = np.sin(x) * x
         t = np.linspace(0, 10, 100)
         
-        spline = unispline_rs.UniSpline(x, y, method="pchip")
+        spline = unispline_rs.UniInterpolator(x, y, method="pchip")
         deriv_rs = spline.derivative(t)
         
         if HAS_SCIPY:
@@ -190,13 +190,13 @@ def run_functional_tests():
         y = np.array([0.0, 1.0, 4.0])
         t_out = np.array([-1.0, 3.0])
         
-        spline_lin = unispline_rs.UniSpline(x, y, method="linear", extrap="linear")
+        spline_lin = unispline_rs.UniInterpolator(x, y, method="linear", extrap="linear")
         np.testing.assert_allclose(spline_lin.eval(t_out), [-1.0, 7.0])
         
-        spline_clamp = unispline_rs.UniSpline(x, y, method="linear", extrap="clamp")
+        spline_clamp = unispline_rs.UniInterpolator(x, y, method="linear", extrap="clamp")
         np.testing.assert_allclose(spline_clamp.eval(t_out), [0.0, 4.0])
         
-        spline_err = unispline_rs.UniSpline(x, y, extrap="error")
+        spline_err = unispline_rs.UniInterpolator(x, y, extrap="error")
         res_err = spline_err.eval(t_out)
         if not np.isnan(res_err).all():
             print("❌ [Rust] Extrapolation error mode did not yield NaN.")
@@ -209,8 +209,8 @@ def run_functional_tests():
     try:
         x = np.linspace(0, 10, 20)
         y = np.sin(x)
-        spline = unispline_rs.UniSpline(x, y, method="pchip")
-        unispline_rs.UniSpline.__module__ = "navette_interpolator"
+        spline = unispline_rs.UniInterpolator(x, y, method="pchip")
+        unispline_rs.UniInterpolator.__module__ = "navette_interpolator"
         
         data = pickle.dumps(spline)
         spline2 = pickle.loads(data)
@@ -229,7 +229,7 @@ def run_functional_tests():
     try:
         x = np.array([0.0, 1.0, 2.0])
         y = np.array([[0.0, 1.0, 4.0], [1.0, 2.0, 5.0]]) 
-        spline = unispline_rs.UniSpline(x, y, method="pchip")
+        spline = unispline_rs.UniInterpolator(x, y, method="pchip")
         np.testing.assert_equal(spline.get_x(), x)
         np.testing.assert_equal(spline.get_y(None), y)
         np.testing.assert_equal(spline.get_y(0), y[0])
@@ -244,8 +244,8 @@ def run_functional_tests():
         y = np.sin(x)
         t = np.linspace(0, 10, 100)
         
-        s_naive = unispline_rs.UniSpline(x, y, method="sprague", robust=False)
-        s_robust = unispline_rs.UniSpline(x, y, method="sprague", robust=True)
+        s_naive = unispline_rs.UniInterpolator(x, y, method="sprague", robust=False)
+        s_robust = unispline_rs.UniInterpolator(x, y, method="sprague", robust=True)
         
         np.testing.assert_allclose(s_naive.eval(t), s_robust.eval(t), rtol=1e-10)
         print("✅ [Rust] Sprague robust (Barycentric) & naive (Lagrange) align mathematically.")
@@ -320,7 +320,7 @@ def run_benchmarks_and_deviations():
     
     backends = []
     if HAS_PY: backends.append(("Py/Loom", unispline_py.UniSpline))
-    if HAS_RS: backends.append(("Rs/Navette", unispline_rs.UniSpline))
+    if HAS_RS: backends.append(("Rs/Navette", unispline_rs.UniInterpolator))
 
     if not backends:
         print("⚠️ No valid backends found.")
@@ -389,7 +389,7 @@ def run_scaling_benchmarks():
     
     backends = []
     if HAS_PY: backends.append(("Py/Loom", unispline_py.UniSpline))
-    if HAS_RS: backends.append(("Rs/Navette", unispline_rs.UniSpline))
+    if HAS_RS: backends.append(("Rs/Navette", unispline_rs.UniInterpolator))
 
     if not backends:
         print("⚠️ No valid backends found.")
