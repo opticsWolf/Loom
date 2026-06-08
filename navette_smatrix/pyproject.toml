@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "navette-smatrix"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fast S-Matrix computations and handling"
 requires-python = ">=3.12"
 dependencies = ["numpy"]
@@ -12,4 +12,4 @@ dependencies = ["numpy"]
 [tool.maturin]
 # Injects the compiled Rust extension into the "navette" namespace 
 # under the name "smatrix"
-module-name = "navette.smatrix"
+module-name = "navette._smatrix"
