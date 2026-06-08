@@ -54,7 +54,7 @@ impl ExtrapMode {
 // Main spline struct
 // -------------------------------------------------------------------------
 #[pyclass]
-pub struct UniSpline {
+pub struct UniInterpolator {
     x: Array1<f64>,
     y: Array2<f64>,
     method: String,
@@ -69,7 +69,7 @@ pub struct UniSpline {
 // Python-visible methods
 // -------------------------------------------------------------------------
 #[pymethods]
-impl UniSpline {
+impl UniInterpolator {
     #[new]
     #[pyo3(signature = (x, y, method="pchip", robust=false, d=3, extrap="linear"))]
     fn new<'py>(
@@ -145,7 +145,7 @@ impl UniSpline {
             _ => AuxData::None,
         };
 
-        Ok(UniSpline {
+        Ok(UniInterpolator {
             x: x_arr,
             y: y_arr,
             method,
@@ -345,7 +345,7 @@ impl UniSpline {
             ],
         )?;
 
-        let cls = py.get_type::<UniSpline>();
+        let cls = py.get_type::<UniInterpolator>();
         let tuple = PyTuple::new(py, vec![cls.into_any(), args.into_any()])?;
         Ok(tuple.unbind())
     }
@@ -984,7 +984,7 @@ fn calc_fh_weights(x: &Array1<f64>, d: usize) -> Array1<f64> {
 // Module initialisation
 // -------------------------------------------------------------------------
 #[pymodule]
-fn navette_interpolator<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
-    m.add_class::<UniSpline>()?;
+fn interpolate<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
+    m.add_class::<UniInterpolator>()?;
     Ok(())
 }
