@@ -1,4 +1,4 @@
-//! Loom (Rust core) — weaving spectral fragments into continuous curves.
+//! Navette (Rust core) — weaving spectral fragments into continuous curves.
 //!
 //! Built against **pyo3 0.28** (Bound API, `Python::attach` / `Python::detach`).
 //!
@@ -1201,7 +1201,7 @@ impl PyOpticalWeaver {
 // Module initialisation
 // ---------------------------------------------------------------------------
 #[pymodule]
-fn navette_spectralweave(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn spectralweave(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySpectralDataFrame>()?;
     m.add_class::<PyOpticalCollection>()?;
     m.add_class::<PyOpticalWeaver>()?;
