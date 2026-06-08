@@ -1,16 +1,16 @@
 <img width="280" height="280" alt="loom_logo" src="https://github.com/user-attachments/assets/e08705cf-d221-4aeb-bfe2-56ef9f23bf17" />
 
-# Loom - Weaving the mathematics of light in thin film systems
+# Navette - Weaving the mathematics of light in thin film systems
 
-**Loom** is a high-performance, physically rigorous 1D optical engine designed for the simulation of light propagation in stratified media. Built on a modern **Scattering Matrix (S-matrix)** architecture, it offers a numerically stable and vectorized alternative to traditional Transfer Matrix Methods (TMM).
+**Navette** is a high-performance, physically rigorous 1D optical engine designed for the simulation of light propagation in stratified media. Built on a modern **Scattering Matrix (S-matrix)** architecture, it offers a numerically stable and vectorized alternative to traditional Transfer Matrix Methods (TMM).
 
 ### 1. Unconditional Numerical Stability
 
-Traditional TMM suffers from numerical divergence (exponentially growing evanescent waves) when dealing with thick layers or highly absorbing materials. Loom utilizes the **Redheffer Star Product** to propagate scattering matrices, ensuring that all matrix elements remain bounded and physically meaningful, regardless of layer thickness.
+Traditional TMM suffers from numerical divergence (exponentially growing evanescent waves) when dealing with thick layers or highly absorbing materials. Navette utilizes the **Redheffer Star Product** to propagate scattering matrices, ensuring that all matrix elements remain bounded and physically meaningful, regardless of layer thickness.
 
 ### 2. High-Concurrency Performance
 
-As a Principal Performance Engineer, you need tools that scale. Loom is built for speed:
+As a Principal Performance Engineer, you need tools that scale. Navette is built for speed:
 
 - **Parallel Execution**: Utilizes Numba’s `@njit(parallel=True)` to saturate all available CPU cores.
     
@@ -21,7 +21,7 @@ As a Principal Performance Engineer, you need tools that scale. Loom is built fo
 
 ### 3. Partial Coherence Support
 
-Real-world systems often involve thick substrates (like a 1mm glass slide) where phase information is lost. Loom features a **Hybrid Coherence Engine**:
+Real-world systems often involve thick substrates (like a 1mm glass slide) where phase information is lost. Navette features a **Hybrid Coherence Engine**:
 
 - **Coherent Blocks**: Preserves phase for thin-film interference.
     
@@ -30,7 +30,7 @@ Real-world systems often involve thick substrates (like a 1mm glass slide) where
 
 ### 4. Advanced Physics Modeling
 
-Loom goes beyond simple Fresnel equations to provide research-grade accuracy:
+Navette goes beyond simple Fresnel equations to provide research-grade accuracy:
 
 - **Interface Roughness**: Implements the **Névot-Croce** model, providing superior accuracy for high-frequency or X-ray reflectometry compared to standard Gaussian approximations.
     
