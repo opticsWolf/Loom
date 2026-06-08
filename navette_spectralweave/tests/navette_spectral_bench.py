@@ -37,7 +37,7 @@ import numpy as np
 import loom_spectraldata as loom_py  # pure-Python reference (required)
 
 try:
-    import navette_spectralweave  # Rust extension (optional)
+    import navette.spectralweave as navette_spectralweave # Rust extension (optional)
     HAVE_RUST = True
 except Exception as exc:  # pragma: no cover
     navette_spectralweave = None
