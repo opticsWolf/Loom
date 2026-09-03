@@ -3,7 +3,7 @@ name = "navette-interpolate"
 version = "0.3.0"
 edition = "2024"
 authors = ["opticswolf"]
-description = "Pure-Rust univariate interpolation core (no Python). Bindings live in navette-interpolate-py."
+description = "Pure-Rust univariate interpolation core (no Python).."
 license = "LGPL-3.0"
 repository = "https://github.com/opticswolf/navette-interpolator"
 

@@ -2,8 +2,10 @@
 name = "navette-smatrix"
 version = "0.3.0"
 edition = "2024"
-description = "Pure-Rust S-matrix thin-film engine core (no Python). Bindings live in navette-smatrix-py."
+description = "Pure-Rust S-matrix thin-film engine core (no Python).."
 license = "LGPL-3.0-or-later"
+authors = ["opticsWolf"]
+repository = "https://github.com/opticsWolf/Navette"
 
 [lib]
 name = "navette_smatrix"

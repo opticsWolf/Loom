@@ -2,8 +2,10 @@
 name = "navette-color"
 version = "0.3.0"
 edition = "2024"
-description = "Pure-Rust color engine core (no Python, no I/O). Bindings live in navette-color-py."
+description = "Pure-Rust color engine core (no Python, no I/O)."
 license = "LGPL-3.0-or-later"
+authors = ["opticsWolf"]
+repository = "https://github.com/opticsWolf/Navette"
 
 [lib]
 name = "navette_color"
