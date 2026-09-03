@@ -5,8 +5,9 @@ navette
 Fast S-Matrix computations and handling.
 """
 
-# Import the compiled Rust extension so it is immediately available
+# Import submodules so they are immediately available
+from . import needle
 from . import smatrix
 
 # Define what gets exported if someone runs `from navette import *`
-__all__ = ["smatrix"]
+__all__ = ["needle", "smatrix"]

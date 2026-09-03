@@ -1,0 +1,18 @@
+[package]
+name = "spectralweave"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "spectralweave"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Note: Adjust pyo3/numpy versions if you are using a specific pre-release branch
+pyo3 = { version = "0.21", features = ["extension-module"] }
+numpy = "0.21"
+parking_lot = "0.12"
+lru = "0.12"
+mimalloc = "0.1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+bytemuck = "1.14"

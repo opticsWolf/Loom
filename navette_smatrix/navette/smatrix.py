@@ -2,7 +2,7 @@
 
 This module is a thin, self-contained wrapper around the compiled Rust core. It
 owns no physics: every quantity is produced by the request-driven engine
-(``core_engine`` / func_6) or the eigenmode solver. The wrapper's job is to
+(``core_engine.rs``) or the optimizer (``optimizer.rs``). The wrapper's job is to
 
   * hold a layer stack + wavelength/angle grid,
   * marshal them into the exact array layouts the Rust functions expect,
@@ -23,7 +23,8 @@ Conventions
   was supplied (the angle axis is squeezed away).
 
 The ``Request`` bit positions MUST stay in sync with the ``REQ_*`` constants in
-``func_6.rs``.
+``core_engine.rs``. The needle operator lives in ``needle.py`` and mirrors the
+``NREQ_*`` constants in ``needle_engine.rs``.
 """
 
 from __future__ import annotations
@@ -34,8 +35,8 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 # --- compiled Rust extension -------------------------------------------------
-# Only the symbols this wrapper actually uses are imported; the legacy
-# func_4/func_5 engines are intentionally not referenced.
+# Only the symbols this wrapper actually uses are imported; the needle engine
+# has its own wrapper module (`navette.needle`).
 try:
     from ._smatrix import (
         core_engine,
@@ -73,7 +74,7 @@ __all__ = [
 ]
 
 
-# ─── Flags / enums (mirror func_6.rs REQ_* and the coherence modes) ──────────
+# ─── Flags / enums (mirror core_engine.rs REQ_* and the coherence modes) ─────
 class Request(IntFlag):
     """Observable selectors. OR them together and pass to :meth:`ScatterMatrix.compute`."""
 

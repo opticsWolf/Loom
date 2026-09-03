@@ -24,7 +24,7 @@ from dataclasses import dataclass
 sys.path.insert(0, '.')
 
 try:
-    from navette_smatrix import (
+    from navette.smatrix import (
         reflection_coefficient,
         scan_landscape,
         find_local_minima,

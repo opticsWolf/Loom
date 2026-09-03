@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["navette-materials", "navette-materials-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-or-later"
+authors = ["opticsWolf"]
+
+# Pinned to versions that build on the rustc 1.75 toolchain used for parity CI.
+[workspace.dependencies]
+ndarray = "0.15"
+num-complex = "0.4"
+rayon = "1"

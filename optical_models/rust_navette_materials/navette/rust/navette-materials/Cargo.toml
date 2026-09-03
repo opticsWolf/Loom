@@ -1,0 +1,23 @@
+[package]
+name = "navette-materials"
+description = "Optical dispersion models for the Navette thin-film library (pure Rust core)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+# Pure library: no Python, no I/O. Reusable from any Rust code.
+name = "navette_materials"
+
+[dependencies]
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+rayon = { workspace = true }
+realfft = "3.3"
+
+[dev-dependencies]
+# .npy reading for golden-parity tests. default-features=false avoids the
+# npz/flate2 stack so the dev build stays clean on older toolchains.
+ndarray-npy = { version = "0.8", default-features = false }
+approx = "0.5"

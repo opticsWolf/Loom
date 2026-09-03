@@ -17,6 +17,10 @@ bytemuck = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 mimalloc = "0.1"
 
+# --- Optimization dependencies (ported from navette_spectralweave_2) ---
+ahash = "0.8"
+smallvec = "1.13"
+
 # A release profile noticeably improves the Rust benchmark numbers.
 # Build with:  maturin develop --release
 [profile.release]

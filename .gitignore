@@ -1,0 +1,84 @@
+# ============================================================
+# Navette — Python + Rust (PyO3/maturin) .gitignore
+# Goal: never commit build outputs (target/, wheels, bytecode,
+# caches). Source + Cargo.lock + pyproject.toml stay tracked.
+# ============================================================
+
+# ---------- Python bytecode / caches ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Compiled extension modules (built by maturin / setuptools)
+# Keep source .py, ignore build outputs:
+*.so
+*.pyd
+*.pdb
+
+# ---------- Rust / Cargo ----------
+# Never commit compiler output — `cargo build` recreates it.
+target/
+**/target/
+# (Keep Cargo.toml + Cargo.lock — they pin reproducible builds.)
+
+# ---------- Python packaging / maturin wheels ----------
+# Wheels are build artifacts (were previously committed under
+# target/wheels/ — removed in clean-tree branch).
+*.whl
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+
+# ---------- Local backup / archive files ----------
+# e.g. navette_smatrix_backup_*.7z, *-optimized.zip — workstation only.
+*.7z
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.bak
+*.orig
+*.rej
+*~
+*.tmp
+
+# ---------- Test / lint / type-check caches ----------
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ---------- Virtual envs ----------
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+
+# ---------- Editors / IDE / OS ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ---------- Profiling / logs ----------
+*.log
+*.prof
+*.lprof

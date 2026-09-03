@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "navette"
+version = "0.1.0"
+description = "Navette — the mathematics of light in thin-film systems."
+requires-python = ">=3.9"
+license = { text = "LGPL-3.0-or-later" }
+authors = [{ name = "opticsWolf" }]
+dependencies = ["numpy>=1.22"]
+
+[project.optional-dependencies]
+dev = ["maturin>=1.7,<2.0", "pytest", "scipy"]
+
+[tool.maturin]
+# The compiled extension is navette.materials._native; the Python sources
+# (the thin wrappers) live under python/ and are shipped alongside it.
+manifest-path = "rust/navette-materials-py/Cargo.toml"
+python-source = "python"
+module-name = "navette.materials._native"
+features = ["pyo3/extension-module", "pyo3/abi3-py39"]

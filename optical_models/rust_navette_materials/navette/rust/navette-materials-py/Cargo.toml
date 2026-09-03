@@ -1,0 +1,18 @@
+[package]
+name = "navette-materials-py"
+description = "PyO3 bindings exposing navette-materials kernels as navette.materials._native."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+navette-materials = { path = "../navette-materials" }
+num-complex = { workspace = true }
+ndarray = { workspace = true }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+numpy = "0.22"

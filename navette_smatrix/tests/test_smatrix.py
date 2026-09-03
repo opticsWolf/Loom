@@ -25,7 +25,7 @@ import time
 import numpy as np
 
 import loom_matrix as ref          # Numba reference
-import navette_smatrix as rs         # Rust extension
+from navette import smatrix as rs         # Rust extension
 
 RNG = np.random.default_rng(12345)
 
@@ -296,11 +296,66 @@ def parity_report():
         print(f"    {k:<28} {worst[k]:.3e}")
     return overall
 
+def benchmark_phot_vs_ellip():
+    print("\n" + "=" * 74)
+    print("PATH COMPARISON: Photometric vs Ellipsometric (Intensity Only)")
+    print("=" * 74)
+    
+    # Use a heavy workload to get clean timing signals
+    big = scenario_bragg(n_wavs=1000, n_pairs=10, n_angles=47)
+    iters = 30
+    
+    # -----------------------------------------------------------------------
+    # 1. VERIFY 1:1 MATCH
+    # -----------------------------------------------------------------------
+    # run_rs_ellip returns 13 elements.
+    # indices: 3=Rs, 4=Rp, 9=Ts, 10=Tp
+    out_ellip = run_rs_ellip(big, debug=0)
+    
+    # run_rs_phot returns 4 elements.
+    # indices: 0=Rs, 1=Rp, 2=Ts, 3=Tp
+    # Using cs=1, cp=1 to compute both s and p polarizations
+    out_phot = run_rs_phot(big, cs=1, cp=1)
+    
+    try:
+        np.testing.assert_allclose(out_ellip[3], out_phot[0], atol=1e-9)  # Rs
+        np.testing.assert_allclose(out_ellip[4], out_phot[1], atol=1e-9)  # Rp
+        np.testing.assert_allclose(out_ellip[9], out_phot[2], atol=1e-9)  # Ts
+        np.testing.assert_allclose(out_ellip[10], out_phot[3], atol=1e-9) # Tp
+        print("  ✓ Intensity results are mathematically identical between both paths.")
+    except AssertionError as e:
+        print("  ✗ Mismatch between photometric and ellipsometric intensity outputs!")
+        raise e
+
+    # -----------------------------------------------------------------------
+    # 2. BENCHMARK
+    # -----------------------------------------------------------------------
+    # Rust
+    tr_ellip = _bench(lambda: run_rs_ellip(big, 0), iters)
+    tr_phot  = _bench(lambda: run_rs_phot(big, 1, 1), iters)
+    
+    # Numba
+    tp_ellip = _bench(lambda: run_ref_ellip(big, 0), iters)
+    tp_phot  = _bench(lambda: run_ref_phot(big, 1, 1), iters)
+    
+    npts = big['wavls'].size * big['sin_theta'].size
+    print(f"\n  Workload: {big['wavls'].size} λ × {big['sin_theta'].size} angles ({npts:,} pts), {iters} iters")
+    
+    print("\n  [Rust Extension]")
+    print(f"    Ellipsometric Path: {tr_ellip*1e3:>7.2f} ms")
+    print(f"    Photometric Path:   {tr_phot*1e3:>7.2f} ms")
+    print(f"    Speedup:            {tr_ellip/tr_phot:>7.2f}x faster")
+
+    print("\n  [Python/Numba Reference]")
+    print(f"    Ellipsometric Path: {tp_ellip*1e3:>7.2f} ms")
+    print(f"    Photometric Path:   {tp_phot*1e3:>7.2f} ms")
+    print(f"    Speedup:            {tp_ellip/tp_phot:>7.2f}x faster\n")
 
 if __name__ == "__main__":
     print("Loom Matrix — Rust vs Python parity & benchmark\n")
     ok = parity_report()
     benchmark()
     print("\n" + "=" * 74)
+    benchmark_phot_vs_ellip()
     print("RESULT:", "ALL SCENARIOS MATCH ✓" if ok else "MISMATCHES FOUND ✗")
     print("=" * 74)
