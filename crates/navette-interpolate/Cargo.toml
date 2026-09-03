@@ -1,0 +1,17 @@
+[package]
+name = "navette-interpolate"
+version = "0.2.0"
+edition = "2024"
+authors = ["opticswolf"]
+description = "Fast univariate interpolation with multiple methods and batch support"
+license = "LGPL-3.0"
+repository = "https://github.com/opticswolf/navette-interpolator"
+
+[lib]
+name = "_interpolate"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"] }
+numpy = "0.28"          # default features include "pyo3"
+rayon = "1.12"

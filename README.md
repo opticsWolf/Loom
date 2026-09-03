@@ -47,3 +47,46 @@ Navette goes beyond simple Fresnel equations to provide research-grade accuracy:
 |**Optimization**|**Numba-JIT / Parallelized `prange`**: Delivers near-native C performance with Pythonic flexibility, optimized for high-concurrency simulation and real-time GUI responsiveness.|
 |**Polarization**|**Full $s$ and $p$ Support**: Comprehensive Jones and Stokes calculus integration, following standard commercial ellipsometry conventions (Azzam & Bashara).|
 |**Complexity**|**$O(N)$ Scaling**: Optimized linear time complexity relative to the number of layers, ensuring stable performance for complex multi-stack architectures.|
+
+### Project layout
+
+```
+Navette/
+├── Cargo.toml                # Rust workspace (cargo check/test --workspace)
+├── pyproject.toml            # pure-Python `navette` package (src layout)
+├── src/navette/              # unified Python package
+│   ├── __init__.py           # version + public surface
+│   ├── color/                # wrapper over native `navette._color`
+│   ├── interpolate/          # wrapper over native `navette._interpolate`
+│   ├── smatrix/              # ScatterMatrix + needle (native `navette._smatrix`)
+│   ├── spectralweave/        # weavers + merit (native `navette._spectralweave`)
+│   ├── materials/            # dispersion models (+ optional `navette.materials._native`)
+│   ├── structure/            # stacks, architect, solver arrays (pure Python)
+│   ├── config/               # YAML/JSON libraries and stack configs
+│   └── data/CIE/             # bundled reference spectra
+├── crates/                   # Rust sources, one crate per native module
+│   ├── navette-color/        # -> navette._color
+│   ├── navette-interpolate/  # -> navette._interpolate
+│   ├── navette-smatrix/      # -> navette._smatrix
+│   ├── navette-spectralweave/# -> navette._spectralweave
+│   ├── navette-materials/    # pure-Rust dispersion core
+│   └── navette-materials-py/ # -> navette.materials._native (standalone: pyo3 0.22)
+├── tests/                    # pytest (test_navette_imports.py runs without a build)
+├── benchmarks/  examples/  tools/  docs/plans/  attic/
+```
+
+### Install & build
+
+```powershell
+pip install -e .
+# Rust extensions, one per subpackage (all share ../../src as python-source):
+maturin develop -m crates/navette-smatrix/Cargo.toml
+maturin develop -m crates/navette-color/Cargo.toml
+maturin develop -m crates/navette-interpolate/Cargo.toml
+maturin develop -m crates/navette-spectralweave/Cargo.toml
+maturin develop -m crates/navette-materials-py/Cargo.toml
+# checks
+cargo check --workspace          # 5 crates (materials-py builds standalone)
+cargo test -p navette-materials
+pytest tests/test_navette_imports.py
+```

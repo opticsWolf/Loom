@@ -1,0 +1,14 @@
+[package]
+name = "navette-smatrix"
+version = "0.3.0"
+edition = "2024"
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "num-complex"] }
+num-complex = "0.4"
+numpy = "0.28"
+rayon = "1.10"
+
+[lib]
+name = "_smatrix"
+crate-type = ["cdylib"]

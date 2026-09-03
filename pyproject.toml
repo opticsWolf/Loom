@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Loom: Weaving the mathematics of light in thin film systems
+# Navette: Weaving the mathematics of light in thin film systems
 #
 # Copyright (c) 2026 opticsWolf
 #
@@ -10,37 +10,48 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "Loom"
-version = "0.1.0"
-authors = [
-  { name="opticsWolf", email="opticswolf@protonmail.com" },
-]
-description = "A high-performance optical engine utilizing a Scattering Matrix algorithm."
+name = "navette"
+version = "0.3.0"
+description = "A high-performance optical engine utilizing a Scattering Matrix algorithm for stable simulation of light in stratified media."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "LGPL-3.0-or-later"
+authors = [
+  { name = "opticsWolf", email = "opticswolf@protonmail.com" },
+]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
-    "Operating System :: OS Independent",
-    "Topic :: Scientific/Engineering :: Physics",
-    "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Intended Audience :: Science/Research",
 ]
 dependencies = [
-    "numpy>=1.22.0",
-    "numba>=0.56.0",
-    "scipy>=1.8.0",
+  "numpy>=1.22.0",
+  "scipy>=1.8.0",
+  "pyyaml>=6.0",
+  "pydantic>=2.0",
 ]
 
+[project.optional-dependencies]
+# Rust-accelerated subpackages. Each lives in crates/<name> and is built
+# with maturin against ../../src (python-source), e.g.:
+#   maturin develop -m crates/navette-smatrix/Cargo.toml
+# Install individually as needed:
+#   pip install ./crates/navette-smatrix ./crates/navette-color ...
+numba = ["numba>=0.56.0"]
+dev = ["pytest", "maturin>=1.5,<2.0"]
+all = ["numba>=0.56.0", "pytest", "maturin>=1.5,<2.0"]
+
 [project.urls]
-"Homepage" = "https://github.com/opticsWolf/loom"
+Homepage = "https://github.com/opticsWolf/Navette"
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = "test_*.py"
+[tool.setuptools]
+package-dir = { "" = "src" }
 
-[tool.mypy]
-python_version = "3.10"
-strict = true
-ignore_missing_imports = true
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["navette*"]
 
+[tool.setuptools.package-data]
+navette = ["py.typed", "data/**/*.json", "**/*.pyi"]
