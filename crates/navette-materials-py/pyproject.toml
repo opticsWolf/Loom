@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "navette-materials-native"
+name = "navette-materials"
 version = "0.3.0"
 description = "Rust kernels for Navette optical dispersion models"
 requires-python = ">=3.12"
