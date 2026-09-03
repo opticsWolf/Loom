@@ -9,7 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use navette_interpolate::UniInterpolator as Core;
+use navette::interpolate::UniInterpolator as Core;
 
 fn map_err(s: String) -> PyErr {
     PyValueError::new_err(s)
@@ -183,7 +183,7 @@ impl UniInterpolator {
 }
 
 #[pymodule]
-fn _interpolate<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
+pub fn _interpolate<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<UniInterpolator>()?;
     Ok(())
 }

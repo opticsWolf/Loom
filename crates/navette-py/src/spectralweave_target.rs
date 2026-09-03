@@ -4,10 +4,10 @@ use numpy::PyReadonlyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use navette_spectralweave::opticalweaver::{OpticalKey, SpectralData, wl_bits_eq};
-use navette_spectralweave::targetweaver::{ResolvedNormMode, TargetKind, TargetWeaver};
+use navette::spectralweave::opticalweaver::{OpticalKey, SpectralData, wl_bits_eq};
+use navette::spectralweave::targetweaver::{ResolvedNormMode, TargetKind, TargetWeaver};
 
-use crate::opticalweaver_py::PyOpticalWeaver;
+use super::spectralweave_optical::PyOpticalWeaver;
 
 
 // ---------------------------------------------------------------------------

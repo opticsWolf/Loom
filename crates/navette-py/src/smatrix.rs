@@ -11,12 +11,12 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 use std::f64::consts::PI;
 
-use navette_smatrix::coherent_block::*;
-use navette_smatrix::core_engine::*;
-use navette_smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_MB};
-use navette_smatrix::needle_operator::*;
-use navette_smatrix::optics_core::*;
-use navette_smatrix::optimizer::*;
+use navette::smatrix::coherent_block::*;
+use navette::smatrix::core_engine::*;
+use navette::smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_MB};
+use navette::smatrix::needle_operator::*;
+use navette::smatrix::optics_core::*;
+use navette::smatrix::optimizer::*;
 
 // ---- roughness / redheffer (trivial, over optics_core) ----
 #[pyfunction]
@@ -1186,7 +1186,7 @@ pub fn field_profile(
     Ok((z_pos, e_mag, layer_start, layer_end, layer_n))
 }
 #[pymodule]
-fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(w_function, m)?)?;
     m.add_function(wrap_pyfunction!(redheffer_product_complex_field, m)?)?;
     m.add_function(wrap_pyfunction!(redheffer_product_real, m)?)?;

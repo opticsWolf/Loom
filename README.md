@@ -64,13 +64,14 @@ Navette/
 │   ├── structure/            # stacks, architect, solver arrays (pure Python)
 │   ├── config/               # YAML/JSON libraries and stack configs
 │   └── data/CIE/             # bundled reference spectra
-├── crates/                   # Rust sources, one crate per native module
-│   ├── navette-color/        # -> navette._color
-│   ├── navette-interpolate/  # -> navette._interpolate
-│   ├── navette-smatrix/      # -> navette._smatrix
-│   ├── navette-spectralweave/# -> navette._spectralweave
+├── crates/                   # Rust sources: five pure cores + umbrella + bindings
+│   ├── navette-color/        # pure-Rust color core
+│   ├── navette-interpolate/  # pure-Rust interpolation core
+│   ├── navette-smatrix/      # pure-Rust S-matrix core
+│   ├── navette-spectralweave/# pure-Rust weaving core
 │   ├── navette-materials/    # pure-Rust dispersion core
-│   └── navette-materials-py/ # -> navette.materials._native (standalone: pyo3 0.22)
+│   ├── navette/              # umbrella rlib (published as `navette` on crates.io)
+│   └── navette-py/           # PyO3 aggregator -> navette._navette (one wheel)
 ├── tests/                    # pytest (test_navette_imports.py runs without a build)
 ├── benchmarks/  examples/  tools/  docs/plans/  attic/
 ```
@@ -78,15 +79,10 @@ Navette/
 ### Install & build
 
 ```powershell
-pip install -e .
-# Rust extensions, one per subpackage (all share ../../src as python-source):
-maturin develop -m crates/navette-smatrix/Cargo.toml
-maturin develop -m crates/navette-color/Cargo.toml
-maturin develop -m crates/navette-interpolate/Cargo.toml
-maturin develop -m crates/navette-spectralweave/Cargo.toml
-maturin develop -m crates/navette-materials-py/Cargo.toml
+# Single aggregated native extension (navette._navette, all five engines):
+maturin develop
 # checks
-cargo check --workspace          # 5 crates (materials-py builds standalone)
-cargo test -p navette-materials
+cargo check --workspace
+cargo test --workspace
 pytest tests/test_navette_imports.py
 ```

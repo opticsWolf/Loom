@@ -9,7 +9,7 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2,
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use navette_color::common::{REF_WHITE_D50, REF_WHITE_D65};
+use navette::color::common::{REF_WHITE_D50, REF_WHITE_D65};
 
 // ---- Zero-Copy Memory Helpers ------------------------------------------
 
@@ -83,7 +83,7 @@ fn new_out2<'py>(py: Python<'py>, n: usize) -> (Bound<'py, PyArray2<f64>>, &'py 
 fn srgb_to_xyz<'py>(py: Python<'py>, rgb: PyReadonlyArray2<'py, f64>, clip: bool) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&rgb)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::common::srgb_to_xyz(inp, clip, out_slice);
+    navette::color::common::srgb_to_xyz(inp, clip, out_slice);
     Ok(out_arr)
 }
 
@@ -92,7 +92,7 @@ fn srgb_to_xyz<'py>(py: Python<'py>, rgb: PyReadonlyArray2<'py, f64>, clip: bool
 fn xyz_to_srgb<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>, clip: bool) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyz)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::common::xyz_to_srgb(inp, clip, out_slice);
+    navette::color::common::xyz_to_srgb(inp, clip, out_slice);
     Ok(out_arr)
 }
 
@@ -102,7 +102,7 @@ fn xyz_to_lab<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>, illuminant:
     let inp = as_slice3(&xyz)?;
     let illum = illuminant.unwrap_or(REF_WHITE_D65);
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::common::xyz_to_lab(inp, &illum, out_slice);
+    navette::color::common::xyz_to_lab(inp, &illum, out_slice);
     Ok(out_arr)
 }
 
@@ -112,7 +112,7 @@ fn lab_to_xyz<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>, illuminant:
     let inp = as_slice3(&lab)?;
     let illum = illuminant.unwrap_or(REF_WHITE_D65);
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::common::lab_to_xyz(inp, &illum, out_slice);
+    navette::color::common::lab_to_xyz(inp, &illum, out_slice);
     Ok(out_arr)
 }
 
@@ -122,7 +122,7 @@ fn lab_to_xyz<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>, illuminant:
 fn srgb_to_lab<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&srgb)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::srgb_to_lab(inp, out_slice); 
+    navette::color::composites::srgb_to_lab(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -130,7 +130,7 @@ fn srgb_to_lab<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyResu
 fn lab_to_srgb<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&lab)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::lab_to_srgb(inp, out_slice); 
+    navette::color::composites::lab_to_srgb(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -138,7 +138,7 @@ fn lab_to_srgb<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyResul
 fn srgb_to_lch<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&srgb)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::srgb_to_lch(inp, out_slice); 
+    navette::color::composites::srgb_to_lch(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -146,7 +146,7 @@ fn srgb_to_lch<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyResu
 fn lch_to_srgb<'py>(py: Python<'py>, lch: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&lch)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::lch_to_srgb(inp, out_slice); 
+    navette::color::composites::lch_to_srgb(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -154,7 +154,7 @@ fn lch_to_srgb<'py>(py: Python<'py>, lch: PyReadonlyArray2<'py, f64>) -> PyResul
 fn srgb_to_luv<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&srgb)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::srgb_to_luv(inp, out_slice); 
+    navette::color::composites::srgb_to_luv(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -162,7 +162,7 @@ fn srgb_to_luv<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyResu
 fn luv_to_srgb<'py>(py: Python<'py>, luv: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&luv)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::luv_to_srgb(inp, out_slice); 
+    navette::color::composites::luv_to_srgb(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -170,7 +170,7 @@ fn luv_to_srgb<'py>(py: Python<'py>, luv: PyReadonlyArray2<'py, f64>) -> PyResul
 fn srgb_to_xy_y<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&srgb)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::srgb_to_xyy_bound(inp, out_slice); 
+    navette::color::composites::srgb_to_xyy_bound(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -178,7 +178,7 @@ fn srgb_to_xy_y<'py>(py: Python<'py>, srgb: PyReadonlyArray2<'py, f64>) -> PyRes
 fn xy_y_to_srgb<'py>(py: Python<'py>, xyy: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyy)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::xyy_to_srgb(inp, out_slice); 
+    navette::color::composites::xyy_to_srgb(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -186,7 +186,7 @@ fn xy_y_to_srgb<'py>(py: Python<'py>, xyy: PyReadonlyArray2<'py, f64>) -> PyResu
 fn clip_absolute<'py>(py: Python<'py>, rgb: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&rgb)?; 
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::composites::clip_absolute(inp, out_slice); 
+    navette::color::composites::clip_absolute(inp, out_slice); 
     Ok(out_arr)
 }
 
@@ -204,7 +204,7 @@ fn set_strict_ieee(enabled: bool) {
 fn xyz_to_xyy<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyz)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_01::xyz_to_xyy(inp, out_slice);
+    navette::color::func_01::xyz_to_xyy(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -212,7 +212,7 @@ fn xyz_to_xyy<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyResult
 fn xyy_to_xyz<'py>(py: Python<'py>, xyy: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyy)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_01::xyy_to_xyz(inp, out_slice);
+    navette::color::func_01::xyy_to_xyz(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -222,7 +222,7 @@ fn xyy_to_xyz<'py>(py: Python<'py>, xyy: PyReadonlyArray2<'py, f64>) -> PyResult
 fn lab_to_lch<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&lab)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_02::lab_to_lch(inp, out_slice);
+    navette::color::func_02::lab_to_lch(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -230,7 +230,7 @@ fn lab_to_lch<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyResult
 fn lch_to_lab<'py>(py: Python<'py>, lch: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&lch)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_02::lch_to_lab(inp, out_slice);
+    navette::color::func_02::lch_to_lab(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -246,7 +246,7 @@ fn xyz_to_luv<'py>(
     let inp = as_slice3(&xyz)?;
     let illum = illuminant.unwrap_or(REF_WHITE_D65);
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_03::xyz_to_luv(inp, &illum, out_slice);
+    navette::color::func_03::xyz_to_luv(inp, &illum, out_slice);
     Ok(out_arr)
 }
 
@@ -260,7 +260,7 @@ fn luv_to_xyz<'py>(
     let inp = as_slice3(&luv)?;
     let illum = illuminant.unwrap_or(REF_WHITE_D65);
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_03::luv_to_xyz(inp, &illum, out_slice);
+    navette::color::func_03::luv_to_xyz(inp, &illum, out_slice);
     Ok(out_arr)
 }
 
@@ -270,7 +270,7 @@ fn luv_to_xyz<'py>(
 fn xyz_to_oklab<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyz)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_04::xyz_to_oklab(inp, out_slice);
+    navette::color::func_04::xyz_to_oklab(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -278,7 +278,7 @@ fn xyz_to_oklab<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyResu
 fn oklab_to_xyz<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&lab)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_04::oklab_to_xyz(inp, out_slice);
+    navette::color::func_04::oklab_to_xyz(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -288,7 +288,7 @@ fn oklab_to_xyz<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyResu
 fn srgb_to_oklab<'py>(py: Python<'py>, rgb: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&rgb)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_05::srgb_to_oklab(inp, out_slice);
+    navette::color::func_05::srgb_to_oklab(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -296,7 +296,7 @@ fn srgb_to_oklab<'py>(py: Python<'py>, rgb: PyReadonlyArray2<'py, f64>) -> PyRes
 fn oklab_to_srgb<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&lab)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_05::oklab_to_srgb(inp, out_slice);
+    navette::color::func_05::oklab_to_srgb(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -304,7 +304,7 @@ fn oklab_to_srgb<'py>(py: Python<'py>, lab: PyReadonlyArray2<'py, f64>) -> PyRes
 
 #[pyfunction]
 fn white_point_uv1960(illuminant: [f64; 3]) -> (f64, f64) {
-    navette_color::func_06::white_point_uv1960(&illuminant)
+    navette::color::func_06::white_point_uv1960(&illuminant)
 }
 
 #[pyfunction(name = "XYZ_to_UVW")]
@@ -312,9 +312,9 @@ fn white_point_uv1960(illuminant: [f64; 3]) -> (f64, f64) {
 fn xyz_to_uvw<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>, illuminant: Option<[f64; 3]>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyz)?;
     let illum = illuminant.unwrap_or(REF_WHITE_D65);
-    let (un, vn) = navette_color::func_06::white_point_uv1960(&illum);
+    let (un, vn) = navette::color::func_06::white_point_uv1960(&illum);
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_06::xyz_to_uvw(inp, un, vn, out_slice);
+    navette::color::func_06::xyz_to_uvw(inp, un, vn, out_slice);
     Ok(out_arr)
 }
 
@@ -323,9 +323,9 @@ fn xyz_to_uvw<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>, illuminant:
 fn uvw_to_xyz<'py>(py: Python<'py>, uvw: PyReadonlyArray2<'py, f64>, illuminant: Option<[f64; 3]>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&uvw)?;
     let illum = illuminant.unwrap_or(REF_WHITE_D65);
-    let (un, vn) = navette_color::func_06::white_point_uv1960(&illum);
+    let (un, vn) = navette::color::func_06::white_point_uv1960(&illum);
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_06::uvw_to_xyz(inp, un, vn, out_slice);
+    navette::color::func_06::uvw_to_xyz(inp, un, vn, out_slice);
     Ok(out_arr)
 }
 
@@ -335,7 +335,7 @@ fn uvw_to_xyz<'py>(py: Python<'py>, uvw: PyReadonlyArray2<'py, f64>, illuminant:
 fn xyz_to_ucs<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyz)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_07::xyz_to_ucs(inp, out_slice);
+    navette::color::func_07::xyz_to_ucs(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -343,7 +343,7 @@ fn xyz_to_ucs<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyResult
 fn ucs_to_xyz<'py>(py: Python<'py>, ucs: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&ucs)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_07::ucs_to_xyz(inp, out_slice);
+    navette::color::func_07::ucs_to_xyz(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -351,7 +351,7 @@ fn ucs_to_xyz<'py>(py: Python<'py>, ucs: PyReadonlyArray2<'py, f64>) -> PyResult
 fn xyz_to_ucs_uv<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyz)?;
     let (out_arr, out_slice) = new_out2(py, inp.len());
-    navette_color::func_07::xyz_to_ucs_uv(inp, out_slice);
+    navette::color::func_07::xyz_to_ucs_uv(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -359,7 +359,7 @@ fn xyz_to_ucs_uv<'py>(py: Python<'py>, xyz: PyReadonlyArray2<'py, f64>) -> PyRes
 fn uv1976_to_xy<'py>(py: Python<'py>, uvp: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice2(&uvp)?;
     let (out_arr, out_slice) = new_out2(py, inp.len());
-    navette_color::func_07::uv1976_to_xy(inp, out_slice);
+    navette::color::func_07::uv1976_to_xy(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -367,7 +367,7 @@ fn uv1976_to_xy<'py>(py: Python<'py>, uvp: PyReadonlyArray2<'py, f64>) -> PyResu
 fn uv1960_to_xy<'py>(py: Python<'py>, uv: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice2(&uv)?;
     let (out_arr, out_slice) = new_out2(py, inp.len());
-    navette_color::func_07::uv1960_to_xy(inp, out_slice);
+    navette::color::func_07::uv1960_to_xy(inp, out_slice);
     Ok(out_arr)
 }
 
@@ -384,14 +384,14 @@ fn adapt<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let inp = as_slice3(&xyz)?;
     let (out_arr, out_slice) = new_out3(py, inp.len());
-    navette_color::func_08::adapt(inp, &src_white, &dst_white, clip_negative, out_slice);
+    navette::color::func_08::adapt(inp, &src_white, &dst_white, clip_negative, out_slice);
     Ok(out_arr)
 }
 
 /// Row-vector Bradford matrix: `adapted = white @ M`. Returns a (3, 3) array.
 #[pyfunction]
 fn calc_transform_matrix<'py>(py: Python<'py>, src_white: [f64; 3], dst_white: [f64; 3]) -> Bound<'py, PyArray2<f64>> {
-    let m = navette_color::func_08::calc_transform_matrix(&src_white, &dst_white);
+    let m = navette::color::func_08::calc_transform_matrix(&src_white, &dst_white);
     let flat: Vec<f64> = m.iter().flat_map(|r| r.iter().copied()).collect();
     Array2::from_shape_vec((3, 3), flat).expect("3x3").into_pyarray(py)
 }
@@ -405,14 +405,14 @@ fn delta_e_2000<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: Py
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
     let (kl, kc, kh) = if textiles { (2.0, 1.0, 1.0) } else { (k_L, k_C, k_H) };
-    Ok(navette_color::func_16::delta_e_2000(a, b, kl, kc, kh).into_pyarray(py))
+    Ok(navette::color::func_16::delta_e_2000(a, b, kl, kc, kh).into_pyarray(py))
 }
 
 #[pyfunction(name = "delta_E_CIE1976")]
 fn delta_e_76<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
-    Ok(navette_color::func_09::delta_e_76(a, b).into_pyarray(py))
+    Ok(navette::color::func_09::delta_e_76(a, b).into_pyarray(py))
 }
 
 #[pyfunction(name = "delta_E_CIE1994")]
@@ -421,11 +421,11 @@ fn delta_e_94<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyRe
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
     let p = if textiles {
-        navette_color::func_10::De94Params::TEXTILES
+        navette::color::func_10::De94Params::TEXTILES
     } else {
-        navette_color::func_10::De94Params::GRAPHIC
+        navette::color::func_10::De94Params::GRAPHIC
     };
-    Ok(navette_color::func_10::delta_e_94(a, b, p).into_pyarray(py))
+    Ok(navette::color::func_10::delta_e_94(a, b, p).into_pyarray(py))
 }
 
 #[pyfunction(name = "delta_E_CMC")]
@@ -433,7 +433,7 @@ fn delta_e_94<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyRe
 fn delta_e_cmc<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyReadonlyArray2<'py, f64>, pl: f64, pc: f64) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
-    Ok(navette_color::func_11::delta_e_cmc(a, b, pl, pc).into_pyarray(py))
+    Ok(navette::color::func_11::delta_e_cmc(a, b, pl, pc).into_pyarray(py))
 }
 
 #[pyfunction(name = "delta_E_DIN99")]
@@ -442,7 +442,7 @@ fn delta_e_din99<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: P
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
     let (ke, kch) = if textiles { (2.0, 0.5) } else { (1.0, 1.0) };
-    Ok(navette_color::func_12::delta_e_din99(a, b, ke, kch).into_pyarray(py))
+    Ok(navette::color::func_12::delta_e_din99(a, b, ke, kch).into_pyarray(py))
 }
 
 // ---- func_13: spectral pipeline ----------------------------------------
@@ -460,7 +460,7 @@ fn spectral_to_srgb<'py>(
     let spd = as_slice1(&spd)?;
     let cmfs = as_slice3(&cmfs)?;
     let illum = as_slice1(&illum)?;
-    let rgb = navette_color::func_13::spectral_to_srgb(spd, cmfs, illum, interval, apply_adaptation);
+    let rgb = navette::color::func_13::spectral_to_srgb(spd, cmfs, illum, interval, apply_adaptation);
     Ok(rgb.to_vec().into_pyarray(py))
 }
 
@@ -468,7 +468,7 @@ fn spectral_to_srgb<'py>(
 
 #[pyclass(name = "PhotometryEngine")]
 struct PyPhotometry {
-    inner: navette_color::func_14::PhotometryEngine,
+    inner: navette::color::func_14::PhotometryEngine,
 }
 
 #[pymethods]
@@ -482,7 +482,7 @@ impl PyPhotometry {
         km_s: f64,
     ) -> PyResult<Self> {
         Ok(PyPhotometry {
-            inner: navette_color::func_14::PhotometryEngine::with_constants(
+            inner: navette::color::func_14::PhotometryEngine::with_constants(
                 as_slice1(&v_photopic)?.to_vec(),
                 as_slice1(&v_scotopic)?.to_vec(),
                 km_p,
@@ -496,9 +496,9 @@ impl PyPhotometry {
     #[pyo3(signature = (spd, vision="photopic", m=1.0, interval=1.0))]
     fn calculate_flux(&self, spd: PyReadonlyArray1<'_, f64>, vision: &str, m: f64, interval: f64) -> PyResult<f64> {
         let v = match vision.to_ascii_lowercase().as_str() {
-            "photopic" => navette_color::func_14::Vision::Photopic,
-            "scotopic" => navette_color::func_14::Vision::Scotopic,
-            "mesopic" => navette_color::func_14::Vision::Mesopic,
+            "photopic" => navette::color::func_14::Vision::Photopic,
+            "scotopic" => navette::color::func_14::Vision::Scotopic,
+            "mesopic" => navette::color::func_14::Vision::Mesopic,
             other => return Err(PyValueError::new_err(format!("unknown vision '{other}'"))),
         };
         Ok(self.inner.calculate_flux(as_slice1(&spd)?, v, m, interval))
@@ -512,7 +512,7 @@ impl PyPhotometry {
 // ---- module registration -----------------------------------------------
 
 #[pymodule]
-fn _color(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn _color(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("REF_WHITE_D65", REF_WHITE_D65.to_vec().into_pyarray(m.py()))?;
     m.add("REF_WHITE_D50", REF_WHITE_D50.to_vec().into_pyarray(m.py()))?;
 

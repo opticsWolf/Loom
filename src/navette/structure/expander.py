@@ -3,7 +3,7 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union
 import numpy as np
 
 try:
-  from navette.materials._native import ema_looyenga as _looyenga_eps
+  from navette._materials import ema_looyenga as _looyenga_eps
 except ImportError:  # pragma: no cover - native not built; numpy fallback below
   _looyenga_eps = None  # type: ignore[assignment]
 

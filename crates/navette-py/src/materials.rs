@@ -7,7 +7,7 @@
 //!      parallel) kernel runs,
 //!   4. returns a NumPy complex128 array.
 //!
-//! Compiled module name: `navette.materials._native`.
+//! Compiled module name: `navette._materials` (submodule of the aggregated `navette._navette` extension).
 
 use ndarray::{Array1, Array2};
 use num_complex::Complex64;
@@ -15,7 +15,7 @@ use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods}
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use navette_materials as core;
+use navette::materials as core;
 
 /// Helper: copy a 1-D f64 array into an owned (core-version) ndarray.
 ///
@@ -365,7 +365,7 @@ fn table_nk<'py>(
 }
 
 #[pymodule]
-fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn _materials(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cauchy_nk, m)?)?;
     m.add_function(wrap_pyfunction!(cauchy_urbach_nk, m)?)?;
     m.add_function(wrap_pyfunction!(sellmeier_nk, m)?)?;

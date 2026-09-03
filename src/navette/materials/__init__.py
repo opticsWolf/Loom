@@ -4,10 +4,10 @@
 
 Thin layer: :class:`MaterialSpec` values (``model`` + plain ``params`` dict)
 are evaluated by :func:`evaluate`, which dispatches straight to the compiled
-``navette.materials._native`` extension
-(``crates/navette-materials-py``)::
+``navette._materials`` extension (submodule of the aggregated
+``navette._navette`` module built from the repo root)::
 
-    maturin develop -m crates/navette-materials-py/Cargo.toml
+    maturin develop
 
 No Python kernels remain; every model (including Konstant/Table) is native.
 """
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
+_BUILD_HINT = "maturin develop  # from the repo root"
 
 _native_mod = None  # loaded lazily so specs import without a built extension
 
@@ -31,10 +31,10 @@ def _load_native():
     import importlib
 
     try:
-      mod = importlib.import_module(f"{__name__}._native")
+      mod = importlib.import_module("navette._materials")
     except ImportError as exc:
       raise ImportError(
-        "Could not import the compiled `navette.materials._native` extension. "
+        "Could not import the compiled `navette._materials` extension. "
         "Build the Rust crate so it is importable, then retry:\n"
         f"    {_BUILD_HINT}"
       ) from exc
@@ -43,7 +43,8 @@ def _load_native():
 
 
 def __getattr__(name: str):
-  if name == "_native":
+  if name in ("_native", "_materials"):
+    # `_native` kept as a deprecated alias for the renamed module.
     return _load_native()
   raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

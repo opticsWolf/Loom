@@ -2,15 +2,12 @@
 resolver = "2"
 members = [
   "crates/navette-color",
-  "crates/navette-color-py",
   "crates/navette-interpolate",
-  "crates/navette-interpolate-py",
   "crates/navette-smatrix",
-  "crates/navette-smatrix-py",
   "crates/navette-spectralweave",
-  "crates/navette-spectralweave-py",
   "crates/navette-materials",
-  "crates/navette-materials-py",
+  "crates/navette",
+  "crates/navette-py",
 ]
 
 [workspace.package]
@@ -28,6 +25,13 @@ numpy = "0.28"
 num-complex = "0.4"
 rayon = "1"
 ndarray = "0.15"
+# Engine cores (version + path: resolvable on crates.io at publish time).
+navette-color = { version = "0.3.0", path = "crates/navette-color" }
+navette-interpolate = { version = "0.3.0", path = "crates/navette-interpolate" }
+navette-materials = { version = "0.3.0", path = "crates/navette-materials" }
+navette-smatrix = { version = "0.3.0", path = "crates/navette-smatrix" }
+navette-spectralweave = { version = "0.3.0", path = "crates/navette-spectralweave" }
+navette = { version = "0.3.0", path = "crates/navette" }
 
 [profile.release]
 opt-level = 3

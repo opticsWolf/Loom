@@ -1,6 +1,6 @@
 [package]
 name = "navette-interpolate"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["opticswolf"]
 description = "Pure-Rust univariate interpolation core (no Python). Bindings live in navette-interpolate-py."

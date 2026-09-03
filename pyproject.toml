@@ -6,8 +6,8 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "navette"
@@ -34,11 +34,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Rust-accelerated subpackages. Each lives in crates/<name> and is built
-# with maturin against ../../src (python-source), e.g.:
-#   maturin develop -m crates/navette-smatrix/Cargo.toml
-# Install individually as needed:
-#   pip install ./crates/navette-smatrix ./crates/navette-color ...
+# Single aggregated native extension (navette._navette with all engines).
+# Dev install: maturin develop   (from the repo root)
 numba = ["numba>=0.56.0"]
 dev = ["pytest", "maturin>=1.5,<2.0"]
 all = ["numba>=0.56.0", "pytest", "maturin>=1.5,<2.0"]
@@ -46,12 +43,10 @@ all = ["numba>=0.56.0", "pytest", "maturin>=1.5,<2.0"]
 [project.urls]
 Homepage = "https://github.com/opticsWolf/Navette"
 
-[tool.setuptools]
-package-dir = { "" = "src" }
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["navette*"]
-
-[tool.setuptools.package-data]
-navette = ["py.typed", "data/**/*.json", "**/*.pyi"]
+[tool.maturin]
+# Single-aggregator mixed project: one cdylib (crates/navette-py) with five
+# native submodules, installed as navette._navette alongside src/navette.
+bindings = "pyo3"
+manifest-path = "crates/navette-py/Cargo.toml"
+python-source = "src"
+module-name = "navette._navette"

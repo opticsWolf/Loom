@@ -6,7 +6,7 @@ use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use navette_spectralweave::opticalweaver::{
+use navette::spectralweave::opticalweaver::{
     OpticalCollection, OpticalKey, OpticalWeaver, SpectralData, SpectralDataFrame, Unit,
     parse_intensity, parse_spectral, unit_to_str,
 };

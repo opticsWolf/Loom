@@ -1,6 +1,6 @@
 [package]
 name = "navette-spectralweave"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Pure-Rust spectral weaving engine core (no Python). Bindings live in navette-spectralweave-py."
 license = "LGPL-3.0-or-later"

@@ -1,0 +1,21 @@
+[package]
+name = "navette"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Unified optical thin-film engine: color, interpolation, S-matrix, spectral weaving, materials."
+keywords = ["optics", "thin-film", "color", "interpolation", "spectral"]
+categories = ["science"]
+
+[lib]
+name = "navette"
+crate-type = ["rlib"]
+
+[dependencies]
+navette-color = { workspace = true }
+navette-interpolate = { workspace = true }
+navette-materials = { workspace = true }
+navette-smatrix = { workspace = true }
+navette-spectralweave = { workspace = true }
