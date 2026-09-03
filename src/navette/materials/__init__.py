@@ -21,13 +21,13 @@ import numpy as np
 
 _BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
 
-_native = None  # loaded lazily so specs import without a built extension
+_native_mod = None  # loaded lazily so specs import without a built extension
 
 
 def _load_native():
   """Import the compiled extension on first use (helpful error if missing)."""
-  global _native
-  if _native is None:
+  global _native_mod
+  if _native_mod is None:
     import importlib
 
     try:
@@ -38,8 +38,8 @@ def _load_native():
         "Build the Rust crate so it is importable, then retry:\n"
         f"    {_BUILD_HINT}"
       ) from exc
-    _native = mod
-  return _native
+    _native_mod = mod
+  return _native_mod
 
 
 def __getattr__(name: str):

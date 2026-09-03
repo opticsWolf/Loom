@@ -10,11 +10,8 @@ members = [
   "crates/navette-spectralweave",
   "crates/navette-spectralweave-py",
   "crates/navette-materials",
+  "crates/navette-materials-py",
 ]
-# Standalone (own lockfile): pyo3 0.22 predates the 0.28 used above and
-# cannot share a resolve (both link `python`). Build it separately:
-#   maturin develop -m crates/navette-materials-py/Cargo.toml
-exclude = ["crates/navette-materials-py"]
 
 [workspace.package]
 version = "0.3.0"

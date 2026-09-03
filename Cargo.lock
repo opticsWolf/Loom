@@ -255,6 +255,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "navette-materials-py"
+version = "0.3.0"
+dependencies = [
+ "navette-materials",
+ "ndarray 0.15.6",
+ "num-complex",
+ "numpy",
+ "pyo3",
+]
+
+[[package]]
 name = "navette-smatrix"
 version = "0.3.0"
 dependencies = [

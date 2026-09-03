@@ -30,8 +30,8 @@ def test_config_imports() -> None:
     assert hasattr(cfg, name), name
 
 
-def test_materials_imports_without_native() -> None:
-  import pytest
+def test_materials_evaluate_with_native() -> None:
+  import numpy as np
 
   import navette.materials as m
 
@@ -39,11 +39,12 @@ def test_materials_imports_without_native() -> None:
     assert hasattr(m, name), name
   assert "Cauchy" in m.MODELS and "Lorentz" in m.MODELS
 
-  # Specs build with pure Python; only evaluation needs the extension.
   spec = m.MaterialSpec(model="Cauchy", params={"A": 1.5, "B": 0.004, "C": 0.0})
   assert spec.model == "Cauchy"
-  with pytest.raises(ImportError, match="maturin develop"):
-    m.evaluate(spec, [550.0])
+  nk = m.evaluate(spec, np.array([550.0]))
+  assert nk.shape == (1,)
+  assert abs(nk[0].real - (1.5 + 0.004 / 0.55**2)) < 1e-9
+  assert nk[0].imag == 0.0
 
 
 def test_data_bundled() -> None:
@@ -53,8 +54,15 @@ def test_data_bundled() -> None:
   assert cmf.is_file()
 
 
-def test_native_wrappers_fail_helpfully() -> None:
-  import pytest
+def test_native_wrappers_import() -> None:
+  import navette._color  # noqa: F401
+  import navette._interpolate  # noqa: F401
+  import navette._smatrix  # noqa: F401
+  import navette._spectralweave  # noqa: F401
+  import navette.smatrix  # noqa: F401
 
-  with pytest.raises(ImportError, match="maturin develop"):
-    import navette.smatrix  # noqa: F401
+  from navette.interpolate import UniInterpolator
+  from navette.spectralweave import OpticalWeaver, TargetWeaver
+
+  assert UniInterpolator is not None
+  assert OpticalWeaver is not None and TargetWeaver is not None

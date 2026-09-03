@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 navette-smatrix = { path = "../navette-smatrix" }
-pyo3 = { workspace = true, features = ["extension-module", "num-complex"] }
+pyo3 = { workspace = true, features = ["abi3-py312", "extension-module", "num-complex"] }
 numpy = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }

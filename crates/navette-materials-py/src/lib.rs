@@ -3,7 +3,7 @@
 //! This crate contains NO math. Each `#[pyfunction]`:
 //!   1. takes NumPy arrays (wavelength in nm) + scalar params,
 //!   2. owns the input data so the compute closure is `Send`,
-//!   3. releases the GIL via `py.allow_threads` while the (possibly rayon-
+//!   3. releases the GIL via `py.detach` while the (possibly rayon-
 //!      parallel) kernel runs,
 //!   4. returns a NumPy complex128 array.
 //!
@@ -11,25 +11,37 @@
 
 use ndarray::{Array1, Array2};
 use num_complex::Complex64;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use navette_materials as core;
 
-/// Helper: own a 1-D f64 view as a `Send` ndarray for `allow_threads`.
+/// Helper: copy a 1-D f64 array into an owned (core-version) ndarray.
+///
+/// Uses slices only, so the numpy-bundled ndarray version never leaks in.
 fn owned1(a: PyReadonlyArray1<f64>) -> ndarray::Array1<f64> {
-    a.as_array().to_owned()
+    ndarray::Array1::from_vec(a.as_slice().expect("array must be contiguous").to_vec())
 }
 
-/// Helper: own a 1-D complex view as a `Send` ndarray.
+/// Helper: copy a 1-D complex array into an owned (core-version) ndarray.
 fn ownedc1(a: PyReadonlyArray1<Complex64>) -> Array1<Complex64> {
-    a.as_array().to_owned()
+    Array1::from_vec(a.as_slice().expect("array must be contiguous").to_vec())
 }
 
-/// Helper: own a 2-D f64 view (oscillator array) as a `Send` ndarray.
+/// Helper: copy a 2-D f64 (oscillator) array into an owned (core-version) ndarray.
 fn owned2(a: PyReadonlyArray2<f64>) -> Array2<f64> {
-    a.as_array().to_owned()
+    let sh = a.shape();
+    Array2::from_shape_vec(
+        (sh[0], sh[1]),
+        a.as_slice().expect("array must be contiguous").to_vec(),
+    )
+    .expect("oscillator shape")
+}
+
+/// Move a core complex vector back into NumPy (always contiguous).
+fn to_py<'py>(py: Python<'py>, out: Array1<Complex64>) -> Bound<'py, PyArray1<Complex64>> {
+    PyArray1::from_slice(py, out.as_slice().expect("core output contiguous"))
 }
 
 #[pyfunction]
@@ -41,8 +53,8 @@ fn cauchy_nk<'py>(
     c: f64,
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
-    let out = py.allow_threads(move || core::cauchy::cauchy_nk(wl.view(), a, b, c));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::cauchy::cauchy_nk(wl.view(), a, b, c));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -58,8 +70,8 @@ fn cauchy_urbach_nk<'py>(
     lambda_g: f64,
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
-    let out = py.allow_threads(move || core::cauchy::cauchy_urbach_nk(wl.view(), a, b, c, alpha0, eu, lambda_g));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::cauchy::cauchy_urbach_nk(wl.view(), a, b, c, alpha0, eu, lambda_g));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -75,8 +87,8 @@ fn sellmeier_nk<'py>(
     c3: f64,
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
-    let out = py.allow_threads(move || core::sellmeier::sellmeier_nk(wl.view(), b1, c1, b2, c2, b3, c3));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::sellmeier::sellmeier_nk(wl.view(), b1, c1, b2, c2, b3, c3));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -95,10 +107,10 @@ fn sellmeier_urbach_nk<'py>(
     lambda_g: f64,
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
-    let out = py.allow_threads(move || {
+    let out = py.detach(move || {
         core::sellmeier::sellmeier_urbach_nk(wl.view(), b1, c1, b2, c2, b3, c3, alpha0, eu, lambda_g)
     });
-    out.into_pyarray_bound(py)
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -110,8 +122,8 @@ fn lorentz_nk<'py>(
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
     let o = owned2(osc);
-    let out = py.allow_threads(move || core::lorentz::lorentz_nk(wl.view(), o.view(), eps_inf));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::lorentz::lorentz_nk(wl.view(), o.view(), eps_inf));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -123,8 +135,8 @@ fn drude_nk<'py>(
     eps_inf: f64,
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
-    let out = py.allow_threads(move || core::drude::drude_nk(wl.view(), omega_p, gamma, eps_inf));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::drude::drude_nk(wl.view(), omega_p, gamma, eps_inf));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -138,8 +150,8 @@ fn drude_lorentz_nk<'py>(
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
     let o = owned2(osc);
-    let out = py.allow_threads(move || core::drude::drude_lorentz_nk(wl.view(), omega_p, gamma_d, eps_inf, o.view()));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::drude::drude_lorentz_nk(wl.view(), omega_p, gamma_d, eps_inf, o.view()));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -154,9 +166,9 @@ fn cody_lorentz_nk<'py>(
 ) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
     let wl = owned1(wavelength_nm);
     let o = owned2(osc);
-    let res = py.allow_threads(move || core::cody_lorentz::cody_lorentz_nk(wl.view(), eg, et, eu, o.view(), eps_inf));
+    let res = py.detach(move || core::cody_lorentz::cody_lorentz_nk(wl.view(), eg, et, eu, o.view(), eps_inf));
     match res {
-        Ok(out) => Ok(out.into_pyarray_bound(py)),
+        Ok(out) => Ok(to_py(py, out)),
         Err(msg) => Err(PyValueError::new_err(msg)),
     }
 }
@@ -170,8 +182,8 @@ fn fb_interband_nk<'py>(
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
     let t = owned2(ib);
-    let out = py.allow_threads(move || core::forouhi_bloomer::fb_interband_nk(wl.view(), n_inf, t.view()));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::forouhi_bloomer::fb_interband_nk(wl.view(), n_inf, t.view()));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -185,8 +197,8 @@ fn fb_metal_nk<'py>(
     let wl = owned1(wavelength_nm);
     let fe_o = owned1(fe);
     let t = owned2(ib);
-    let out = py.allow_threads(move || core::forouhi_bloomer::fb_metal_nk(wl.view(), n_inf, fe_o.view(), t.view()));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::forouhi_bloomer::fb_metal_nk(wl.view(), n_inf, fe_o.view(), t.view()));
+    to_py(py, out)
 }
 
 // --- EMA mixers (take inclusion/host refractive indices, return permittivity) ---
@@ -202,8 +214,8 @@ macro_rules! ema_simple {
         ) -> Bound<'py, PyArray1<Complex64>> {
             let ni = ownedc1(n_i);
             let nh = ownedc1(n_h);
-            let out = py.allow_threads(move || $core(ni.view(), nh.view(), f));
-            out.into_pyarray_bound(py)
+            let out = py.detach(move || $core(ni.view(), nh.view(), f));
+            to_py(py, out)
         }
     };
 }
@@ -224,8 +236,8 @@ fn ema_bruggeman<'py>(
 ) -> Bound<'py, PyArray1<Complex64>> {
     let ni = ownedc1(n_i);
     let nh = ownedc1(n_h);
-    let out = py.allow_threads(move || core::ema::bruggeman(ni.view(), nh.view(), f, max_iter, tol));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::ema::bruggeman(ni.view(), nh.view(), f, max_iter, tol));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -239,8 +251,8 @@ fn ema_mori_tanaka<'py>(
 ) -> Bound<'py, PyArray1<Complex64>> {
     let ni = ownedc1(n_i);
     let nh = ownedc1(n_h);
-    let out = py.allow_threads(move || core::ema::mori_tanaka(ni.view(), nh.view(), f, l));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::ema::mori_tanaka(ni.view(), nh.view(), f, l));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -254,8 +266,8 @@ fn ema_power_law<'py>(
 ) -> Bound<'py, PyArray1<Complex64>> {
     let ni = ownedc1(n_i);
     let nh = ownedc1(n_h);
-    let out = py.allow_threads(move || core::ema::general_power_law(ni.view(), nh.view(), f, alpha));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::ema::general_power_law(ni.view(), nh.view(), f, alpha));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -266,16 +278,16 @@ fn ema_roughness<'py>(
 ) -> Bound<'py, PyArray1<Complex64>> {
     let nb = ownedc1(n_bottom);
     let nt = ownedc1(n_top);
-    let out = py.allow_threads(move || core::ema::roughness_interface(nb.view(), nt.view()));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::ema::roughness_interface(nb.view(), nt.view()));
+    to_py(py, out)
 }
 
 /// √ε for an array of permittivities (the EMA composition's final step).
 #[pyfunction]
 fn eps_to_nk<'py>(py: Python<'py>, eps: PyReadonlyArray1<'py, Complex64>) -> Bound<'py, PyArray1<Complex64>> {
     let e = ownedc1(eps);
-    let out = py.allow_threads(move || core::ema::eps_to_nk(e.view()));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::ema::eps_to_nk(e.view()));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -288,9 +300,9 @@ fn tauc_lorentz_nk<'py>(
 ) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
     let wl = owned1(wavelength_nm);
     let o = owned2(osc);
-    let res = py.allow_threads(move || core::tauc_lorentz::tauc_lorentz_nk(wl.view(), eg, o.view(), eps_inf));
+    let res = py.detach(move || core::tauc_lorentz::tauc_lorentz_nk(wl.view(), eg, o.view(), eps_inf));
     match res {
-        Ok(out) => Ok(out.into_pyarray_bound(py)),
+        Ok(out) => Ok(to_py(py, out)),
         Err(msg) => Err(PyValueError::new_err(msg)),
     }
 }
@@ -304,9 +316,9 @@ fn ubf_nk<'py>(
 ) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
     let wl = owned1(wavelength_nm);
     let o = owned2(osc);
-    let res = py.allow_threads(move || core::ubf::ubf_nk(wl.view(), o.view(), eps_inf));
+    let res = py.detach(move || core::ubf::ubf_nk(wl.view(), o.view(), eps_inf));
     match res {
-        Ok(out) => Ok(out.into_pyarray_bound(py)),
+        Ok(out) => Ok(to_py(py, out)),
         Err(msg) => Err(PyValueError::new_err(msg)),
     }
 }
@@ -319,8 +331,8 @@ fn konstant_nk<'py>(
     k: f64,
 ) -> Bound<'py, PyArray1<Complex64>> {
     let wl = owned1(wavelength_nm);
-    let out = py.allow_threads(move || core::table::konstant_nk(wl.view(), n, k));
-    out.into_pyarray_bound(py)
+    let out = py.detach(move || core::table::konstant_nk(wl.view(), n, k));
+    to_py(py, out)
 }
 
 #[pyfunction]
@@ -339,7 +351,7 @@ fn table_nk<'py>(
     let g = owned1(grid_wl);
     let n = owned1(n_vals);
     let k = k_vals.map(owned1);
-    let out = py.allow_threads(move || {
+    let out = py.detach(move || {
         core::table::table_nk(
             wl.view(),
             g.view(),
@@ -349,7 +361,7 @@ fn table_nk<'py>(
             k_factor,
         )
     });
-    out.into_pyarray_bound(py)
+    to_py(py, out)
 }
 
 #[pymodule]

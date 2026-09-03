@@ -11,6 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 navette-color = { path = "../navette-color" }
-pyo3 = { workspace = true }
+pyo3 = { workspace = true, features = ["abi3-py312"] }
 numpy = { workspace = true }
 rayon = { workspace = true }
