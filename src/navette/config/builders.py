@@ -16,90 +16,36 @@ from navette.structure import (
     Navette_Structure,
     Navette_Architect,
 )
-from navette.materials.basic import Konstant, TableMaterial
-from navette.materials.cauchy_sellmeier import (
-    Cauchy,
-    CauchyUrbach,
-    Sellmeier,
-    SellmeierUrbach,
-)
+from navette.materials import MaterialSpec
 from .models import MaterialDefinition, LayerConfig, GroupConfig
 
 def material_from_config(
     cfg: MaterialDefinition,
     wavelength: np.ndarray,
-) -> "Material":
-    """Create a Material object from a MaterialDefinition."""
-    if cfg.model == "Konstant":
-        return Konstant(
-            n=cfg.params.n,
-            k=cfg.params.k,
-            wavelength=wavelength,
-        )
-    elif cfg.model == "Cauchy":
-        return Cauchy(
-            A=cfg.params.A,
-            B=cfg.params.B,
-            C=cfg.params.C,
-            wavelength=wavelength,
-        )
-    elif cfg.model == "CauchyUrbach":
-        return CauchyUrbach(
-            A=cfg.params.A,
-            B=cfg.params.B,
-            C=cfg.params.C,
-            alpha0=cfg.params.alpha0,
-            Eu=cfg.params.Eu,
-            lambda_g=cfg.params.lambda_g,
-            wavelength=wavelength,
-        )
-    elif cfg.model == "Sellmeier":
-        p = cfg.params.model_dump()
-        return Sellmeier(
-            B1=p["B1"],
-            C1=p["C1"],
-            B2=p["B2"],
-            C2=p["C2"],
-            B3=p["B3"],
-            C3=p["C3"],
-            wavelength=wavelength,
-        )
-    elif cfg.model == "SellmeierUrbach":
-        p = cfg.params.model_dump()
-        return SellmeierUrbach(
-            B1=p["B1"],
-            C1=p["C1"],
-            B2=p["B2"],
-            C2=p["C2"],
-            B3=p["B3"],
-            C3=p["C3"],
-            alpha0=p["alpha0"],
-            Eu=p["Eu"],
-            lambda_g=p["lambda_g"],
-            wavelength=wavelength,
-        )
-    elif cfg.model == "TableMaterial":
+) -> MaterialSpec:
+    """Create a MaterialSpec from a MaterialDefinition (evaluated natively)."""
+    model = cfg.model
+    if model == "TableMaterial":
+        model = "Table"
+    if model not in (
+        "Konstant", "Table", "Cauchy", "CauchyUrbach", "Sellmeier",
+        "SellmeierUrbach",
+    ):
+        raise ValueError(f"Unsupported material model: {cfg.model}")
+    params = cfg.params.model_dump()
+    if model == "Table":
         if cfg.n_data is None:
             raise ValueError("TableMaterial requires n_data")
-        n_wl = np.array(cfg.n_data.wavelengths)
-        n_vals = np.array(cfg.n_data.values)
-        n_data = (n_wl, n_vals)
-        k_data = None
-        if cfg.k_data:
-            k_wl = np.array(cfg.k_data.wavelengths)
-            k_vals = np.array(cfg.k_data.values)
-            k_data = (k_wl, k_vals)
-        return TableMaterial(
-            n_data=n_data,
-            k_data=k_data,
-            n_factor=cfg.params.n_factor,
-            k_factor=cfg.params.k_factor,
-            interpolation_type_n=cfg.params.interpolation_type_n,
-            interpolation_type_k=cfg.params.interpolation_type_k,
-            wavelength=wavelength,
+        params["n_data"] = (
+            np.array(cfg.n_data.wavelengths), np.array(cfg.n_data.values)
         )
-    else:
-        raise ValueError(f"Unsupported material model: {cfg.model}")
+        if cfg.k_data:
+            params["k_data"] = (
+                np.array(cfg.k_data.wavelengths), np.array(cfg.k_data.values)
+            )
+    wavelength = np.asarray(wavelength, dtype=np.float64)  # validated here
+    return MaterialSpec(model=model, params=params)
+
 
 def material_provider_from_library(
     library: List[MaterialDefinition],

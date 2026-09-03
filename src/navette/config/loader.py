@@ -56,29 +56,36 @@ def save_material_library(
 
     library = []
     for name, mat in mat_dict.items():
-        # Try to retrieve the material definition
-        # For simplicity, we only export basic parameters; for TableMaterial we also need n_data.
-        # This is a minimal export; a full round-trip may require more metadata.
-        # We'll implement a basic version here.
-        params = mat.get_params()
-        model_type = mat.__class__.__name__
-        if model_type == "Konstant":
-            params_model = {"n": params["n"], "k": params.get("k", 0.0)}
-        elif model_type == "TableMaterial":
-            # For TableMaterial, we need to export n_data and k_data.
-            # This is more involved – we'll skip for now or raise.
-            raise NotImplementedError("Export of TableMaterial to config not yet implemented")
-        elif model_type in ("Cauchy", "CauchyUrbach", "Sellmeier", "SellmeierUrbach"):
-            params_model = params
-        else:
-            raise ValueError(f"Unsupported material type for export: {model_type}")
-
-        definition = {
+        # Specs round-trip directly; anything else is legacy.
+        model = getattr(mat, "model", None)
+        params = getattr(mat, "params", None)
+        if model is None or params is None:
+            raise TypeError(
+                f"save_material_library needs MaterialSpec values, got {type(mat).__name__}"
+            )
+        params_model = {
+            k: (v.tolist() if isinstance(v, np.ndarray) else v)
+            for k, v in params.items()
+            if k not in ("n_data", "k_data")
+        }
+        definition: Dict[str, Any] = {
             "name": name,
             "code": name,  # assume code equals name, could be improved
-            "model": model_type,
+            "model": model,
             "params": params_model,
         }
+        if "n_data" in params and params["n_data"] is not None:
+            gw, nv = params["n_data"]
+            definition["n_data"] = {
+                "wavelengths": np.asarray(gw).tolist(),
+                "values": np.asarray(nv).tolist(),
+            }
+        if params.get("k_data") is not None:
+            gw, kv = params["k_data"]
+            definition["k_data"] = {
+                "wavelengths": np.asarray(gw).tolist(),
+                "values": np.asarray(kv).tolist(),
+            }
         library.append(definition)
 
     out_data = {"materials": library}

@@ -311,6 +311,47 @@ fn ubf_nk<'py>(
     }
 }
 
+#[pyfunction]
+fn konstant_nk<'py>(
+    py: Python<'py>,
+    wavelength_nm: PyReadonlyArray1<'py, f64>,
+    n: f64,
+    k: f64,
+) -> Bound<'py, PyArray1<Complex64>> {
+    let wl = owned1(wavelength_nm);
+    let out = py.allow_threads(move || core::table::konstant_nk(wl.view(), n, k));
+    out.into_pyarray_bound(py)
+}
+
+#[pyfunction]
+#[pyo3(signature = (wavelength_nm, grid_wl, n_vals, k_vals=None, n_factor=1.0, k_factor=1.0))]
+#[allow(clippy::too_many_arguments)]
+fn table_nk<'py>(
+    py: Python<'py>,
+    wavelength_nm: PyReadonlyArray1<'py, f64>,
+    grid_wl: PyReadonlyArray1<'py, f64>,
+    n_vals: PyReadonlyArray1<'py, f64>,
+    k_vals: Option<PyReadonlyArray1<'py, f64>>,
+    n_factor: f64,
+    k_factor: f64,
+) -> Bound<'py, PyArray1<Complex64>> {
+    let wl = owned1(wavelength_nm);
+    let g = owned1(grid_wl);
+    let n = owned1(n_vals);
+    let k = k_vals.map(owned1);
+    let out = py.allow_threads(move || {
+        core::table::table_nk(
+            wl.view(),
+            g.view(),
+            n.view(),
+            k.as_ref().map(|k| k.view()),
+            n_factor,
+            k_factor,
+        )
+    });
+    out.into_pyarray_bound(py)
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cauchy_nk, m)?)?;
@@ -333,5 +374,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eps_to_nk, m)?)?;
     m.add_function(wrap_pyfunction!(ubf_nk, m)?)?;
     m.add_function(wrap_pyfunction!(tauc_lorentz_nk, m)?)?;
+    m.add_function(wrap_pyfunction!(konstant_nk, m)?)?;
+    m.add_function(wrap_pyfunction!(table_nk, m)?)?;
     Ok(())
 }

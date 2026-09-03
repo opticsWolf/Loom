@@ -31,6 +31,7 @@ pub mod forouhi_bloomer;
 pub mod cody_lorentz;
 pub mod ubf;
 pub mod tauc_lorentz;
+pub mod table;
 pub mod kk;
 
 /// Shared evaluation interface: complex refractive index at wavelengths [nm].
