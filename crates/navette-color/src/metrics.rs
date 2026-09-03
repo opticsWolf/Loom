@@ -5,7 +5,6 @@
 //! functions (1 reference vs N samples, or N vs 1). The `map_pairs` function
 //! is re‑exported by `func_15` for shape handling.
 
-#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 /// Apply a binary function to paired elements from two color batches,
@@ -22,7 +21,6 @@ use rayon::prelude::*;
 /// outweighs the benefit, so `map_pairs` runs sequentially even when the
 /// `parallel` feature is enabled. Tune to taste; ~50k is a safe default for
 /// the cheap per-element kernels here.
-#[cfg(feature = "parallel")]
 pub const PAR_THRESHOLD: usize = 50_000;
 
 pub fn map_pairs<F>(lab1: &[[f64; 3]], lab2: &[[f64; 3]], f: F) -> Vec<f64>
@@ -41,7 +39,6 @@ where
     };
 
     // Parallel execution (Rayon) for large batches only.
-    #[cfg(feature = "parallel")]
     {
         if n >= PAR_THRESHOLD {
             return if n1 == n2 {

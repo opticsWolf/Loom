@@ -3,15 +3,15 @@ name = "navette-interpolate"
 version = "0.2.0"
 edition = "2024"
 authors = ["opticswolf"]
-description = "Fast univariate interpolation with multiple methods and batch support"
+description = "Pure-Rust univariate interpolation core (no Python). Bindings live in navette-interpolate-py."
 license = "LGPL-3.0"
 repository = "https://github.com/opticswolf/navette-interpolator"
 
 [lib]
-name = "_interpolate"
-crate-type = ["cdylib"]
+name = "navette_interpolate"
+crate-type = ["rlib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"] }
-numpy = "0.28"          # default features include "pyo3"
-rayon = "1.12"
+# Must match numpy 0.28's ndarray (0.17) so core arrays convert to Python.
+ndarray = "0.17"
+rayon = { workspace = true }

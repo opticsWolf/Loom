@@ -24,8 +24,8 @@ Pure-Python subpackages (no build needed):
 Build the Rust extensions with e.g.::
 
     pip install -e .
-    maturin develop -m crates/navette-smatrix/Cargo.toml
-    maturin develop -m crates/navette-color/Cargo.toml
+    maturin develop -m crates/navette-smatrix-py/Cargo.toml
+    maturin develop -m crates/navette-color-py/Cargo.toml
     ...
 
 Wrappers raise a helpful ``ImportError`` (with the exact maturin command)

@@ -19,22 +19,39 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-try:
-  from . import _native
-except ImportError as exc:  # pragma: no cover - native not built yet
-  raise ImportError(
-    "Could not import the compiled `navette.materials._native` extension. "
-    "Build the Rust crate so it is importable, then retry:\n"
-    "    maturin develop -m crates/navette-materials-py/Cargo.toml"
-  ) from exc
+_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
+
+_native = None  # loaded lazily so specs import without a built extension
+
+
+def _load_native():
+  """Import the compiled extension on first use (helpful error if missing)."""
+  global _native
+  if _native is None:
+    import importlib
+
+    try:
+      mod = importlib.import_module(f"{__name__}._native")
+    except ImportError as exc:
+      raise ImportError(
+        "Could not import the compiled `navette.materials._native` extension. "
+        "Build the Rust crate so it is importable, then retry:\n"
+        f"    {_BUILD_HINT}"
+      ) from exc
+    _native = mod
+  return _native
+
+
+def __getattr__(name: str):
+  if name == "_native":
+    return _load_native()
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
   "MaterialSpec",
   "evaluate",
   "MODELS",
 ]
-
-_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
 
 #: All models handled by :func:`evaluate`.
 MODELS: Tuple[str, ...] = (
@@ -127,6 +144,7 @@ def evaluate(
     raise ValueError("wavelength_nm must be a non-empty 1-D array")
   p = spec.params
   get = p.get
+  _native = _load_native()
 
   def req(*names: str) -> List[float]:
     missing = [n for n in names if n not in p]

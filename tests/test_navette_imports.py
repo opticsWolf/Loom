@@ -31,10 +31,19 @@ def test_config_imports() -> None:
 
 
 def test_materials_imports_without_native() -> None:
+  import pytest
+
   import navette.materials as m
 
-  for name in ("Material", "Cauchy", "LorentzOscillator", "TaucLorentz"):
+  for name in ("MaterialSpec", "evaluate", "MODELS"):
     assert hasattr(m, name), name
+  assert "Cauchy" in m.MODELS and "Lorentz" in m.MODELS
+
+  # Specs build with pure Python; only evaluation needs the extension.
+  spec = m.MaterialSpec(model="Cauchy", params={"A": 1.5, "B": 0.004, "C": 0.0})
+  assert spec.model == "Cauchy"
+  with pytest.raises(ImportError, match="maturin develop"):
+    m.evaluate(spec, [550.0])
 
 
 def test_data_bundled() -> None:

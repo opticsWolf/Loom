@@ -2,24 +2,17 @@
 name = "navette-spectralweave"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"  # pyo3 0.28.x MSRV
+description = "Pure-Rust spectral weaving engine core (no Python). Bindings live in navette-spectralweave-py."
+license = "LGPL-3.0-or-later"
 
 [lib]
-name = "_spectralweave"
-crate-type = ["cdylib"]
+name = "navette_spectralweave"
+crate-type = ["rlib"]
 
 [dependencies]
-pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py312"] }
-numpy = "0.28"
 parking_lot = "0.12"
 lru = "0.12"
 bytemuck = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-mimalloc = "0.1"
-
-# --- Optimization dependencies (ported from navette_spectralweave_2) ---
 ahash = "0.8"
 smallvec = "1.13"
-
-# A release profile noticeably improves the Rust benchmark numbers.
-# Build with:  maturin develop --release

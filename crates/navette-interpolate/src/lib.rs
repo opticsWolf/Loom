@@ -1,8 +1,9 @@
-use pyo3::prelude::*;
-use pyo3::exceptions::PyValueError;
-use pyo3::types::PyTuple;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2};
-use numpy::ndarray::{Array1, Array2};
+//! Pure-Rust univariate interpolation core (no Python, no I/O).
+//!
+//! Batch-aware kernels with rayon-parallel evaluation.
+//! PyO3 bindings live in `navette-interpolate-py`.
+
+use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 
 // Threshold above which a single-signal evaluation is split across threads.
@@ -31,17 +32,15 @@ enum ExtrapMode {
 }
 
 impl ExtrapMode {
-    fn from_str(s: &str) -> PyResult<Self> {
+    pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
             "linear" => Ok(ExtrapMode::Linear),
             "clamp" => Ok(ExtrapMode::Clamp),
             "error" => Ok(ExtrapMode::Error),
-            _ => Err(PyValueError::new_err(
-                "extrap must be 'linear', 'clamp', or 'error'",
-            )),
+            _ => Err("extrap must be 'linear', 'clamp', or 'error'".to_string()),
         }
     }
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ExtrapMode::Linear => "linear",
             ExtrapMode::Clamp => "clamp",
@@ -53,7 +52,9 @@ impl ExtrapMode {
 // -------------------------------------------------------------------------
 // Main spline struct
 // -------------------------------------------------------------------------
-#[pyclass]
+
+// Core interpolator (plain Rust; no Python types)
+#[derive(Clone)]
 pub struct UniInterpolator {
     x: Array1<f64>,
     y: Array2<f64>,
@@ -65,293 +66,104 @@ pub struct UniInterpolator {
     extrap: ExtrapMode,
 }
 
-// -------------------------------------------------------------------------
-// Python-visible methods
-// -------------------------------------------------------------------------
-#[pymethods]
 impl UniInterpolator {
-    #[new]
-    #[pyo3(signature = (x, y, method="pchip", robust=false, d=3, extrap="linear"))]
-    fn new<'py>(
-        x: PyReadonlyArray1<'py, f64>,
-        y: Bound<'py, PyAny>,
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        x: Array1<f64>,
+        y: Array2<f64>,
+        is_batch: bool,
         method: &str,
         robust: bool,
         mut d: usize,
         extrap: &str,
-    ) -> PyResult<Self> {
+    ) -> Result<Self, String> {
         let method = method.to_lowercase();
         let extrap_mode = ExtrapMode::from_str(extrap)?;
-        let x_arr = x.as_array().to_owned();
-        let n = x_arr.len();
-
+        let n = x.len();
         if n < 2 {
-            return Err(PyValueError::new_err("x must have at least 2 points"));
+            return Err("x must have at least 2 points".to_string());
         }
         for i in 1..n {
-            if x_arr[i] <= x_arr[i - 1] {
-                return Err(PyValueError::new_err("x must be strictly increasing"));
+            if x[i] <= x[i - 1] {
+                return Err("x must be strictly increasing".to_string());
             }
         }
-
-        let (y_arr, is_batch) = if let Ok(y_2d) = y.extract::<PyReadonlyArray2<f64>>() {
-            let arr = y_2d.as_array().to_owned();
-            if arr.ncols() != n {
-                return Err(PyValueError::new_err(format!(
-                    "y row length ({}) must match x length ({})",
-                    arr.ncols(),
-                    n
-                )));
-            }
-            (arr, true)
-        } else if let Ok(y_1d) = y.extract::<PyReadonlyArray1<f64>>() {
-            let arr_1d = y_1d.as_array().to_owned();
-            if arr_1d.len() != n {
-                return Err(PyValueError::new_err(format!(
-                    "y length ({}) must match x length ({})",
-                    arr_1d.len(),
-                    n
-                )));
-            }
-            let arr_2d = arr_1d
-                .into_shape_with_order((1, n))
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            (arr_2d, false)
-        } else {
-            return Err(PyValueError::new_err("y must be a 1D or 2D numpy array"));
-        };
-
-        // Clamp Floater-Hormann degree into a valid range.
+        if y.ncols() != n {
+            return Err(format!("y row length ({}) must match x length ({})", y.ncols(), n));
+        }
         if d >= n {
             d = n.saturating_sub(1);
         }
-
         match method.as_str() {
             "sprague" => {
                 if n < 6 {
-                    return Err(PyValueError::new_err("Sprague requires at least 6 points"));
+                    return Err("Sprague requires at least 6 points".to_string());
                 }
             }
             "pchip" | "makima" | "floater_hormann" | "fh" | "linear" => {}
-            _ => {
-                return Err(PyValueError::new_err(format!("Unknown method: {}", method)));
-            }
+            _ => return Err(format!("Unknown method: {}", method)),
         }
-
         let aux_data = match method.as_str() {
-            "pchip" => AuxData::Slopes(calc_pchip_slopes(&x_arr, &y_arr)),
-            "makima" => AuxData::Slopes(calc_makima_slopes(&x_arr, &y_arr)),
-            "floater_hormann" | "fh" => AuxData::FHWeights(calc_fh_weights(&x_arr, d)),
+            "pchip" => AuxData::Slopes(calc_pchip_slopes(&x, &y)),
+            "makima" => AuxData::Slopes(calc_makima_slopes(&x, &y)),
+            "floater_hormann" | "fh" => AuxData::FHWeights(calc_fh_weights(&x, d)),
             _ => AuxData::None,
         };
-
-        Ok(UniInterpolator {
-            x: x_arr,
-            y: y_arr,
-            method,
-            robust,
-            d,
-            is_batch,
-            aux_data,
-            extrap: extrap_mode,
-        })
+        Ok(Self { x, y, method, robust, d, is_batch, aux_data, extrap: extrap_mode })
     }
 
-    #[pyo3(name = "__call__")]
-    #[pyo3(signature = (target_x, deriv=0, sorted_hint=None))]
-    fn call<'py>(
-        &self,
-        py: Python<'py>,
-        target_x: PyReadonlyArray1<'py, f64>,
-        deriv: usize,
-        sorted_hint: Option<bool>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let tgt_x = target_x
-            .as_slice()
-            .map_err(|_| PyValueError::new_err("target_x must be contiguous"))?;
+    pub fn evaluate(&self, tgt_x: &[f64], deriv: usize, sorted_hint: Option<bool>) -> Array2<f64> {
         let n_tgt = tgt_x.len();
-
-        if n_tgt == 0 {
-            let empty = if self.is_batch {
-                Array2::<f64>::zeros((self.y.nrows(), 0))
-                    .into_pyarray(py)
-                    .into_any()
-            } else {
-                Array1::<f64>::zeros(0).into_pyarray(py).into_any()
-            };
-            return Ok(empty);
-        }
-
-        let is_sorted = sorted_hint.unwrap_or_else(|| is_sorted_slice(tgt_x));
         let n_signals = self.y.nrows();
         let mut out = Array2::<f64>::zeros((n_signals, n_tgt));
-
-        // Release the GIL: the heavy numeric work below touches only Rust data.
-        py.detach(|| {
-            let x_slice = self.x.as_slice().unwrap();
-            let method_str = self.method.as_str();
-            let robust = self.robust;
-            let extrap = self.extrap;
-
-            if n_signals == 1 {
-                // Single signal: optionally parallelize across target chunks.
-                let y_view = self.y.row(0);
+        if n_tgt == 0 { return out; }
+        let is_sorted = sorted_hint.unwrap_or_else(|| is_sorted_slice(tgt_x));
+        let x_slice = self.x.as_slice().unwrap();
+        let method_str = self.method.as_str();
+        let robust = self.robust;
+        let extrap = self.extrap;
+        if n_signals == 1 {
+            let y_view = self.y.row(0);
+            let y_slice = y_view.as_slice().unwrap();
+            let slopes_row0 = match &self.aux_data { AuxData::Slopes(s) => Some(s.row(0)), _ => None };
+            let d_opt = slopes_row0.as_ref().map(|r| r.as_slice().unwrap());
+            let w_opt = match &self.aux_data { AuxData::FHWeights(w) => Some(w.as_slice().unwrap()), _ => None };
+            let out_flat = out.as_slice_mut().unwrap();
+            if n_tgt >= PAR_TARGET_THRESHOLD {
+                let nthreads = rayon::current_num_threads().max(1);
+                let chunk = n_tgt.div_ceil(nthreads).max(MIN_PAR_CHUNK);
+                out_flat.par_chunks_mut(chunk).zip(tgt_x.par_chunks(chunk)).for_each(|(o, t)| {
+                    run_kernel(method_str, robust, t, x_slice, y_slice, d_opt, w_opt, o, deriv, is_sorted, extrap);
+                });
+            } else {
+                run_kernel(method_str, robust, tgt_x, x_slice, y_slice, d_opt, w_opt, out_flat, deriv, is_sorted, extrap);
+            }
+        } else {
+            let slopes_ref = match &self.aux_data { AuxData::Slopes(s) => Some(s), _ => None };
+            let w_opt = match &self.aux_data { AuxData::FHWeights(w) => Some(w.as_slice().unwrap()), _ => None };
+            out.as_slice_mut().unwrap().par_chunks_exact_mut(n_tgt).enumerate().for_each(|(k, out_slice)| {
+                let y_view = self.y.row(k);
                 let y_slice = y_view.as_slice().unwrap();
-                let slopes_row0 = match &self.aux_data {
-                    AuxData::Slopes(s) => Some(s.row(0)),
-                    _ => None,
-                };
-                let d_opt = slopes_row0.as_ref().map(|r| r.as_slice().unwrap());
-                let w_opt = match &self.aux_data {
-                    AuxData::FHWeights(w) => Some(w.as_slice().unwrap()),
-                    _ => None,
-                };
-                let out_flat = out.as_slice_mut().unwrap();
-
-                if n_tgt >= PAR_TARGET_THRESHOLD {
-                    let nthreads = rayon::current_num_threads().max(1);
-                    let chunk = n_tgt.div_ceil(nthreads).max(MIN_PAR_CHUNK);
-                    out_flat
-                        .par_chunks_mut(chunk)
-                        .zip(tgt_x.par_chunks(chunk))
-                        .for_each(|(o, t)| {
-                            run_kernel(
-                                method_str, robust, t, x_slice, y_slice, d_opt, w_opt, o,
-                                deriv, is_sorted, extrap,
-                            );
-                        });
-                } else {
-                    run_kernel(
-                        method_str, robust, tgt_x, x_slice, y_slice, d_opt, w_opt, out_flat,
-                        deriv, is_sorted, extrap,
-                    );
-                }
-            } else {
-                // Batch: parallelize across signals (rows).
-                let slopes_ref = match &self.aux_data {
-                    AuxData::Slopes(s) => Some(s),
-                    _ => None,
-                };
-                let w_opt = match &self.aux_data {
-                    AuxData::FHWeights(w) => Some(w.as_slice().unwrap()),
-                    _ => None,
-                };
-                out.as_slice_mut()
-                    .unwrap()
-                    .par_chunks_exact_mut(n_tgt)
-                    .enumerate()
-                    .for_each(|(k, out_slice)| {
-                        let y_view = self.y.row(k);
-                        let y_slice = y_view.as_slice().unwrap();
-                        let d_view = slopes_ref.map(|s| s.row(k));
-                        let d_opt = d_view.as_ref().map(|r| r.as_slice().unwrap());
-                        run_kernel(
-                            method_str, robust, tgt_x, x_slice, y_slice, d_opt, w_opt, out_slice,
-                            deriv, is_sorted, extrap,
-                        );
-                    });
-            }
-        });
-
-        if self.is_batch {
-            Ok(out.into_pyarray(py).into_any())
-        } else {
-            let out_1d = out
-                .into_shape_with_order(n_tgt)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok(out_1d.into_pyarray(py).into_any())
+                let d_view = slopes_ref.map(|s| s.row(k));
+                let d_opt = d_view.as_ref().map(|r| r.as_slice().unwrap());
+                run_kernel(method_str, robust, tgt_x, x_slice, y_slice, d_opt, w_opt, out_slice, deriv, is_sorted, extrap);
+            });
         }
+        out
     }
 
-    fn eval<'py>(
-        &self,
-        py: Python<'py>,
-        target_x: PyReadonlyArray1<'py, f64>,
-    ) -> PyResult<Py<PyAny>> {
-        Ok(self.call(py, target_x, 0, None)?.unbind())
+    pub fn x_clone(&self) -> Array1<f64> { self.x.clone() }
+    pub fn y_clone(&self) -> Array2<f64> { self.y.clone() }
+    pub fn slopes_clone(&self) -> Option<Array2<f64>> {
+        match &self.aux_data { AuxData::Slopes(s) => Some(s.clone()), _ => None }
     }
-
-    fn derivative<'py>(
-        &self,
-        py: Python<'py>,
-        target_x: PyReadonlyArray1<'py, f64>,
-    ) -> PyResult<Py<PyAny>> {
-        Ok(self.call(py, target_x, 1, None)?.unbind())
-    }
-
-    fn get_x<'py>(&self, py: Python<'py>) -> PyResult<Py<PyArray1<f64>>> {
-        Ok(self.x.clone().into_pyarray(py).unbind())
-    }
-
-    #[pyo3(signature = (signal=None))]
-    fn get_y<'py>(&self, py: Python<'py>, signal: Option<usize>) -> PyResult<Py<PyAny>> {
-        let n_sig = self.y.nrows();
-        if let Some(idx) = signal {
-            if idx >= n_sig {
-                return Err(PyValueError::new_err("signal index out of range"));
-            }
-            let row = self.y.row(idx).to_owned();
-            Ok(row.into_pyarray(py).into_any().unbind())
-        } else if self.is_batch {
-            Ok(self.y.clone().into_pyarray(py).into_any().unbind())
-        } else {
-            let flat = self.y.row(0).to_owned();
-            Ok(flat.into_pyarray(py).into_any().unbind())
-        }
-    }
-
-    #[pyo3(signature = (signal=None))]
-    fn get_slopes<'py>(
-        &self,
-        py: Python<'py>,
-        signal: Option<usize>,
-    ) -> PyResult<Option<Py<PyAny>>> {
-        if let AuxData::Slopes(ref slopes) = self.aux_data {
-            let n_sig = slopes.nrows();
-            if let Some(idx) = signal {
-                if idx >= n_sig {
-                    return Err(PyValueError::new_err("signal index out of range"));
-                }
-                let row = slopes.row(idx).to_owned();
-                Ok(Some(row.into_pyarray(py).into_any().unbind()))
-            } else if n_sig == 1 && !self.is_batch {
-                let flat = slopes.row(0).to_owned();
-                Ok(Some(flat.into_pyarray(py).into_any().unbind()))
-            } else {
-                Ok(Some(slopes.clone().into_pyarray(py).into_any().unbind()))
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Py<PyTuple>> {
-        // Restore original dimensionality for serialization.
-        let y_out = if self.is_batch {
-            self.y.clone().into_pyarray(py).into_any()
-        } else {
-            self.y.row(0).to_owned().into_pyarray(py).into_any()
-        };
-
-        let args = PyTuple::new(
-            py,
-            vec![
-                self.x.clone().into_pyarray(py).into_any(),
-                y_out,
-                self.method.as_str().into_pyobject(py)?.into_any(),
-                self.robust.into_pyobject(py)?.to_owned().into_any(),
-                self.d.into_pyobject(py)?.into_any(),
-                self.extrap.as_str().into_pyobject(py)?.into_any(),
-            ],
-        )?;
-
-        let cls = py.get_type::<UniInterpolator>();
-        let tuple = PyTuple::new(py, vec![cls.into_any(), args.into_any()])?;
-        Ok(tuple.unbind())
-    }
+    pub fn method(&self) -> &str { &self.method }
+    pub fn robust(&self) -> bool { self.robust }
+    pub fn fh_d(&self) -> usize { self.d }
+    pub fn is_batch(&self) -> bool { self.is_batch }
+    pub fn extrap_str(&self) -> &'static str { self.extrap.as_str() }
 }
 
-// -------------------------------------------------------------------------
 // Single-signal dispatcher (operates purely on slices, no Python state)
 // -------------------------------------------------------------------------
 #[allow(clippy::too_many_arguments)]
@@ -983,8 +795,3 @@ fn calc_fh_weights(x: &Array1<f64>, d: usize) -> Array1<f64> {
 // -------------------------------------------------------------------------
 // Module initialisation
 // -------------------------------------------------------------------------
-#[pymodule]
-fn _interpolate<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
-    m.add_class::<UniInterpolator>()?;
-    Ok(())
-}

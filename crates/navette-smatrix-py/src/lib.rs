@@ -1,0 +1,1209 @@
+//! Thin PyO3 bindings for the Navette S-matrix engine.
+//!
+//! No physics here: every kernel lives in the pure-Rust
+//! `navette-smatrix` core. Wrappers own NumPy inputs, release
+//! the GIL while rayon-parallel kernels run, and return NumPy.
+
+use num_complex::{Complex64, ComplexFloat};
+use numpy::{PyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use rayon::prelude::*;
+use std::f64::consts::PI;
+
+use navette_smatrix::coherent_block::*;
+use navette_smatrix::core_engine::*;
+use navette_smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_MB};
+use navette_smatrix::needle_operator::*;
+use navette_smatrix::optics_core::*;
+use navette_smatrix::optimizer::*;
+
+// ---- roughness / redheffer (trivial, over optics_core) ----
+#[pyfunction]
+pub fn w_function(q: Complex64, rough_type: i32) -> PyResult<Complex64> {
+    Ok(w_function_inner(q, rough_type))
+}
+
+#[pyfunction]
+pub fn redheffer_product_complex_field(
+    r_a_front: Complex64, t_a_back: Complex64, t_a_fwd: Complex64, r_a_back: Complex64,
+    r_b_front: Complex64, t_b_back: Complex64, t_b_fwd: Complex64, r_b_back: Complex64,
+) -> PyResult<(Complex64, Complex64, Complex64, Complex64)> {
+    Ok(redheffer_product_complex_field_inner(
+        r_a_front, t_a_back, t_a_fwd, r_a_back, r_b_front, t_b_back, t_b_fwd, r_b_back,
+    ))
+}
+
+#[pyfunction]
+pub fn redheffer_product_real(
+    ra_rf: f64, ra_tb: f64, ra_tf: f64, ra_rb: f64,
+    rb_rf: f64, rb_tb: f64, rb_tf: f64, rb_rb: f64,
+) -> PyResult<(f64, f64, f64, f64)> {
+    Ok(redheffer_product_real_inner(ra_rf, ra_tb, ra_tf, ra_rb, rb_rf, rb_tb, rb_tf, rb_rb))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub fn redheffer_product_cross(
+    a_cf: Complex64, a_db: Complex64, a_df: Complex64, a_cb: Complex64,
+    b_cf: Complex64, b_db: Complex64, b_df: Complex64, b_cb: Complex64,
+) -> PyResult<(Complex64, Complex64, Complex64, Complex64)> {
+    Ok(redheffer_product_cross_inner(a_cf, a_db, a_df, a_cb, b_cf, b_db, b_df, b_cb))
+}
+
+// ---- coherent_block wrapper (verbatim from core) ----
+#[pyfunction]
+#[pyo3(name = "solve_coherent_block_fields")]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_coherent_block_fields(
+    start_idx: i32,
+    end_idx: i32,
+    n_stack: PyReadonlyArray1<Complex64>,
+    d_stack: PyReadonlyArray1<f64>,
+    rough_vals: PyReadonlyArray1<f64>,
+    rough_types: PyReadonlyArray1<i32>,
+    lam: f64,
+    nsin_fi: Complex64,
+    pol: i32,
+) -> PyResult<BlockResult> {
+    let n_slice = n_stack.as_slice()?;
+    let d_slice = d_stack.as_slice()?;
+    let rv_slice = rough_vals.as_slice()?;
+    let rt_slice = rough_types.as_slice()?;
+
+    // Per-layer reciprocals (1/n). In the engines these are precomputed once
+    // per wavelength and reused across all angles; here it is a single call.
+    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
+
+    Ok(solve_coherent_block_fields_inner(
+        start_idx as usize,
+        end_idx as usize,
+        n_slice,
+        &inv_n,
+        d_slice,
+        rv_slice,
+        rt_slice,
+        lam,
+        nsin_fi,
+        pol,
+    ))
+}
+
+// ---- core_engine wrapper (verbatim from core) ----
+#[pyfunction]
+#[pyo3(name = "core_engine")]
+#[pyo3(signature = (
+    wavls, sin_theta_arr, n_layers, n_stack_cache, thicknesses,
+    incoherent_flags, rough_types, rough_vals, coherence_mode, requested
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn core_engine(
+    py: Python<'_>,
+    wavls: PyReadonlyArray1<f64>,
+    sin_theta_arr: PyReadonlyArray1<f64>,
+    n_layers: i32,
+    n_stack_cache: PyReadonlyArray1<f64>,
+    thicknesses: PyReadonlyArray1<f64>,
+    incoherent_flags: PyReadonlyArray1<i32>,
+    rough_types: PyReadonlyArray1<i32>,
+    rough_vals: PyReadonlyArray1<f64>,
+    coherence_mode: i32,
+    requested: u64,
+) -> PyResult<Py<PyDict>> {
+    if !(MODE_A..=MODE_C).contains(&coherence_mode) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "coherence_mode must be 0 (front_block), 1 (coherency_matrix), or 2 (fully_coherent).",
+        ));
+    }
+    if requested == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("empty request mask"));
+    }
+
+    let wav_slice = wavls.as_slice()?;
+    let sin_theta_slice = sin_theta_arr.as_slice()?;
+    let n_stack_slice = n_stack_cache.as_slice()?;
+    let thick_slice = thicknesses.as_slice()?;
+    let inc_flags_slice = incoherent_flags.as_slice()?;
+    let rough_types_slice = rough_types.as_slice()?;
+    let rough_vals_slice = rough_vals.as_slice()?;
+
+    let num_wavs = wav_slice.len();
+    let num_angles = sin_theta_slice.len();
+    let total_points = num_wavs * num_angles;
+    let idx_n = (n_layers - 1) as usize;
+    let n_layers_us = n_layers as usize;
+
+    // ── Resolve what must be solved, purely from the request ──
+    let Plan { need_s, need_p, need_cross, level } = resolve_plan(requested);
+
+    // Phase buffers are needed if a phase OR a dispersion observable asks for them.
+    let want_phi_rs = requested & (REQ_PHI_RS | REQ_DISP_R_S) != 0;
+    let want_phi_rp = requested & (REQ_PHI_RP | REQ_DISP_R_P) != 0;
+    let want_phi_ts = requested & (REQ_PHI_TS | REQ_DISP_T_S) != 0;
+    let want_phi_tp = requested & (REQ_PHI_TP | REQ_DISP_T_P) != 0;
+
+    // Build complex index cache.
+    let mut n_cache: Vec<Vec<Complex64>> = Vec::with_capacity(num_wavs);
+    let mut inv_n_cache: Vec<Vec<Complex64>> = Vec::with_capacity(num_wavs);
+    for ww in 0..num_wavs {
+        let base = ww * n_layers_us * 2;
+        let mut layer_n = Vec::with_capacity(n_layers_us);
+        let mut layer_inv = Vec::with_capacity(n_layers_us);
+        for l in 0..n_layers_us {
+            let nv = Complex64::new(n_stack_slice[base + l * 2], n_stack_slice[base + l * 2 + 1]);
+            layer_n.push(nv);
+            layer_inv.push(nv.recip());
+        }
+        n_cache.push(layer_n);
+        inv_n_cache.push(layer_inv);
+    }
+
+    // ── Solve every point in parallel ──
+    // At `Intensities` level we take the lean photometric path (no complex-amp
+    // capture, no coherency channel); otherwise the full solver runs, with the
+    // coherency channel gated by `need_cross` (true only at `Cross` level).
+    let states: Vec<OpticalState> = py.detach(|| {
+        (0..total_points)
+            .into_par_iter()
+            .map(|k| {
+                let a = k / num_wavs;
+                let w = k % num_wavs;
+                match level {
+                    Level::Intensities => solve_point_intensity(
+                        idx_n,
+                        wav_slice[w],
+                        sin_theta_slice[a],
+                        &n_cache[w],
+                        &inv_n_cache[w],
+                        thick_slice,
+                        inc_flags_slice,
+                        rough_types_slice,
+                        rough_vals_slice,
+                        coherence_mode,
+                        need_s,
+                        need_p,
+                    ),
+                    Level::ComplexAmps | Level::Cross => solve_point(
+                        idx_n,
+                        wav_slice[w],
+                        sin_theta_slice[a],
+                        &n_cache[w],
+                        &inv_n_cache[w],
+                        thick_slice,
+                        inc_flags_slice,
+                        rough_types_slice,
+                        rough_vals_slice,
+                        coherence_mode,
+                        need_s,
+                        need_p,
+                        need_cross,
+                    ),
+                }
+            })
+            .collect()
+    });
+
+    // ── Per-point derive into buffers (only for requested keys) ──
+    macro_rules! f64buf {
+        ($name:ident, $cond:expr) => {
+            let mut $name: Option<Vec<f64>> =
+                if $cond { Some(vec![0.0; total_points]) } else { None };
+        };
+    }
+    macro_rules! cbuf {
+        ($name:ident, $bit:expr) => {
+            let mut $name: Option<Vec<Complex64>> = if requested & $bit != 0 {
+                Some(vec![Complex64::new(0.0, 0.0); total_points])
+            } else {
+                None
+            };
+        };
+    }
+    macro_rules! put {
+        ($buf:ident, $k:expr, $val:expr) => {
+            if let Some(b) = $buf.as_mut() {
+                b[$k] = $val;
+            }
+        };
+    }
+
+    f64buf!(b_rs, requested & REQ_RS != 0);
+    f64buf!(b_rp, requested & REQ_RP != 0);
+    f64buf!(b_ts, requested & REQ_TS != 0);
+    f64buf!(b_tp, requested & REQ_TP != 0);
+    f64buf!(b_ravg, requested & REQ_R_AVG != 0);
+    f64buf!(b_tavg, requested & REQ_T_AVG != 0);
+    f64buf!(b_as, requested & REQ_A_S != 0);
+    f64buf!(b_ap, requested & REQ_A_P != 0);
+    f64buf!(b_aavg, requested & REQ_A_AVG != 0);
+    f64buf!(b_psi_r, requested & REQ_PSI_R != 0);
+    f64buf!(b_psi_t, requested & REQ_PSI_T != 0);
+    f64buf!(b_delta_r, requested & REQ_DELTA_R != 0);
+    f64buf!(b_delta_t, requested & REQ_DELTA_T != 0);
+    f64buf!(b_dop_r, requested & REQ_DOP_R != 0);
+    f64buf!(b_dop_t, requested & REQ_DOP_T != 0);
+    f64buf!(b_diatt_r, requested & REQ_DIATT_R != 0);
+    f64buf!(b_diatt_t, requested & REQ_DIATT_T != 0);
+    f64buf!(b_s0r, requested & REQ_S0_R != 0);
+    f64buf!(b_s1r, requested & REQ_S1_R != 0);
+    f64buf!(b_s2r, requested & REQ_S2_R != 0);
+    f64buf!(b_s3r, requested & REQ_S3_R != 0);
+    f64buf!(b_s0t, requested & REQ_S0_T != 0);
+    f64buf!(b_s1t, requested & REQ_S1_T != 0);
+    f64buf!(b_s2t, requested & REQ_S2_T != 0);
+    f64buf!(b_s3t, requested & REQ_S3_T != 0);
+    f64buf!(b_retard_r, requested & REQ_RETARD_R != 0);
+    f64buf!(b_retard_t, requested & REQ_RETARD_T != 0);
+    // phase buffers: allocated if phase OR dispersion wants them
+    f64buf!(b_phi_rs, want_phi_rs);
+    f64buf!(b_phi_rp, want_phi_rp);
+    f64buf!(b_phi_ts, want_phi_ts);
+    f64buf!(b_phi_tp, want_phi_tp);
+
+    cbuf!(b_rs_c, REQ_RS_C);
+    cbuf!(b_rp_c, REQ_RP_C);
+    cbuf!(b_ts_c, REQ_TS_C);
+    cbuf!(b_tp_c, REQ_TP_C);
+    cbuf!(b_cross_r, REQ_CROSS_R);
+    cbuf!(b_cross_t, REQ_CROSS_T);
+
+    for (k, s) in states.iter().enumerate() {
+        let rs = s.rs;
+        let rp = s.rp;
+        let ts = s.ts;
+        let tp = s.tp;
+
+        put!(b_rs, k, rs);
+        put!(b_rp, k, rp);
+        put!(b_ts, k, ts);
+        put!(b_tp, k, tp);
+        put!(b_ravg, k, 0.5 * (rs + rp));
+        put!(b_tavg, k, 0.5 * (ts + tp));
+        put!(b_as, k, 1.0 - rs - ts);
+        put!(b_ap, k, 1.0 - rp - tp);
+        put!(b_aavg, k, 1.0 - 0.5 * (rs + rp) - 0.5 * (ts + tp));
+
+        // Stokes (reflection)
+        let s0r = rp + rs;
+        let s1r = rp - rs;
+        let s2r = -2.0 * s.cross_r.re + 0.0;
+        let s3r = -2.0 * s.cross_r.im + 0.0;
+        put!(b_s0r, k, s0r);
+        put!(b_s1r, k, s1r);
+        put!(b_s2r, k, s2r);
+        put!(b_s3r, k, s3r);
+        // Stokes (transmission)
+        let s0t = tp + ts;
+        let s1t = tp - ts;
+        let s2t = 2.0 * s.cross_t.re + 0.0;
+        let s3t = 2.0 * s.cross_t.im + 0.0;
+        put!(b_s0t, k, s0t);
+        put!(b_s1t, k, s1t);
+        put!(b_s2t, k, s2t);
+        put!(b_s3t, k, s3t);
+
+        put!(b_diatt_r, k, s1r / (s0r + 1e-20));
+        put!(b_diatt_t, k, s1t / (s0t + 1e-20));
+
+        put!(b_dop_r, k, (s1r * s1r + s2r * s2r + s3r * s3r).sqrt() / (s0r + 1e-20));
+        put!(b_dop_t, k, ((s1t * s1t + s2t * s2t + s3t * s3t).sqrt() / (s0t + 1e-20)).min(1.0));
+
+        // Psi/Delta derived lazily per-observable: each `put!` arm — and thus
+        // its sqrt/atan/atan2 — runs only when that specific buffer was
+        // requested. Values are identical to the former `psi_delta` helper,
+        // including the degenerate (PI/2, 0) below the s-channel floor.
+        put!(b_psi_r, k, if rs < RS_FLOOR { PI / 2.0 } else { (rp / rs).sqrt().atan() });
+        put!(b_delta_r, k, if rs < RS_FLOOR { 0.0 } else { s3r.atan2(s2r) });
+        put!(b_psi_t, k, if ts < TS_FLOOR { PI / 2.0 } else { (tp / ts).sqrt().atan() });
+        put!(b_delta_t, k, if ts < TS_FLOOR { 0.0 } else { s3t.atan2(s2t) });
+
+        // Retardance == arg(cross): identical quantity to Delta (BW convention aside).
+        put!(b_retard_r, k, s.cross_r.arg());
+        put!(b_retard_t, k, s.cross_t.arg());
+
+        // Absolute phases (admittance convention; phi_rp differs by pi from BW).
+        put!(b_phi_rs, k, s.rs_c.arg());
+        put!(b_phi_rp, k, s.rp_c.arg());
+        put!(b_phi_ts, k, s.ts_c.arg());
+        put!(b_phi_tp, k, s.tp_c.arg());
+
+        if let Some(b) = b_rs_c.as_mut() { b[k] = s.rs_c; }
+        if let Some(b) = b_rp_c.as_mut() { b[k] = s.rp_c; }
+        if let Some(b) = b_ts_c.as_mut() { b[k] = s.ts_c; }
+        if let Some(b) = b_tp_c.as_mut() { b[k] = s.tp_c; }
+        if let Some(b) = b_cross_r.as_mut() { b[k] = s.cross_r; }
+        if let Some(b) = b_cross_t.as_mut() { b[k] = s.cross_t; }
+    }
+
+    // ── Dispersion post-pass (cross-wavelength) ──
+    let omega: Vec<f64> = wav_slice.iter().map(|&l| 2.0 * PI * C_NM_PER_FS / l).collect();
+    let disp = |phi: &Option<Vec<f64>>| -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+        phi.as_ref().map(|p| dispersion_channel(p, &omega, num_angles, num_wavs))
+    };
+    let disp_r_s = if requested & REQ_DISP_R_S != 0 { disp(&b_phi_rs) } else { None };
+    let disp_r_p = if requested & REQ_DISP_R_P != 0 { disp(&b_phi_rp) } else { None };
+    let disp_t_s = if requested & REQ_DISP_T_S != 0 { disp(&b_phi_ts) } else { None };
+    let disp_t_p = if requested & REQ_DISP_T_P != 0 { disp(&b_phi_tp) } else { None };
+
+    // ── Assemble dict (only requested keys) ──
+    let shape = [num_angles, num_wavs];
+    let out = PyDict::new(py);
+
+    macro_rules! emit_f64 {
+        ($name:expr, $buf:expr) => {
+            if let Some(b) = $buf {
+                out.set_item($name, PyArray::from_vec(py, b).reshape(shape)?)?;
+            }
+        };
+    }
+    macro_rules! emit_c {
+        ($name:expr, $buf:expr) => {
+            if let Some(b) = $buf {
+                out.set_item($name, PyArray::from_vec(py, b).reshape(shape)?)?;
+            }
+        };
+    }
+
+    emit_f64!("Rs", b_rs);
+    emit_f64!("Rp", b_rp);
+    emit_f64!("Ts", b_ts);
+    emit_f64!("Tp", b_tp);
+    emit_f64!("R_avg", b_ravg);
+    emit_f64!("T_avg", b_tavg);
+    emit_f64!("A_s", b_as);
+    emit_f64!("A_p", b_ap);
+    emit_f64!("A_avg", b_aavg);
+    emit_f64!("Psi_R", b_psi_r);
+    emit_f64!("Psi_T", b_psi_t);
+    emit_f64!("Delta_R", b_delta_r);
+    emit_f64!("Delta_T", b_delta_t);
+    emit_f64!("DOP_R", b_dop_r);
+    emit_f64!("DOP_T", b_dop_t);
+    emit_f64!("Diattenuation_R", b_diatt_r);
+    emit_f64!("Diattenuation_T", b_diatt_t);
+    emit_f64!("S0_R", b_s0r);
+    emit_f64!("S1_R", b_s1r);
+    emit_f64!("S2_R", b_s2r);
+    emit_f64!("S3_R", b_s3r);
+    emit_f64!("S0_T", b_s0t);
+    emit_f64!("S1_T", b_s1t);
+    emit_f64!("S2_T", b_s2t);
+    emit_f64!("S3_T", b_s3t);
+    emit_f64!("Retardance_R", b_retard_r);
+    emit_f64!("Retardance_T", b_retard_t);
+
+    // phases emitted only if explicitly requested (not merely needed for dispersion)
+    if requested & REQ_PHI_RS != 0 { emit_f64!("phi_rs", b_phi_rs); }
+    if requested & REQ_PHI_RP != 0 { emit_f64!("phi_rp", b_phi_rp); }
+    if requested & REQ_PHI_TS != 0 { emit_f64!("phi_ts", b_phi_ts); }
+    if requested & REQ_PHI_TP != 0 { emit_f64!("phi_tp", b_phi_tp); }
+
+    emit_c!("rs_c", b_rs_c);
+    emit_c!("rp_c", b_rp_c);
+    emit_c!("ts_c", b_ts_c);
+    emit_c!("tp_c", b_tp_c);
+    emit_c!("cross_R", b_cross_r);
+    emit_c!("cross_T", b_cross_t);
+
+    macro_rules! emit_disp {
+        ($d:expr, $g:expr, $gg:expr, $t:expr, $f:expr) => {
+            if let Some((gd, gdd, tod, fod)) = $d {
+                out.set_item($g, PyArray::from_vec(py, gd).reshape(shape)?)?;
+                out.set_item($gg, PyArray::from_vec(py, gdd).reshape(shape)?)?;
+                out.set_item($t, PyArray::from_vec(py, tod).reshape(shape)?)?;
+                out.set_item($f, PyArray::from_vec(py, fod).reshape(shape)?)?;
+            }
+        };
+    }
+    emit_disp!(disp_r_s, "GD_R_s", "GDD_R_s", "TOD_R_s", "FOD_R_s");
+    emit_disp!(disp_r_p, "GD_R_p", "GDD_R_p", "TOD_R_p", "FOD_R_p");
+    emit_disp!(disp_t_s, "GD_T_s", "GDD_T_s", "TOD_T_s", "FOD_T_s");
+    emit_disp!(disp_t_p, "GD_T_p", "GDD_T_p", "TOD_T_p", "FOD_T_p");
+
+    Ok(out.into())
+}
+
+// ---- needle_engine wrapper (verbatim from core) ----
+#[pyfunction]
+#[pyo3(name = "needle_engine")]
+#[pyo3(signature = (
+    wavls, sin_theta_arr, n_layers, n_stack_cache, thicknesses,
+    rough_types, rough_vals, needle_n_per_wav, z_grid,
+    requested,
+    incoherent_flags=None, targets_r=None, weights_r=None,
+    start_idx=0, end_idx=None, channel=0,
+    calc_s=true, calc_p=true, host_mask=None
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn needle_engine<'py>(
+    py: Python<'py>,
+    wavls: PyReadonlyArray1<f64>,
+    sin_theta_arr: PyReadonlyArray1<f64>,
+    n_layers: i32,
+    n_stack_cache: PyReadonlyArray1<f64>,
+    thicknesses: PyReadonlyArray1<f64>,
+    rough_types: PyReadonlyArray1<i32>,
+    rough_vals: PyReadonlyArray1<f64>,
+    needle_n_per_wav: PyReadonlyArray1<Complex64>,
+    z_grid: PyReadonlyArray1<f64>,
+    requested: u64,
+    incoherent_flags: Option<PyReadonlyArray1<i32>>,
+    targets_r: Option<PyReadonlyArray1<f64>>,
+    weights_r: Option<PyReadonlyArray1<f64>>,
+    start_idx: usize,
+    end_idx: Option<usize>,
+    channel: usize,
+    calc_s: bool,
+    calc_p: bool,
+    host_mask: Option<PyReadonlyArray1<bool>>,
+) -> PyResult<Py<PyDict>> {
+    if requested == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("empty request mask"));
+    }
+    let wav_slice = wavls.as_slice()?;
+    let sin_slice = sin_theta_arr.as_slice()?;
+    let thick_slice = thicknesses.as_slice()?;
+    let rt_slice = rough_types.as_slice()?;
+    let rv_slice = rough_vals.as_slice()?;
+    let np_slice = needle_n_per_wav.as_slice()?;
+    let z_slice = z_grid.as_slice()?;
+    let cache_slice = n_stack_cache.as_slice()?;
+
+    let num_wavs = wav_slice.len();
+    let num_angles = sin_slice.len();
+    let total_points = num_wavs * num_angles;
+    let nl = n_layers as usize;
+    let nz = z_slice.len();
+
+    if !(0..nl).contains(&start_idx) {
+        return Err(pyo3::exceptions::PyValueError::new_err("start_idx out of range"));
+    }
+    let idx_end = end_idx.unwrap_or(nl - 1);
+    if idx_end <= start_idx + 2 || idx_end >= nl {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "end_idx must leave at least one interior host layer inside [start_idx, end_idx]",
+        ));
+    }
+    if num_wavs == 0 || num_angles == 0 || nz == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("empty grid"));
+    }
+    if np_slice.len() != num_wavs {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "needle_n_per_wav must have one complex index per wavelength",
+        ));
+    }
+    if cache_slice.len() != num_wavs * nl * 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err("n_stack_cache layout mismatch"));
+    }
+    let want_p = requested & NREQ_P != 0;
+    let want_pmb = requested & NREQ_P_MB != 0;
+    let want_disp = max_disp_order(requested).is_some();
+    if !calc_s && !calc_p {
+        return Err(pyo3::exceptions::PyValueError::new_err("no polarization branch enabled"));
+    }
+    if channel > 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err("channel must be 0..=3"));
+    }
+
+    // Optional per-point merit inputs (default: target 0, weight 1).
+    let tgt = match &targets_r {
+        Some(a) => {
+            let v = a.as_slice()?;
+            if v.len() != total_points {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "targets_r must have num_angles*num_wavs entries (angle-major)",
+                ));
+            }
+            Some(v.to_vec())
+        }
+        None => None,
+    };
+    let wgt = match &weights_r {
+        Some(a) => {
+            let v = a.as_slice()?;
+            if v.len() != total_points {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "weights_r must have num_angles*num_wavs entries (angle-major)",
+                ));
+            }
+            Some(v.to_vec())
+        }
+        None => None,
+    };
+    let target_of = |k: usize| tgt.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_of = |k: usize| wgt.as_ref().map(|t| t[k]).unwrap_or(1.0);
+
+    // Incoherent flags only needed for the multiblock path.
+    let inc = match (&incoherent_flags, want_pmb) {
+        (_, false) => None,
+        (None, true) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "NREQ_P_MB requires incoherent_flags",
+            ))
+        }
+        (Some(a), true) => {
+            let v = a.as_slice()?;
+            if v.len() != nl {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "incoherent_flags must have n_layers entries",
+                ));
+            }
+            Some(v.to_vec())
+        }
+    };
+    let mask = match &host_mask {
+        Some(a) => {
+            let v = a.as_slice()?;
+            if v.len() != nl {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "host_mask must have n_layers entries",
+                ));
+            }
+            Some(v.to_vec())
+        }
+        None => None,
+    };
+
+    // Host maps are geometry-only: compute once, share across all points.
+    let mb_locs = match &inc {
+        Some(flags) => Some(locate_hosts_multiblock(thick_slice, flags, z_slice, mask.as_deref())
+            .map_err(pyo3::exceptions::PyValueError::new_err)?),
+        None => None,
+    };
+    let coh_locs: Vec<(usize, f64)> = if want_p || want_disp {
+        z_slice
+            .iter()
+            .map(|&z| locate_depth_in(thick_slice, start_idx, idx_end, z))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    struct PointOut {
+        p: [Option<Vec<f64>>; 2],
+        pmb: [Option<Vec<f64>>; 2],
+        q: [Option<Vec<f64>>; 2], // Q rows (order 0), flattened nz
+    }
+    impl PointOut {
+        fn empty() -> Self {
+            PointOut { p: [None, None], pmb: [None, None], q: [None, None] }
+        }
+    }
+
+    let pol_on = [calc_s, calc_p];
+
+    // ── Phase A: everything expressible per point, in parallel ──
+    let outs: Vec<PointOut> = py.detach(|| {
+        (0..total_points)
+            .into_par_iter()
+            .map(|k| {
+                let a = k / num_wavs;
+                let w = k % num_wavs;
+                let lam = wav_slice[w];
+                let sin_t = sin_slice[a];
+                let base = w * nl * 2;
+                let ns: Vec<Complex64> = (0..nl)
+                    .map(|l| Complex64::new(cache_slice[base + l * 2], cache_slice[base + l * 2 + 1]))
+                    .collect();
+                let nsin_fi = ns[0] * Complex64::new(sin_t, 0.0);
+                let np_c = np_slice[w];
+                let tgt_k = target_of(k);
+                let wgt_k = weight_of(k);
+
+                let mut o = PointOut::empty();
+
+                // Coherent observables share ONE fields build per polarization.
+                if want_p || want_disp {
+                    for (pi, &on) in pol_on.iter().enumerate() {
+                        if !on {
+                            continue;
+                        }
+                        let pol = pi as i32;
+                        let fields = build_stack_fields_range(
+                            start_idx, idx_end, &ns, thick_slice, rv_slice, rt_slice,
+                            lam, nsin_fi, pol,
+                        );
+                        if want_p {
+                            o.p[pi] = Some(p_coherent_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c, tgt_k, wgt_k,
+                                thick_slice, start_idx, idx_end, z_slice,
+                            ));
+                        }
+                        if want_disp {
+                            let m = fields.s_left[idx_end];
+                            let amp = [m.0, m.1, m.2, m.3][channel];
+                            let r2 = amp.norm_sqr();
+                            let mut qv = vec![0.0_f64; nz];
+                            if r2 > 1e-20 {
+                                for (zi, &(j, xi)) in coh_locs.iter().enumerate() {
+                                    let dr =
+                                        needle_dr_ddz(&fields, nsin_fi, j, xi, np_c, pol, lam);
+                                    qv[zi] = (amp.conj() * dr).im / r2;
+                                }
+                            }
+                            o.q[pi] = Some(qv);
+                        }
+                    }
+                }
+
+                if let (Some(flags), Some(locs)) = (&inc, &mb_locs) {
+                    for (pi, &on) in pol_on.iter().enumerate() {
+                        if !on {
+                            continue;
+                        }
+                        o.pmb[pi] = Some(p_multiblock_point(
+                            lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
+                            np_c, tgt_k, wgt_k, locs, pi as i32,
+                        ));
+                    }
+                }
+
+                o
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // ── Phase B: spectral differentiation chain (crosses wavelengths) ──
+    let max_order = max_disp_order(requested);
+    // chains[pol][order][k*nz+zi]
+    let disp_chain: Vec<Option<Vec<Vec<Vec<f64>>>>> = match max_order {
+        None => vec![None, None],
+        Some(mo) => {
+            let omega: Vec<f64> =
+                wav_slice.iter().map(|&l| 2.0 * std::f64::consts::PI * C_NM_PER_FS / l).collect();
+            pol_on
+                .iter()
+                .enumerate()
+                .map(|(pi, &on)| {
+                    if !on || !want_disp {
+                        return None;
+                    }
+                    if outs.iter().any(|o| o.q[pi].is_none()) {
+                        return None;
+                    }
+                    let q0: Vec<Vec<f64>> =
+                        outs.iter().map(|o| o.q[pi].clone().unwrap()).collect();
+                    let mut chain = vec![q0.clone()];
+                    for _ in 0..mo {
+                        let prev = chain.last().unwrap();
+                        chain.push(spectral_gradient_step(prev, &omega, num_wavs, num_angles, nz));
+                    }
+                    Some(chain)
+                })
+                .collect()
+        }
+    };
+    let _ = channel;
+
+    // ── Assemble dict ──
+    let shape = [total_points, nz];
+    let out = PyDict::new(py);
+
+    macro_rules! emit {
+        ($name:expr, $field:ident, $pi:expr) => {{
+            let name: String = $name;
+            let mut flat: Vec<f64> = Vec::with_capacity(total_points * nz);
+            for o in &outs {
+                match &o.$field[$pi] {
+                    Some(v) => flat.extend_from_slice(v),
+                    None => {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "internal error: missing output buffer",
+                        ))
+                    }
+                }
+            }
+            out.set_item(name.as_str(), PyArray::from_vec(py, flat).reshape(shape)?)?;
+        }};
+    }
+
+    let pol_suffix = |pi: usize| if pi == 0 { "s" } else { "p" };
+    if want_p {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_{}", pol_suffix(pi)), p, pi);
+            }
+        }
+    }
+    if want_pmb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_{}", pol_suffix(pi)), pmb, pi);
+            }
+        }
+    }
+    const DISP_KEYS: [&str; 5] = ["dphi", "dgd", "dgdd", "dtod", "dfod"];
+    if let Some(mo) = max_order {
+        for pi in 0..2 {
+            if !pol_on[pi] {
+                continue;
+            }
+            if let Some(chain) = &disp_chain[pi] {
+                for order in 0..=mo {
+                    let key = format!("{}_{}", DISP_KEYS[order], pol_suffix(pi));
+                    let mut flat: Vec<f64> = Vec::with_capacity(total_points * nz);
+                    for row in &chain[order] {
+                        flat.extend_from_slice(row);
+                    }
+                    out.set_item(key, PyArray::from_vec(py, flat).reshape(shape)?)?;
+                }
+            }
+        }
+    }
+
+    Ok(out.into())
+}
+
+// ---- optimizer wrappers (verbatim from core; see note above) ----
+// -----------------------------------------------------------------------------
+#[pyfunction]
+#[pyo3(name = "scan_landscape")]
+pub fn scan_landscape(
+    py: Python<'_>,
+    n_stack: PyReadonlyArray1<Complex64>,
+    thicknesses: PyReadonlyArray1<f64>,
+    rough_types: PyReadonlyArray1<i32>,
+    rough_vals: PyReadonlyArray1<f64>,
+    lam: f64,
+    pol: i32,
+    real_min: f64,
+    real_max: f64,
+    imag_min: f64,
+    imag_max: f64,
+    points_real: usize,
+    points_imag: usize,
+) -> PyResult<(Vec<f64>, Vec<f64>, Py<PyArray2<f64>>)> {
+    let n_slice = n_stack.as_slice()?;
+    let d_slice = thicknesses.as_slice()?;
+    let rt_slice = rough_types.as_slice()?;
+    let rv_slice = rough_vals.as_slice()?;
+
+    // Reciprocals computed ONCE per wavelength and shared read-only across all
+    // grid points (and all rayon threads). Previously this Vec was allocated
+    // inside every char_func call — thousands of heap allocations per scan.
+    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
+
+    let real_vals: Vec<f64> = (0..points_real)
+        .map(|i| real_min + (i as f64) * (real_max - real_min) / ((points_real - 1) as f64))
+        .collect();
+    let imag_vals: Vec<f64> = (0..points_imag)
+        .map(|i| imag_min + (i as f64) * (imag_max - imag_min) / ((points_imag - 1) as f64))
+        .collect();
+
+    let landscape: Vec<f64> = py.detach(|| {
+        (0..points_imag * points_real)
+            .into_par_iter()
+            .map(|idx| {
+                let i = idx / points_real;
+                let j = idx % points_real;
+                let nr = real_vals[j];
+                let ni = imag_vals[i];
+                let n_eff = Complex64::new(nr, ni);
+                char_func(n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, n_eff, pol)
+            })
+            .collect()
+    });
+
+    let land_arr = PyArray1::from_vec(py, landscape).reshape([points_imag, points_real]).unwrap();
+    Ok((real_vals, imag_vals, land_arr.into()))
+}
+
+// -----------------------------------------------------------------------------
+// Find local minima on the coarse grid
+// -----------------------------------------------------------------------------
+#[pyfunction]
+#[pyo3(name = "find_local_minima")]
+pub fn find_local_minima(
+    landscape: PyReadonlyArray2<f64>,
+    real_vals: Vec<f64>,
+    imag_vals: Vec<f64>,
+    median_factor: f64,
+) -> Vec<(f64, f64)> {
+    let land = landscape.as_array();
+    let (n_imag, n_real) = (land.shape()[0], land.shape()[1]);
+
+    // True median of the landscape (the previous code averaged, which the
+    // `median_factor` name and the Python reference (`np.median`) do not).
+    // Sentinel 1e30 cells sort to the top and so don't perturb the median,
+    // whereas they badly skewed the mean.
+    let mut sorted: Vec<f64> = land.iter().copied().collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let len = sorted.len();
+    let median = if len == 0 {
+        0.0
+    } else if len % 2 == 1 {
+        sorted[len / 2]
+    } else {
+        0.5 * (sorted[len / 2 - 1] + sorted[len / 2])
+    };
+    let threshold = median * median_factor;
+
+    let mut candidates = Vec::new();
+    if n_real < 2 {
+        return candidates;
+    }
+    for i in 0..n_imag {
+        // Skip the first/last real columns, matching the reference
+        // (`for j in range(1, len(Nr) - 1)`); all imag rows are scanned so
+        // lossless modes on the Im=0 edge are still detected.
+        for j in 1..n_real - 1 {
+            let val = land[[i, j]];
+            if val >= threshold {
+                continue;
+            }
+            let i0 = i.saturating_sub(1);
+            let i1 = (i + 1).min(n_imag - 1);
+            let j0 = j.saturating_sub(1);
+            let j1 = (j + 1).min(n_real - 1);
+            let mut is_min = true;
+            'neighbors: for ii in i0..=i1 {
+                for jj in j0..=j1 {
+                    if ii == i && jj == j {
+                        continue;
+                    }
+                    if land[[ii, jj]] <= val {
+                        is_min = false;
+                        break 'neighbors;
+                    }
+                }
+            }
+            if is_min {
+                candidates.push((real_vals[j], imag_vals[i]));
+            }
+        }
+    }
+    candidates
+}
+
+// -----------------------------------------------------------------------------
+// Nelder‑Mead minimiser (2D, adaptive)
+// -----------------------------------------------------------------------------
+#[pyfunction]
+#[pyo3(name = "nelder_mead")]
+pub fn nelder_mead(
+    n_stack: PyReadonlyArray1<Complex64>,
+    thicknesses: PyReadonlyArray1<f64>,
+    rough_types: PyReadonlyArray1<i32>,
+    rough_vals: PyReadonlyArray1<f64>,
+    lam: f64,
+    pol: i32,
+    x0: (f64, f64),
+    step: f64,
+    tol: f64,
+    max_iter: usize,
+) -> (f64, f64, f64) {
+    let n_slice = n_stack.as_slice().unwrap();
+    let d_slice = thicknesses.as_slice().unwrap();
+    let rt_slice = rough_types.as_slice().unwrap();
+    let rv_slice = rough_vals.as_slice().unwrap();
+
+    // Reciprocals computed once and reused across every simplex evaluation.
+    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
+
+    let mut simplex = vec![
+        [x0.0, x0.1],
+        [x0.0 + step, x0.1],
+        [x0.0, x0.1 + step * 0.1],
+    ];
+    let mut values: Vec<f64> = simplex
+        .iter()
+        .map(|x| char_func_xy(x, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol))
+        .collect();
+
+    let alpha = 1.0;
+    let gamma = 2.0;
+    let rho = 0.5;
+    let sigma = 0.5;
+    let mut iter = 0;
+
+    loop {
+        let mut indices: Vec<usize> = (0..3).collect();
+        indices.sort_by(|&i, &j| values[i].partial_cmp(&values[j]).unwrap());
+        let (best, good, worst) = (indices[0], indices[1], indices[2]);
+
+        let centroid = [
+            (simplex[best][0] + simplex[good][0]) / 2.0,
+            (simplex[best][1] + simplex[good][1]) / 2.0,
+        ];
+        let reflected = [
+            centroid[0] + alpha * (centroid[0] - simplex[worst][0]),
+            centroid[1] + alpha * (centroid[1] - simplex[worst][1]),
+        ];
+        let f_ref = char_func_xy(&reflected, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+
+        if f_ref < values[best] {
+            let expanded = [
+                centroid[0] + gamma * (reflected[0] - centroid[0]),
+                centroid[1] + gamma * (reflected[1] - centroid[1]),
+            ];
+            let f_exp = char_func_xy(&expanded, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+            if f_exp < f_ref {
+                simplex[worst] = expanded;
+                values[worst] = f_exp;
+            } else {
+                simplex[worst] = reflected;
+                values[worst] = f_ref;
+            }
+        } else if f_ref < values[good] {
+            simplex[worst] = reflected;
+            values[worst] = f_ref;
+        } else {
+            let contracted = [
+                centroid[0] + rho * (simplex[worst][0] - centroid[0]),
+                centroid[1] + rho * (simplex[worst][1] - centroid[1]),
+            ];
+            let f_con = char_func_xy(&contracted, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+            if f_con < values[worst] {
+                simplex[worst] = contracted;
+                values[worst] = f_con;
+            } else {
+                for i in 0..3 {
+                    if i != best {
+                        simplex[i][0] = simplex[best][0] + sigma * (simplex[i][0] - simplex[best][0]);
+                        simplex[i][1] = simplex[best][1] + sigma * (simplex[i][1] - simplex[best][1]);
+                        values[i] = char_func_xy(&simplex[i], n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+                    }
+                }
+            }
+        }
+
+        iter += 1;
+        let size = ((simplex[0][0] - simplex[1][0]).powi(2) + (simplex[0][1] - simplex[1][1]).powi(2)).sqrt()
+                + ((simplex[1][0] - simplex[2][0]).powi(2) + (simplex[1][1] - simplex[2][1]).powi(2)).sqrt()
+                + ((simplex[2][0] - simplex[0][0]).powi(2) + (simplex[2][1] - simplex[0][1]).powi(2)).sqrt();
+        if size < tol || iter >= max_iter {
+            break;
+        }
+    }
+
+    let best_idx = (0..3).min_by(|&i, &j| values[i].partial_cmp(&values[j]).unwrap()).unwrap();
+    (simplex[best_idx][0], simplex[best_idx][1], values[best_idx])
+}
+
+// -----------------------------------------------------------------------------
+// Field profile: |E(z)| through the stack for a given eigenmode
+// -----------------------------------------------------------------------------
+/// Data needed to compute fields inside a layer
+struct LayerData {
+    n: Complex64,
+    cos: Complex64,
+    thickness: f64,
+    // inv_n no longer needed (was unused)
+}
+
+/// Compute the field profile inside the entire stack.
+/// Returns (z_positions, |E|_values, layer_bounds_start, layer_bounds_end, layer_indices).
+#[pyfunction]
+#[pyo3(name = "field_profile")]
+pub fn field_profile(
+    n_stack: PyReadonlyArray1<Complex64>,
+    thicknesses: PyReadonlyArray1<f64>,
+    rough_types: PyReadonlyArray1<i32>,
+    rough_vals: PyReadonlyArray1<f64>,
+    lam: f64,
+    n_eff: Complex64,
+    pol: i32,
+    points_per_layer: usize,
+) -> PyResult<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<Complex64>)> {
+    let n_slice = n_stack.as_slice()?;
+    let d_slice = thicknesses.as_slice()?;
+    let rt_slice = rough_types.as_slice()?;
+    let rv_slice = rough_vals.as_slice()?;
+
+    let n_layers = n_slice.len();
+    if n_layers < 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err("At least two layers required."));
+    }
+
+    let two_pi_lam = 2.0 * PI / lam;
+
+    // Precompute layer data: n, cosθ, thickness
+    let mut layers: Vec<LayerData> = Vec::with_capacity(n_layers);
+    for i in 0..n_layers {
+        let n = n_slice[i];
+        let r0 = n_eff * n.recip();
+        let v = Complex64::new(1.0, 0.0) - r0 * r0;
+        let mut cos = v.sqrt();
+        if cos.im < 0.0 {
+            cos = -cos;
+        }
+        layers.push(LayerData {
+            n,
+            cos,
+            thickness: d_slice[i],
+        });
+    }
+
+    // Helper for Fresnel + roughness at an interface (i -> i+1)
+    let interface_props = |i: usize| -> (Complex64, Complex64, Complex64, Complex64) {
+        let n_curr = layers[i].n;
+        let cos_curr = layers[i].cos;
+        let y_curr = if pol == 0 {
+            n_curr * cos_curr
+        } else {
+            let c = if cos_curr.norm() < 1e-12 { Complex64::new(1e-12, 0.0) } else { cos_curr };
+            n_curr / c
+        };
+        let n_next = layers[i+1].n;
+        let cos_next = layers[i+1].cos;
+        let y_next = if pol == 0 {
+            n_next * cos_next
+        } else {
+            let c = if cos_next.norm() < 1e-12 { Complex64::new(1e-12, 0.0) } else { cos_next };
+            n_next / c
+        };
+
+        let den = y_curr + y_next;
+        let den_safe = if den.norm() < 1e-100 { Complex64::new(1e-100, 1e-100) } else { den };
+        let inv_den = den_safe.recip();
+        let r12 = (y_curr - y_next) * inv_den;
+        let t12 = y_curr * 2.0 * inv_den;
+        let t21 = y_next * 2.0 * inv_den;
+        let r21 = -r12;
+
+        let sigma = rv_slice[i+1];
+        let rtype = rt_slice[i+1];
+        if rtype != 0 && sigma > 0.0 {
+            let kz1 = two_pi_lam * n_curr * cos_curr;
+            let kz2 = two_pi_lam * n_next * cos_next;
+            if rtype == 5 {
+                let f = (-2.0 * kz1 * kz2 * sigma * sigma).exp();
+                (r12 * f, r21 * f, t12 * f, t21 * f)
+            } else {
+                let al = w_function_inner(2.0 * kz1 * sigma, rtype);
+                let be = w_function_inner(2.0 * kz2 * sigma, rtype);
+                let ga = w_function_inner((kz1 - kz2) * sigma, rtype);
+                (r12 * al, r21 * be, t12 * ga, t21 * ga)
+            }
+        } else {
+            (r12, r21, t12, t21)
+        }
+    };
+
+    // Propagation phase through a layer (i)
+    let prop_phase = |i: usize| -> Complex64 {
+        let d = layers[i].thickness;
+        if d <= 1e-12 {
+            return Complex64::new(1.0, 0.0);
+        }
+        let mut beta = two_pi_lam * d * layers[i].n * layers[i].cos;
+        if beta.im < 0.0 {
+            beta = Complex64::new(beta.re, -beta.im);
+        }
+        (Complex64::new(0.0, 1.0) * beta).exp()
+    };
+
+    // ---------- Build left and right S‑matrices ----------
+    // S_left[i] = S‑matrix from ambient up to the left side of layer i (i from 1 to n_layers-1)
+    let mut s_left: Vec<(Complex64, Complex64, Complex64, Complex64)> = Vec::with_capacity(n_layers);
+    s_left.push((Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0))); // identity before ambient
+
+    for i in 0..n_layers-1 {
+        let mut sg = s_left.last().unwrap().clone();
+        if i > 0 && layers[i].thickness > 1e-12 {
+            let phi = prop_phase(i);
+            sg = redheffer_product_complex_field_inner(
+                sg.0, sg.1, sg.2, sg.3,
+                Complex64::new(0.0, 0.0), phi, phi, Complex64::new(0.0, 0.0),
+            );
+        }
+        let iface = interface_props(i);
+        sg = redheffer_product_complex_field_inner(sg.0, sg.1, sg.2, sg.3, iface.0, iface.1, iface.2, iface.3);
+        s_left.push(sg);
+    }
+
+    // S_right[i] = S‑matrix from substrate up to the right side of layer i (i from n_layers-2 down to 0)
+    let mut s_right: Vec<Option<(Complex64, Complex64, Complex64, Complex64)>> = vec![None; n_layers];
+    s_right[n_layers-1] = Some((Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)));
+
+    for i in (0..n_layers-1).rev() {
+        let mut sg = s_right[i+1].unwrap();
+        if i+1 < n_layers-1 && layers[i+1].thickness > 1e-12 {
+            let phi = prop_phase(i+1);
+            sg = redheffer_product_complex_field_inner(
+                Complex64::new(0.0, 0.0), phi, phi, Complex64::new(0.0, 0.0),
+                sg.0, sg.1, sg.2, sg.3,
+            );
+        }
+        let iface = interface_props(i);
+        sg = redheffer_product_complex_field_inner(iface.0, iface.1, iface.2, iface.3, sg.0, sg.1, sg.2, sg.3);
+        s_right[i] = Some(sg);
+    }
+
+    // ---------- Compute field inside each layer ----------
+    let mut z_pos = Vec::new();
+    let mut e_mag = Vec::new();
+    let mut layer_start = Vec::new();
+    let mut layer_end = Vec::new();
+    let mut layer_n = Vec::new();
+
+    let mut z_cursor = 0.0;
+
+    for i in 1..n_layers-1 {
+        let d = layers[i].thickness;
+        if d <= 1e-12 {
+            continue;
+        }
+        let sl = &s_left[i];
+        let sr = s_right[i].as_ref().unwrap();
+        let denom = Complex64::new(1.0, 0.0) - sl.3 * sr.0;
+        let denom_safe = if denom.norm() < 1e-100 {
+            Complex64::new(1e-100, 1e-100)
+        } else {
+            denom
+        };
+        let inv_denom = denom_safe.recip();
+        let e_plus = sl.2 * inv_denom;
+        let e_minus = sr.0 * e_plus;
+        let mut beta = two_pi_lam * d * layers[i].n * layers[i].cos;
+        if beta.im < 0.0 {
+            beta = Complex64::new(beta.re, -beta.im);
+        }
+
+        let step = d / (points_per_layer as f64);
+        for k in 0..=points_per_layer {
+            let zz = k as f64 * step;
+            let xi = zz / d;
+            let e_z = e_plus * (Complex64::new(0.0, 1.0) * beta * xi).exp()
+                    + e_minus * (-Complex64::new(0.0, 1.0) * beta * xi).exp();
+            z_pos.push(z_cursor + zz);
+            e_mag.push(e_z.norm());
+        }
+        layer_start.push(z_cursor);
+        layer_end.push(z_cursor + d);
+        layer_n.push(layers[i].n);
+        z_cursor += d;
+    }
+
+    // Normalise E‑field to max = 1
+    let max_e = e_mag.iter().copied().fold(0.0, f64::max);
+    if max_e > 0.0 {
+        for val in &mut e_mag {
+            *val /= max_e;
+        }
+    }
+
+    Ok((z_pos, e_mag, layer_start, layer_end, layer_n))
+}
+#[pymodule]
+fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(w_function, m)?)?;
+    m.add_function(wrap_pyfunction!(redheffer_product_complex_field, m)?)?;
+    m.add_function(wrap_pyfunction!(redheffer_product_real, m)?)?;
+    m.add_function(wrap_pyfunction!(redheffer_product_cross, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_coherent_block_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(core_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_landscape, m)?)?;
+    m.add_function(wrap_pyfunction!(find_local_minima, m)?)?;
+    m.add_function(wrap_pyfunction!(nelder_mead, m)?)?;
+    m.add_function(wrap_pyfunction!(field_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(needle_engine, m)?)?;
+    m.add("NREQ_P", NREQ_P)?;
+    m.add("NREQ_P_MB", NREQ_P_MB)?;
+    m.add("NREQ_DPHI", NREQ_DPHI)?;
+    m.add("NREQ_DGD", NREQ_DGD)?;
+    m.add("NREQ_DGDD", NREQ_DGDD)?;
+    m.add("NREQ_DTOD", NREQ_DTOD)?;
+    m.add("NREQ_DFOD", NREQ_DFOD)?;
+    Ok(())
+}

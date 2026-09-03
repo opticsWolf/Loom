@@ -210,6 +210,14 @@ dependencies = [
 name = "navette-color"
 version = "0.2.0"
 dependencies = [
+ "rayon",
+]
+
+[[package]]
+name = "navette-color-py"
+version = "0.2.0"
+dependencies = [
+ "navette-color",
  "numpy",
  "pyo3",
  "rayon",
@@ -219,6 +227,16 @@ dependencies = [
 name = "navette-interpolate"
 version = "0.2.0"
 dependencies = [
+ "ndarray 0.17.2",
+ "rayon",
+]
+
+[[package]]
+name = "navette-interpolate-py"
+version = "0.2.0"
+dependencies = [
+ "navette-interpolate",
+ "ndarray 0.17.2",
  "numpy",
  "pyo3",
  "rayon",
@@ -241,6 +259,15 @@ name = "navette-smatrix"
 version = "0.3.0"
 dependencies = [
  "num-complex",
+ "rayon",
+]
+
+[[package]]
+name = "navette-smatrix-py"
+version = "0.3.0"
+dependencies = [
+ "navette-smatrix",
+ "num-complex",
  "numpy",
  "pyo3",
  "rayon",
@@ -253,12 +280,20 @@ dependencies = [
  "ahash",
  "bytemuck",
  "lru",
- "mimalloc",
- "numpy",
  "parking_lot",
- "pyo3",
  "smallvec",
  "xxhash-rust",
+]
+
+[[package]]
+name = "navette-spectralweave-py"
+version = "0.2.0"
+dependencies = [
+ "ahash",
+ "mimalloc",
+ "navette-spectralweave",
+ "numpy",
+ "pyo3",
 ]
 
 [[package]]

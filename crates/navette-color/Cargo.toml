@@ -2,25 +2,12 @@
 name = "navette-color"
 version = "0.2.0"
 edition = "2024"
-description = "Rust rewrite of the Loom unified color engine (parity port of loom_colorengine.py)"
+description = "Pure-Rust color engine core (no Python, no I/O). Bindings live in navette-color-py."
 license = "LGPL-3.0-or-later"
 
 [lib]
-# cdylib for the Python extension; rlib so `cargo test` / downstream crates work.
-name = "_color"
-crate-type = ["cdylib", "rlib"]
-
-[features]
-default = []
-# Numpy-based Python bindings via PyO3 (enable through maturin).
-python = ["dep:pyo3", "dep:numpy", "parallel"]
-# Data-parallel batch metrics via rayon.
-parallel = ["dep:rayon"]
+name = "navette_color"
+crate-type = ["rlib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"], optional = true }
-numpy = { version = "0.28", optional = true }
-rayon = { version = "1", optional = true }
-
-[profile.release.package.navette-color]
-opt-level = 3
+rayon = { workspace = true }

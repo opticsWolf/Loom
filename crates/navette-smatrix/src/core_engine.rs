@@ -14,25 +14,19 @@
 
 use num_complex::Complex64;
 use num_complex::ComplexFloat;
-use numpy::{PyArray, PyArrayMethods};
-use numpy::PyReadonlyArray1;
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use rayon::prelude::*;
 use std::f64::consts::PI;
 
 use crate::coherent_block::{solve_coherent_block_fields_dual, solve_coherent_block_fields_inner};
 use crate::optics_core::{
     grad_nonuniform as gradient, redheffer_product_cross_inner, redheffer_product_real_inner,
-    C_NM_PER_FS,
 };
 
-const POL_S: i32 = 0;
-const POL_P: i32 = 1;
+pub const POL_S: i32 = 0;
+pub const POL_P: i32 = 1;
 
-const MODE_A: i32 = 0; // front_block
-const MODE_B: i32 = 1; // coherency_matrix
-const MODE_C: i32 = 2; // fully_coherent
+pub const MODE_A: i32 = 0; // front_block
+pub const MODE_B: i32 = 1; // coherency_matrix
+pub const MODE_C: i32 = 2; // fully_coherent
 
 // Speed of light in nm/fs, so that with wavelength in nm: GD -> fs, GDD -> fs^2.
 
@@ -40,8 +34,8 @@ const MODE_C: i32 = 2; // fully_coherent
 // the p/s ratio is treated as degenerate and (Psi, Delta) = (PI/2, 0). The
 // transmission floor is far smaller because T can be vanishingly small deep in
 // an absorbing stack. (Matches the original ellipsometry engine.)
-const RS_FLOOR: f64 = 1e-12;
-const TS_FLOOR: f64 = 1e-20;
+pub const RS_FLOOR: f64 = 1e-12;
+pub const TS_FLOOR: f64 = 1e-20;
 
 // ─── Request bits (mirror these in the Python `Request(IntFlag)`) ────────────
 pub const REQ_RS: u64 = 1 << 0;
@@ -102,20 +96,20 @@ pub const REQ_DISP_T_P: u64 = 1 << 40;
 // forces both polarizations regardless of the per-polarization usage masks.
 
 // Polarization usage: which branch each observable reads from.
-const USES_S: u64 = REQ_RS | REQ_TS | REQ_A_S | REQ_PHI_RS | REQ_PHI_TS
+pub const USES_S: u64 = REQ_RS | REQ_TS | REQ_A_S | REQ_PHI_RS | REQ_PHI_TS
     | REQ_RS_C | REQ_TS_C | REQ_DISP_R_S | REQ_DISP_T_S;
-const USES_P: u64 = REQ_RP | REQ_TP | REQ_A_P | REQ_PHI_RP | REQ_PHI_TP
+pub const USES_P: u64 = REQ_RP | REQ_TP | REQ_A_P | REQ_PHI_RP | REQ_PHI_TP
     | REQ_RP_C | REQ_TP_C | REQ_DISP_R_P | REQ_DISP_T_P;
-const USES_BOTH: u64 = REQ_R_AVG | REQ_T_AVG | REQ_A_AVG | REQ_PSI_R | REQ_PSI_T
+pub const USES_BOTH: u64 = REQ_R_AVG | REQ_T_AVG | REQ_A_AVG | REQ_PSI_R | REQ_PSI_T
     | REQ_DIATT_R | REQ_DIATT_T | REQ_S0_R | REQ_S1_R | REQ_S0_T | REQ_S1_T;
 
 // Compute-level demand. NEEDS_COMPLEX: observables that need the first-block
 // complex amplitudes (absolute phase, dispersion, raw complex coefficients).
 // NEEDS_CROSS: observables that need the p-s coherency channel.
-const NEEDS_COMPLEX: u64 = REQ_PHI_RS | REQ_PHI_RP | REQ_PHI_TS | REQ_PHI_TP
+pub const NEEDS_COMPLEX: u64 = REQ_PHI_RS | REQ_PHI_RP | REQ_PHI_TS | REQ_PHI_TP
     | REQ_RS_C | REQ_RP_C | REQ_TS_C | REQ_TP_C
     | REQ_DISP_R_S | REQ_DISP_R_P | REQ_DISP_T_S | REQ_DISP_T_P;
-const NEEDS_CROSS: u64 = REQ_DELTA_R | REQ_DELTA_T | REQ_DOP_R | REQ_DOP_T
+pub const NEEDS_CROSS: u64 = REQ_DELTA_R | REQ_DELTA_T | REQ_DOP_R | REQ_DOP_T
     | REQ_S2_R | REQ_S3_R | REQ_S2_T | REQ_S3_T
     | REQ_CROSS_R | REQ_CROSS_T | REQ_RETARD_R | REQ_RETARD_T;
 
@@ -123,23 +117,23 @@ const NEEDS_CROSS: u64 = REQ_DELTA_R | REQ_DELTA_T | REQ_DOP_R | REQ_DOP_T
 /// each level is a superset of the one before, so the resolved level is the max
 /// over all requested observables.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Level {
+pub enum Level {
     Intensities,
     ComplexAmps,
     Cross,
 }
 
 /// Everything `core_engine` needs to steer the solve, derived once from the mask.
-pub(crate) struct Plan {
-    pub(crate) need_s: bool,
-    pub(crate) need_p: bool,
-    pub(crate) need_cross: bool,
-    pub(crate) level: Level,
+pub struct Plan {
+    pub need_s: bool,
+    pub need_p: bool,
+    pub need_cross: bool,
+    pub level: Level,
 }
 
 /// Resolve the request mask into a concrete solve plan. Single source of truth:
 /// polarization branches and compute level both fall out of the masks above.
-pub(crate) fn resolve_plan(requested: u64) -> Plan {
+pub fn resolve_plan(requested: u64) -> Plan {
     let need_cross = requested & NEEDS_CROSS != 0;
     let need_s = need_cross || requested & (USES_S | USES_BOTH) != 0;
     let need_p = need_cross || requested & (USES_P | USES_BOTH) != 0;
@@ -158,24 +152,24 @@ pub(crate) fn resolve_plan(requested: u64) -> Plan {
 /// first coherent block (Modes A/B) or the whole stack (Mode C). cross_* is the
 /// mode-resolved p-s coherency. Fields for unsolved pols are NaN.
 #[derive(Clone, Copy)]
-pub(crate) struct OpticalState {
-    pub(crate) rs: f64,
-    pub(crate) rp: f64,
-    pub(crate) ts: f64,
-    pub(crate) tp: f64,
-    pub(crate) rs_c: Complex64,
-    pub(crate) rp_c: Complex64,
-    pub(crate) ts_c: Complex64,
-    pub(crate) tp_c: Complex64,
-    pub(crate) cross_r: Complex64,
-    pub(crate) cross_t: Complex64,
+pub struct OpticalState {
+    pub rs: f64,
+    pub rp: f64,
+    pub ts: f64,
+    pub tp: f64,
+    pub rs_c: Complex64,
+    pub rp_c: Complex64,
+    pub ts_c: Complex64,
+    pub tp_c: Complex64,
+    pub cross_r: Complex64,
+    pub cross_t: Complex64,
 }
 
 /// Solve one point. Runs only the requested polarization branch(es) and the
 /// coherency channel only when `need_cross`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn solve_point(
+pub fn solve_point(
     idx_n: usize,
     lam: f64,
     sin_theta: f64,
@@ -338,7 +332,7 @@ pub(crate) fn solve_point(
 /// would have lifted the plan to `ComplexAmps`/`Cross`).
 #[inline]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn solve_point_intensity(
+pub fn solve_point_intensity(
     idx_n: usize,
     lam: f64,
     sin_theta: f64,
@@ -435,7 +429,7 @@ pub(crate) fn solve_point_intensity(
 // ─── Dispersion helpers (cross-wavelength post-pass) ─────────────────────────
 
 /// Unwrap a phase row (radians) along its length.
-fn unwrap(y: &[f64]) -> Vec<f64> {
+pub fn unwrap(y: &[f64]) -> Vec<f64> {
     let n = y.len();
     let mut out = vec![0.0; n];
     if n == 0 {
@@ -456,7 +450,7 @@ fn unwrap(y: &[f64]) -> Vec<f64> {
 /// Higher orders (TOD/FOD) amplify the solver's ~1-ULP transcendental noise and
 /// the repeated-gradient error; validate against a spline fit on a fine grid.
 #[allow(clippy::type_complexity)]
-fn dispersion_channel(
+pub fn dispersion_channel(
     phi: &[f64],
     omega: &[f64],
     num_angles: usize,
@@ -481,337 +475,4 @@ fn dispersion_channel(
         fod[lo..hi].copy_from_slice(&d4);
     }
     (gd, gdd, tod, fod)
-}
-
-#[pyfunction]
-#[pyo3(name = "core_engine")]
-#[pyo3(signature = (
-    wavls, sin_theta_arr, n_layers, n_stack_cache, thicknesses,
-    incoherent_flags, rough_types, rough_vals, coherence_mode, requested
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn core_engine(
-    py: Python<'_>,
-    wavls: PyReadonlyArray1<f64>,
-    sin_theta_arr: PyReadonlyArray1<f64>,
-    n_layers: i32,
-    n_stack_cache: PyReadonlyArray1<f64>,
-    thicknesses: PyReadonlyArray1<f64>,
-    incoherent_flags: PyReadonlyArray1<i32>,
-    rough_types: PyReadonlyArray1<i32>,
-    rough_vals: PyReadonlyArray1<f64>,
-    coherence_mode: i32,
-    requested: u64,
-) -> PyResult<Py<PyDict>> {
-    if !(MODE_A..=MODE_C).contains(&coherence_mode) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "coherence_mode must be 0 (front_block), 1 (coherency_matrix), or 2 (fully_coherent).",
-        ));
-    }
-    if requested == 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err("empty request mask"));
-    }
-
-    let wav_slice = wavls.as_slice()?;
-    let sin_theta_slice = sin_theta_arr.as_slice()?;
-    let n_stack_slice = n_stack_cache.as_slice()?;
-    let thick_slice = thicknesses.as_slice()?;
-    let inc_flags_slice = incoherent_flags.as_slice()?;
-    let rough_types_slice = rough_types.as_slice()?;
-    let rough_vals_slice = rough_vals.as_slice()?;
-
-    let num_wavs = wav_slice.len();
-    let num_angles = sin_theta_slice.len();
-    let total_points = num_wavs * num_angles;
-    let idx_n = (n_layers - 1) as usize;
-    let n_layers_us = n_layers as usize;
-
-    // ── Resolve what must be solved, purely from the request ──
-    let Plan { need_s, need_p, need_cross, level } = resolve_plan(requested);
-
-    // Phase buffers are needed if a phase OR a dispersion observable asks for them.
-    let want_phi_rs = requested & (REQ_PHI_RS | REQ_DISP_R_S) != 0;
-    let want_phi_rp = requested & (REQ_PHI_RP | REQ_DISP_R_P) != 0;
-    let want_phi_ts = requested & (REQ_PHI_TS | REQ_DISP_T_S) != 0;
-    let want_phi_tp = requested & (REQ_PHI_TP | REQ_DISP_T_P) != 0;
-
-    // Build complex index cache.
-    let mut n_cache: Vec<Vec<Complex64>> = Vec::with_capacity(num_wavs);
-    let mut inv_n_cache: Vec<Vec<Complex64>> = Vec::with_capacity(num_wavs);
-    for ww in 0..num_wavs {
-        let base = ww * n_layers_us * 2;
-        let mut layer_n = Vec::with_capacity(n_layers_us);
-        let mut layer_inv = Vec::with_capacity(n_layers_us);
-        for l in 0..n_layers_us {
-            let nv = Complex64::new(n_stack_slice[base + l * 2], n_stack_slice[base + l * 2 + 1]);
-            layer_n.push(nv);
-            layer_inv.push(nv.recip());
-        }
-        n_cache.push(layer_n);
-        inv_n_cache.push(layer_inv);
-    }
-
-    // ── Solve every point in parallel ──
-    // At `Intensities` level we take the lean photometric path (no complex-amp
-    // capture, no coherency channel); otherwise the full solver runs, with the
-    // coherency channel gated by `need_cross` (true only at `Cross` level).
-    let states: Vec<OpticalState> = py.detach(|| {
-        (0..total_points)
-            .into_par_iter()
-            .map(|k| {
-                let a = k / num_wavs;
-                let w = k % num_wavs;
-                match level {
-                    Level::Intensities => solve_point_intensity(
-                        idx_n,
-                        wav_slice[w],
-                        sin_theta_slice[a],
-                        &n_cache[w],
-                        &inv_n_cache[w],
-                        thick_slice,
-                        inc_flags_slice,
-                        rough_types_slice,
-                        rough_vals_slice,
-                        coherence_mode,
-                        need_s,
-                        need_p,
-                    ),
-                    Level::ComplexAmps | Level::Cross => solve_point(
-                        idx_n,
-                        wav_slice[w],
-                        sin_theta_slice[a],
-                        &n_cache[w],
-                        &inv_n_cache[w],
-                        thick_slice,
-                        inc_flags_slice,
-                        rough_types_slice,
-                        rough_vals_slice,
-                        coherence_mode,
-                        need_s,
-                        need_p,
-                        need_cross,
-                    ),
-                }
-            })
-            .collect()
-    });
-
-    // ── Per-point derive into buffers (only for requested keys) ──
-    macro_rules! f64buf {
-        ($name:ident, $cond:expr) => {
-            let mut $name: Option<Vec<f64>> =
-                if $cond { Some(vec![0.0; total_points]) } else { None };
-        };
-    }
-    macro_rules! cbuf {
-        ($name:ident, $bit:expr) => {
-            let mut $name: Option<Vec<Complex64>> = if requested & $bit != 0 {
-                Some(vec![Complex64::new(0.0, 0.0); total_points])
-            } else {
-                None
-            };
-        };
-    }
-    macro_rules! put {
-        ($buf:ident, $k:expr, $val:expr) => {
-            if let Some(b) = $buf.as_mut() {
-                b[$k] = $val;
-            }
-        };
-    }
-
-    f64buf!(b_rs, requested & REQ_RS != 0);
-    f64buf!(b_rp, requested & REQ_RP != 0);
-    f64buf!(b_ts, requested & REQ_TS != 0);
-    f64buf!(b_tp, requested & REQ_TP != 0);
-    f64buf!(b_ravg, requested & REQ_R_AVG != 0);
-    f64buf!(b_tavg, requested & REQ_T_AVG != 0);
-    f64buf!(b_as, requested & REQ_A_S != 0);
-    f64buf!(b_ap, requested & REQ_A_P != 0);
-    f64buf!(b_aavg, requested & REQ_A_AVG != 0);
-    f64buf!(b_psi_r, requested & REQ_PSI_R != 0);
-    f64buf!(b_psi_t, requested & REQ_PSI_T != 0);
-    f64buf!(b_delta_r, requested & REQ_DELTA_R != 0);
-    f64buf!(b_delta_t, requested & REQ_DELTA_T != 0);
-    f64buf!(b_dop_r, requested & REQ_DOP_R != 0);
-    f64buf!(b_dop_t, requested & REQ_DOP_T != 0);
-    f64buf!(b_diatt_r, requested & REQ_DIATT_R != 0);
-    f64buf!(b_diatt_t, requested & REQ_DIATT_T != 0);
-    f64buf!(b_s0r, requested & REQ_S0_R != 0);
-    f64buf!(b_s1r, requested & REQ_S1_R != 0);
-    f64buf!(b_s2r, requested & REQ_S2_R != 0);
-    f64buf!(b_s3r, requested & REQ_S3_R != 0);
-    f64buf!(b_s0t, requested & REQ_S0_T != 0);
-    f64buf!(b_s1t, requested & REQ_S1_T != 0);
-    f64buf!(b_s2t, requested & REQ_S2_T != 0);
-    f64buf!(b_s3t, requested & REQ_S3_T != 0);
-    f64buf!(b_retard_r, requested & REQ_RETARD_R != 0);
-    f64buf!(b_retard_t, requested & REQ_RETARD_T != 0);
-    // phase buffers: allocated if phase OR dispersion wants them
-    f64buf!(b_phi_rs, want_phi_rs);
-    f64buf!(b_phi_rp, want_phi_rp);
-    f64buf!(b_phi_ts, want_phi_ts);
-    f64buf!(b_phi_tp, want_phi_tp);
-
-    cbuf!(b_rs_c, REQ_RS_C);
-    cbuf!(b_rp_c, REQ_RP_C);
-    cbuf!(b_ts_c, REQ_TS_C);
-    cbuf!(b_tp_c, REQ_TP_C);
-    cbuf!(b_cross_r, REQ_CROSS_R);
-    cbuf!(b_cross_t, REQ_CROSS_T);
-
-    for (k, s) in states.iter().enumerate() {
-        let rs = s.rs;
-        let rp = s.rp;
-        let ts = s.ts;
-        let tp = s.tp;
-
-        put!(b_rs, k, rs);
-        put!(b_rp, k, rp);
-        put!(b_ts, k, ts);
-        put!(b_tp, k, tp);
-        put!(b_ravg, k, 0.5 * (rs + rp));
-        put!(b_tavg, k, 0.5 * (ts + tp));
-        put!(b_as, k, 1.0 - rs - ts);
-        put!(b_ap, k, 1.0 - rp - tp);
-        put!(b_aavg, k, 1.0 - 0.5 * (rs + rp) - 0.5 * (ts + tp));
-
-        // Stokes (reflection)
-        let s0r = rp + rs;
-        let s1r = rp - rs;
-        let s2r = -2.0 * s.cross_r.re + 0.0;
-        let s3r = -2.0 * s.cross_r.im + 0.0;
-        put!(b_s0r, k, s0r);
-        put!(b_s1r, k, s1r);
-        put!(b_s2r, k, s2r);
-        put!(b_s3r, k, s3r);
-        // Stokes (transmission)
-        let s0t = tp + ts;
-        let s1t = tp - ts;
-        let s2t = 2.0 * s.cross_t.re + 0.0;
-        let s3t = 2.0 * s.cross_t.im + 0.0;
-        put!(b_s0t, k, s0t);
-        put!(b_s1t, k, s1t);
-        put!(b_s2t, k, s2t);
-        put!(b_s3t, k, s3t);
-
-        put!(b_diatt_r, k, s1r / (s0r + 1e-20));
-        put!(b_diatt_t, k, s1t / (s0t + 1e-20));
-
-        put!(b_dop_r, k, (s1r * s1r + s2r * s2r + s3r * s3r).sqrt() / (s0r + 1e-20));
-        put!(b_dop_t, k, ((s1t * s1t + s2t * s2t + s3t * s3t).sqrt() / (s0t + 1e-20)).min(1.0));
-
-        // Psi/Delta derived lazily per-observable: each `put!` arm — and thus
-        // its sqrt/atan/atan2 — runs only when that specific buffer was
-        // requested. Values are identical to the former `psi_delta` helper,
-        // including the degenerate (PI/2, 0) below the s-channel floor.
-        put!(b_psi_r, k, if rs < RS_FLOOR { PI / 2.0 } else { (rp / rs).sqrt().atan() });
-        put!(b_delta_r, k, if rs < RS_FLOOR { 0.0 } else { s3r.atan2(s2r) });
-        put!(b_psi_t, k, if ts < TS_FLOOR { PI / 2.0 } else { (tp / ts).sqrt().atan() });
-        put!(b_delta_t, k, if ts < TS_FLOOR { 0.0 } else { s3t.atan2(s2t) });
-
-        // Retardance == arg(cross): identical quantity to Delta (BW convention aside).
-        put!(b_retard_r, k, s.cross_r.arg());
-        put!(b_retard_t, k, s.cross_t.arg());
-
-        // Absolute phases (admittance convention; phi_rp differs by pi from BW).
-        put!(b_phi_rs, k, s.rs_c.arg());
-        put!(b_phi_rp, k, s.rp_c.arg());
-        put!(b_phi_ts, k, s.ts_c.arg());
-        put!(b_phi_tp, k, s.tp_c.arg());
-
-        if let Some(b) = b_rs_c.as_mut() { b[k] = s.rs_c; }
-        if let Some(b) = b_rp_c.as_mut() { b[k] = s.rp_c; }
-        if let Some(b) = b_ts_c.as_mut() { b[k] = s.ts_c; }
-        if let Some(b) = b_tp_c.as_mut() { b[k] = s.tp_c; }
-        if let Some(b) = b_cross_r.as_mut() { b[k] = s.cross_r; }
-        if let Some(b) = b_cross_t.as_mut() { b[k] = s.cross_t; }
-    }
-
-    // ── Dispersion post-pass (cross-wavelength) ──
-    let omega: Vec<f64> = wav_slice.iter().map(|&l| 2.0 * PI * C_NM_PER_FS / l).collect();
-    let disp = |phi: &Option<Vec<f64>>| -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
-        phi.as_ref().map(|p| dispersion_channel(p, &omega, num_angles, num_wavs))
-    };
-    let disp_r_s = if requested & REQ_DISP_R_S != 0 { disp(&b_phi_rs) } else { None };
-    let disp_r_p = if requested & REQ_DISP_R_P != 0 { disp(&b_phi_rp) } else { None };
-    let disp_t_s = if requested & REQ_DISP_T_S != 0 { disp(&b_phi_ts) } else { None };
-    let disp_t_p = if requested & REQ_DISP_T_P != 0 { disp(&b_phi_tp) } else { None };
-
-    // ── Assemble dict (only requested keys) ──
-    let shape = [num_angles, num_wavs];
-    let out = PyDict::new(py);
-
-    macro_rules! emit_f64 {
-        ($name:expr, $buf:expr) => {
-            if let Some(b) = $buf {
-                out.set_item($name, PyArray::from_vec(py, b).reshape(shape)?)?;
-            }
-        };
-    }
-    macro_rules! emit_c {
-        ($name:expr, $buf:expr) => {
-            if let Some(b) = $buf {
-                out.set_item($name, PyArray::from_vec(py, b).reshape(shape)?)?;
-            }
-        };
-    }
-
-    emit_f64!("Rs", b_rs);
-    emit_f64!("Rp", b_rp);
-    emit_f64!("Ts", b_ts);
-    emit_f64!("Tp", b_tp);
-    emit_f64!("R_avg", b_ravg);
-    emit_f64!("T_avg", b_tavg);
-    emit_f64!("A_s", b_as);
-    emit_f64!("A_p", b_ap);
-    emit_f64!("A_avg", b_aavg);
-    emit_f64!("Psi_R", b_psi_r);
-    emit_f64!("Psi_T", b_psi_t);
-    emit_f64!("Delta_R", b_delta_r);
-    emit_f64!("Delta_T", b_delta_t);
-    emit_f64!("DOP_R", b_dop_r);
-    emit_f64!("DOP_T", b_dop_t);
-    emit_f64!("Diattenuation_R", b_diatt_r);
-    emit_f64!("Diattenuation_T", b_diatt_t);
-    emit_f64!("S0_R", b_s0r);
-    emit_f64!("S1_R", b_s1r);
-    emit_f64!("S2_R", b_s2r);
-    emit_f64!("S3_R", b_s3r);
-    emit_f64!("S0_T", b_s0t);
-    emit_f64!("S1_T", b_s1t);
-    emit_f64!("S2_T", b_s2t);
-    emit_f64!("S3_T", b_s3t);
-    emit_f64!("Retardance_R", b_retard_r);
-    emit_f64!("Retardance_T", b_retard_t);
-
-    // phases emitted only if explicitly requested (not merely needed for dispersion)
-    if requested & REQ_PHI_RS != 0 { emit_f64!("phi_rs", b_phi_rs); }
-    if requested & REQ_PHI_RP != 0 { emit_f64!("phi_rp", b_phi_rp); }
-    if requested & REQ_PHI_TS != 0 { emit_f64!("phi_ts", b_phi_ts); }
-    if requested & REQ_PHI_TP != 0 { emit_f64!("phi_tp", b_phi_tp); }
-
-    emit_c!("rs_c", b_rs_c);
-    emit_c!("rp_c", b_rp_c);
-    emit_c!("ts_c", b_ts_c);
-    emit_c!("tp_c", b_tp_c);
-    emit_c!("cross_R", b_cross_r);
-    emit_c!("cross_T", b_cross_t);
-
-    macro_rules! emit_disp {
-        ($d:expr, $g:expr, $gg:expr, $t:expr, $f:expr) => {
-            if let Some((gd, gdd, tod, fod)) = $d {
-                out.set_item($g, PyArray::from_vec(py, gd).reshape(shape)?)?;
-                out.set_item($gg, PyArray::from_vec(py, gdd).reshape(shape)?)?;
-                out.set_item($t, PyArray::from_vec(py, tod).reshape(shape)?)?;
-                out.set_item($f, PyArray::from_vec(py, fod).reshape(shape)?)?;
-            }
-        };
-    }
-    emit_disp!(disp_r_s, "GD_R_s", "GDD_R_s", "TOD_R_s", "FOD_R_s");
-    emit_disp!(disp_r_p, "GD_R_p", "GDD_R_p", "TOD_R_p", "FOD_R_p");
-    emit_disp!(disp_t_s, "GD_T_s", "GDD_T_s", "TOD_T_s", "FOD_T_s");
-    emit_disp!(disp_t_p, "GD_T_p", "GDD_T_p", "TOD_T_p", "FOD_T_p");
-
-    Ok(out.into())
 }

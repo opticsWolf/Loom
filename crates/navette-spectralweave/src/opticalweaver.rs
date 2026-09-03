@@ -7,11 +7,7 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use lru::LruCache;
 use smallvec::SmallVec;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, ToPyArray};
 use parking_lot::RwLock;
-use pyo3::exceptions::{PyKeyError, PyValueError};
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
 
 // ---------------------------------------------------------------------------
 // Unit system
@@ -23,7 +19,7 @@ pub enum Unit {
 }
 
 #[inline]
-pub(crate) fn convert_unit<'a>(value: &'a [f64], from: Unit, to: Unit) -> Cow<'a, [f64]> {
+pub fn convert_unit<'a>(value: &'a [f64], from: Unit, to: Unit) -> Cow<'a, [f64]> {
     if from == to {
         Cow::Borrowed(value)
     } else {
@@ -31,20 +27,20 @@ pub(crate) fn convert_unit<'a>(value: &'a [f64], from: Unit, to: Unit) -> Cow<'a
     }
 }
 
-pub(crate) type WlSig = u128;
+pub type WlSig = u128;
 
 #[inline]
-pub(crate) fn wl_signature(wl: &[f64]) -> WlSig {
+pub fn wl_signature(wl: &[f64]) -> WlSig {
     xxhash_rust::xxh3::xxh3_128(bytemuck::cast_slice::<f64, u8>(wl))
 }
 
 #[inline]
-pub(crate) fn wl_bits_eq(a: &[f64], b: &[f64]) -> bool {
+pub fn wl_bits_eq(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && bytemuck::cast_slice::<f64, u8>(a) == bytemuck::cast_slice::<f64, u8>(b)
 }
 
 #[inline]
-pub(crate) fn unit_to_str(u: Unit) -> &'static str {
+pub fn unit_to_str(u: Unit) -> &'static str {
     match u {
         Unit::NM => "NM",
         Unit::RAW => "RAW",
@@ -52,7 +48,7 @@ pub(crate) fn unit_to_str(u: Unit) -> &'static str {
 }
 
 #[inline]
-pub(crate) fn parse_spectral(s: Option<&str>) -> Unit {
+pub fn parse_spectral(s: Option<&str>) -> Unit {
     match s {
         Some("NM") | None => Unit::NM,
         _ => Unit::NM,
@@ -60,7 +56,7 @@ pub(crate) fn parse_spectral(s: Option<&str>) -> Unit {
 }
 
 #[inline]
-pub(crate) fn parse_intensity(s: Option<&str>) -> Unit {
+pub fn parse_intensity(s: Option<&str>) -> Unit {
     match s {
         Some("RAW") | None => Unit::RAW,
         _ => Unit::RAW,
@@ -106,7 +102,7 @@ impl From<(f64, String, String)> for OpticalKey {
 
 impl OpticalKey {
     #[inline]
-    pub(crate) fn as_tuple(&self) -> (f64, String, String) {
+    pub fn as_tuple(&self) -> (f64, String, String) {
         (
             self.wavelength,
             self.data_type.to_string(),
@@ -150,20 +146,16 @@ pub struct SpectralDataFrame {
 }
 
 impl SpectralDataFrame {
-    pub fn new(wavelength: &[f64]) -> PyResult<Self> {
+    pub fn new(wavelength: &[f64]) -> Result<Self, String> {
         static UID_GEN: AtomicUsize = AtomicUsize::new(0);
         let uid = UID_GEN.fetch_add(1, Ordering::SeqCst);
 
         if wavelength.is_empty() {
-            return Err(PyValueError::new_err(
-                "SpectralDataFrame: wavelength array must be non-empty.",
-            ));
+            return Err("SpectralDataFrame: wavelength array must be non-empty.".to_string());
         }
         for i in 0..wavelength.len() - 1 {
             if !(wavelength[i] < wavelength[i + 1]) {
-                return Err(PyValueError::new_err(
-                    "SpectralDataFrame: wavelength array must be strictly monotonically increasing.",
-                ));
+                return Err("SpectralDataFrame: wavelength array must be strictly monotonically increasing.".to_string());
             }
         }
 
@@ -184,17 +176,17 @@ impl SpectralDataFrame {
         key: OpticalKey,
         value: SpectralData,
         wavelength: Option<&[f64]>,
-    ) -> PyResult<bool> {
+    ) -> Result<bool, String> {
         if let Some(wl) = wavelength {
             if !wl_bits_eq(&self.wavelength, wl) {
-                return Err(PyValueError::new_err(format!(
+                return Err(format!(
                     "SpectralDataFrame(uid={}): wavelength grid conflict.",
                     self.uid
-                )));
+                ));
             }
         }
         if value.len() != self.wavelength.len() {
-            return Err(PyValueError::new_err("Length mismatch"));
+            return Err("Length mismatch".to_string());
         }
 
         let mut guard = self.data.write();
@@ -223,9 +215,9 @@ impl SpectralDataFrame {
         (self.wl_min, self.wl_max)
     }
 
-    pub fn remove(&self, key: &OpticalKey) -> PyResult<()> {
+    pub fn remove(&self, key: &OpticalKey) -> Result<(), String> {
         if self.data.write().remove(key).is_none() {
-            return Err(PyKeyError::new_err("Key not found"));
+            return Err("Key not found".to_string());
         }
         Ok(())
     }
@@ -235,7 +227,7 @@ impl SpectralDataFrame {
 // OpticalCollection
 // ---------------------------------------------------------------------------
 pub struct OpticalCollection {
-    pub(crate) frames: RwLock<Vec<Arc<SpectralDataFrame>>>,
+    pub frames: RwLock<Vec<Arc<SpectralDataFrame>>>,
     wl_fingerprints: RwLock<AHashMap<WlSig, Arc<SpectralDataFrame>>>,
     key_map: RwLock<AHashMap<OpticalKey, SmallVec<[Arc<SpectralDataFrame>; 2]>>>,
     display_spectral: RwLock<Unit>,
@@ -310,7 +302,7 @@ impl OpticalCollection {
         Some((data_list, wl_list))
     }
 
-    pub(crate) fn map_frame_to_key(&self, key: &OpticalKey, frame: &Arc<SpectralDataFrame>) -> bool {
+    pub fn map_frame_to_key(&self, key: &OpticalKey, frame: &Arc<SpectralDataFrame>) -> bool {
         let mut key_map = self.key_map.write();
         let frames = key_map.entry(key.clone()).or_default();
         if frames.iter().any(|f| Arc::ptr_eq(f, frame)) {
@@ -327,7 +319,7 @@ impl OpticalCollection {
         wavelength: &[f64],
         input_spectral: Unit,
         input_intensity: Unit,
-    ) -> PyResult<bool> {
+    ) -> Result<bool, String> {
         let base_wl = convert_unit(wavelength, input_spectral, Unit::NM);
         let base_data = convert_unit(value, input_intensity, Unit::RAW);
         let (target_frame, frame_created) = self.get_or_create_frame(&base_wl)?;
@@ -342,7 +334,7 @@ impl OpticalCollection {
         Ok(frame_created)
     }
 
-    fn get_or_create_frame(&self, wl_arr: &[f64]) -> PyResult<(Arc<SpectralDataFrame>, bool)> {
+    fn get_or_create_frame(&self, wl_arr: &[f64]) -> Result<(Arc<SpectralDataFrame>, bool), String> {
         let sig = wl_signature(wl_arr);
         if let Some(frm) = self.wl_fingerprints.read().get(&sig) {
             if wl_bits_eq(frm.wavelength(), wl_arr) {
@@ -401,7 +393,7 @@ impl SliceOrIndices {
 type DistributionPlan = Vec<(Arc<SpectralDataFrame>, SliceOrIndices)>;
 
 pub struct OpticalWeaver {
-    pub(crate) inner: OpticalCollection,
+    pub inner: OpticalCollection,
     distribution_cache: RwLock<LruCache<WlSig, (usize, Arc<[f64]>, DistributionPlan)>>,
     generation: AtomicUsize,
 }
@@ -417,7 +409,7 @@ impl OpticalWeaver {
         }
     }
 
-    pub(crate) fn bump_generation(&self) {
+    pub fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
     pub fn generation(&self) -> usize {
@@ -431,7 +423,7 @@ impl OpticalWeaver {
         wavelength: &[f64],
         input_spectral: Unit,
         input_intensity: Unit,
-    ) -> PyResult<()> {
+    ) -> Result<(), String> {
         if self
             .inner
             .set_data(key, value, wavelength, input_spectral, input_intensity)?
@@ -441,11 +433,11 @@ impl OpticalWeaver {
         Ok(())
     }
 
-    pub fn get_weaved(&self, key: &OpticalKey) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    pub fn get_weaved(&self, key: &OpticalKey) -> Result<(Vec<f64>, Vec<f64>), String> {
         let frames = self
             .inner
             .frames_for_key(key)
-            .ok_or_else(|| PyKeyError::new_err("Key not found."))?;
+            .ok_or_else(|| "Key not found.".to_string())?;
         let mut fragments: SmallVec<[(f64, &[f64], SpectralData); 4]> = SmallVec::new();
         for frm in &frames {
             if let Some(data) = frm.get_data(key) {
@@ -487,7 +479,7 @@ impl OpticalWeaver {
         key: OpticalKey,
         full_wavelength: &[f64],
         full_data: &[f64],
-    ) -> PyResult<usize> {
+    ) -> Result<usize, String> {
         let plan = self.resolve_plan(full_wavelength)?;
         // Materialise the source once if any fragment is a contiguous slice; all
         // such fragments then view it with no copy. Skip it for all-strided plans.
@@ -510,7 +502,7 @@ impl OpticalWeaver {
         &self,
         common_wavelength: &[f64],
         data_batch: AHashMap<OpticalKey, &[f64]>,
-    ) -> PyResult<usize> {
+    ) -> Result<usize, String> {
         if data_batch.is_empty() {
             return Ok(0);
         }
@@ -538,7 +530,7 @@ impl OpticalWeaver {
         self.distribution_cache.write().clear();
     }
 
-    fn resolve_plan(&self, full_wavelength: &[f64]) -> PyResult<DistributionPlan> {
+    fn resolve_plan(&self, full_wavelength: &[f64]) -> Result<DistributionPlan, String> {
         let sig = wl_signature(full_wavelength);
         let current_gen = self.generation.load(Ordering::SeqCst);
         {
@@ -558,7 +550,7 @@ impl OpticalWeaver {
         Ok(plan)
     }
 
-    fn build_distribution_plan(&self, full_wavelength: &[f64]) -> PyResult<DistributionPlan> {
+    fn build_distribution_plan(&self, full_wavelength: &[f64]) -> Result<DistributionPlan, String> {
         let mut plan = Vec::new();
         if full_wavelength.is_empty() {
             return Ok(plan);
@@ -615,404 +607,5 @@ impl OpticalWeaver {
             }
         }
         Ok(plan)
-    }
-}
-
-// =============================================================================
-// Python bindings (Optical Core)
-// =============================================================================
-
-#[pyclass(name = "SpectralDataFrame", frozen)]
-pub struct PySpectralDataFrame {
-    inner: Arc<SpectralDataFrame>,
-}
-
-#[pymethods]
-impl PySpectralDataFrame {
-    #[getter]
-    fn uid(&self) -> usize {
-        self.inner.uid
-    }
-    #[getter]
-    fn wavelength<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        self.inner.wavelength().to_pyarray(py)
-    }
-    #[getter]
-    fn wl_bounds(&self) -> (f64, f64) {
-        self.inner.wl_bounds()
-    }
-    fn __getitem__<'py>(
-        &self,
-        py: Python<'py>,
-        key: (f64, String, String),
-    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-        self.inner
-            .get_data(&OpticalKey::from(key))
-            .map(|v| v.to_vec().into_pyarray(py))
-            .ok_or_else(|| PyKeyError::new_err("Key not found"))
-    }
-    fn __contains__(&self, key: (f64, String, String)) -> bool {
-        self.inner.get_data(&OpticalKey::from(key)).is_some()
-    }
-    fn __len__(&self) -> usize {
-        self.inner.len()
-    }
-    fn keys(&self) -> Vec<(f64, String, String)> {
-        self.inner.keys().iter().map(|k| k.as_tuple()).collect()
-    }
-    fn set_data(
-        &self,
-        key: (f64, String, String),
-        value: PyReadonlyArray1<'_, f64>,
-        wavelength: Option<PyReadonlyArray1<'_, f64>>,
-    ) -> PyResult<bool> {
-        let value_slice = value.as_slice()?;
-        let key = OpticalKey::from(key);
-        let value_data = SpectralData::from_arc(Arc::from(value_slice));
-        match wavelength {
-            Some(arr) => {
-                let wl = arr.as_slice()?;
-                self.inner.set_data(key, value_data, Some(wl))
-            }
-            None => self.inner.set_data(key, value_data, None),
-        }
-    }
-    fn remove(&self, key: (f64, String, String)) -> PyResult<()> {
-        self.inner.remove(&OpticalKey::from(key))
-    }
-    fn __repr__(&self) -> String {
-        let (lo, hi) = self.inner.wl_bounds();
-        format!(
-            "SpectralDataFrame(uid={}, keys={}, wl_points={}, range=[{:.2}, {:.2}])",
-            self.inner.uid,
-            self.inner.len(),
-            self.inner.wavelength().len(),
-            lo,
-            hi
-        )
-    }
-}
-
-#[pyclass(name = "OpticalCollection", frozen)]
-pub struct PyOpticalCollection {
-    inner: Arc<OpticalCollection>,
-}
-
-#[pymethods]
-impl PyOpticalCollection {
-    #[new]
-    fn new() -> Self {
-        PyOpticalCollection {
-            inner: Arc::new(OpticalCollection::new()),
-        }
-    }
-    #[getter]
-    fn display_spectral(&self) -> String {
-        unit_to_str(self.inner.display_spectral()).to_string()
-    }
-    #[setter]
-    fn set_display_spectral(&self, unit_str: String) -> PyResult<()> {
-        match unit_str.as_str() {
-            "NM" => {
-                self.inner.set_display_spectral(Unit::NM);
-                Ok(())
-            }
-            _ => Err(PyValueError::new_err("Invalid spectral unit")),
-        }
-    }
-    #[getter]
-    fn display_intensity(&self) -> String {
-        unit_to_str(self.inner.display_intensity()).to_string()
-    }
-    #[setter]
-    fn set_display_intensity(&self, unit_str: String) -> PyResult<()> {
-        match unit_str.as_str() {
-            "RAW" => {
-                self.inner.set_display_intensity(Unit::RAW);
-                Ok(())
-            }
-            _ => Err(PyValueError::new_err("Invalid intensity unit")),
-        }
-    }
-    #[getter]
-    fn frame_count(&self) -> usize {
-        self.inner.frame_count()
-    }
-    fn __len__(&self) -> usize {
-        self.inner.len_keys()
-    }
-    fn keys(&self) -> Vec<(f64, String, String)> {
-        self.inner.keys().iter().map(|k| k.as_tuple()).collect()
-    }
-    fn __contains__(&self, key: (f64, String, String)) -> bool {
-        self.inner.contains_key(&OpticalKey::from(key))
-    }
-    fn frame(&self, index: usize) -> PyResult<PySpectralDataFrame> {
-        let frm = self
-            .inner
-            .frame_at(index)
-            .ok_or_else(|| PyValueError::new_err("Index out of range"))?;
-        Ok(PySpectralDataFrame { inner: frm })
-    }
-    #[getter]
-    fn frames(&self) -> Vec<PySpectralDataFrame> {
-        self.inner
-            .frames_snapshot()
-            .into_iter()
-            .map(|inner| PySpectralDataFrame { inner })
-            .collect()
-    }
-    fn frames_for_key(&self, key: (f64, String, String)) -> PyResult<Vec<PySpectralDataFrame>> {
-        let frames = self
-            .inner
-            .frames_for_key(&OpticalKey::from(key))
-            .ok_or_else(|| PyKeyError::new_err("Key not found"))?;
-        Ok(frames
-            .into_iter()
-            .map(|inner| PySpectralDataFrame { inner })
-            .collect())
-    }
-    fn get_converted<'py>(
-        &self,
-        py: Python<'py>,
-        key: (f64, String, String),
-    ) -> PyResult<(Vec<Bound<'py, PyArray1<f64>>>, Vec<Bound<'py, PyArray1<f64>>>)> {
-        let opt_key = OpticalKey::from(key);
-        let (data_list, wl_list) = py
-            .detach(|| self.inner.get_converted(&opt_key))
-            .ok_or_else(|| PyKeyError::new_err("Key not found"))?;
-        Ok((
-            data_list.into_iter().map(|d| d.into_pyarray(py)).collect(),
-            wl_list.into_iter().map(|w| w.into_pyarray(py)).collect(),
-        ))
-    }
-    #[pyo3(signature = (key, value, wavelength, input_spectral=None, input_intensity=None))]
-    fn set_data(
-        &self,
-        py: Python<'_>,
-        key: (f64, String, String),
-        value: PyReadonlyArray1<'_, f64>,
-        wavelength: PyReadonlyArray1<'_, f64>,
-        input_spectral: Option<String>,
-        input_intensity: Option<String>,
-    ) -> PyResult<()> {
-        let key = OpticalKey::from(key);
-        let s = parse_spectral(input_spectral.as_deref());
-        let i = parse_intensity(input_intensity.as_deref());
-        let v_slice = value.as_slice()?;
-        let v_ptr = v_slice.as_ptr() as usize;
-        let v_len = v_slice.len();
-        let w_slice = wavelength.as_slice()?;
-        let w_ptr = w_slice.as_ptr() as usize;
-        let w_len = w_slice.len();
-        py.detach(move || {
-            let value_data = unsafe { std::slice::from_raw_parts(v_ptr as *const f64, v_len) };
-            let wl_data = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
-            self.inner.set_data(key, value_data, wl_data, s, i).map(|_| ())
-        })
-    }
-}
-
-#[pyclass(name = "OpticalWeaver", frozen)]
-pub struct PyOpticalWeaver {
-    pub(crate) inner: Arc<OpticalWeaver>,
-}
-
-#[pymethods]
-impl PyOpticalWeaver {
-    #[new]
-    #[pyo3(signature = (cache_size=128))]
-    fn new(cache_size: usize) -> Self {
-        PyOpticalWeaver {
-            inner: Arc::new(OpticalWeaver::new(cache_size)),
-        }
-    }
-    #[getter]
-    fn display_spectral(&self) -> String {
-        unit_to_str(self.inner.inner.display_spectral()).to_string()
-    }
-    #[setter]
-    fn set_display_spectral(&self, unit_str: String) -> PyResult<()> {
-        match unit_str.as_str() {
-            "NM" => {
-                self.inner.inner.set_display_spectral(Unit::NM);
-                Ok(())
-            }
-            _ => Err(PyValueError::new_err("Invalid spectral unit")),
-        }
-    }
-    #[getter]
-    fn display_intensity(&self) -> String {
-        unit_to_str(self.inner.inner.display_intensity()).to_string()
-    }
-    #[setter]
-    fn set_display_intensity(&self, unit_str: String) -> PyResult<()> {
-        match unit_str.as_str() {
-            "RAW" => {
-                self.inner.inner.set_display_intensity(Unit::RAW);
-                Ok(())
-            }
-            _ => Err(PyValueError::new_err("Invalid intensity unit")),
-        }
-    }
-    #[getter]
-    fn frame_count(&self) -> usize {
-        self.inner.inner.frame_count()
-    }
-    #[getter]
-    fn generation(&self) -> usize {
-        self.inner.generation()
-    }
-    fn __len__(&self) -> usize {
-        self.inner.inner.len_keys()
-    }
-    fn keys(&self) -> Vec<(f64, String, String)> {
-        self.inner.inner.keys().iter().map(|k| k.as_tuple()).collect()
-    }
-    fn __contains__(&self, key: (f64, String, String)) -> bool {
-        self.inner.inner.contains_key(&OpticalKey::from(key))
-    }
-    fn frame(&self, index: usize) -> PyResult<PySpectralDataFrame> {
-        let frm = self
-            .inner
-            .inner
-            .frame_at(index)
-            .ok_or_else(|| PyValueError::new_err("Index out of range"))?;
-        Ok(PySpectralDataFrame { inner: frm })
-    }
-    #[getter]
-    fn frames(&self) -> Vec<PySpectralDataFrame> {
-        self.inner
-            .inner
-            .frames_snapshot()
-            .into_iter()
-            .map(|inner| PySpectralDataFrame { inner })
-            .collect()
-    }
-    fn frames_for_key(&self, key: (f64, String, String)) -> PyResult<Vec<PySpectralDataFrame>> {
-        let frames = self
-            .inner
-            .inner
-            .frames_for_key(&OpticalKey::from(key))
-            .ok_or_else(|| PyKeyError::new_err("Key not found"))?;
-        Ok(frames
-            .into_iter()
-            .map(|inner| PySpectralDataFrame { inner })
-            .collect())
-    }
-    fn get_converted<'py>(
-        &self,
-        py: Python<'py>,
-        key: (f64, String, String),
-    ) -> PyResult<(Vec<Bound<'py, PyArray1<f64>>>, Vec<Bound<'py, PyArray1<f64>>>)> {
-        let opt_key = OpticalKey::from(key);
-        let (data_list, wl_list) = py
-            .detach(|| self.inner.inner.get_converted(&opt_key))
-            .ok_or_else(|| PyKeyError::new_err("Key not found"))?;
-        Ok((
-            data_list.into_iter().map(|d| d.into_pyarray(py)).collect(),
-            wl_list.into_iter().map(|w| w.into_pyarray(py)).collect(),
-        ))
-    }
-    #[pyo3(signature = (key, value, wavelength, input_spectral=None, input_intensity=None))]
-    fn set_data(
-        &self,
-        py: Python<'_>,
-        key: (f64, String, String),
-        value: PyReadonlyArray1<'_, f64>,
-        wavelength: PyReadonlyArray1<'_, f64>,
-        input_spectral: Option<String>,
-        input_intensity: Option<String>,
-    ) -> PyResult<()> {
-        let key = OpticalKey::from(key);
-        let s = parse_spectral(input_spectral.as_deref());
-        let i = parse_intensity(input_intensity.as_deref());
-        let v_slice = value.as_slice()?;
-        let v_ptr = v_slice.as_ptr() as usize;
-        let v_len = v_slice.len();
-        let w_slice = wavelength.as_slice()?;
-        let w_ptr = w_slice.as_ptr() as usize;
-        let w_len = w_slice.len();
-        py.detach(move || {
-            let value_data = unsafe { std::slice::from_raw_parts(v_ptr as *const f64, v_len) };
-            let wl_data = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
-            self.inner.set_data(key, value_data, wl_data, s, i)
-        })
-    }
-    fn get_weaved<'py>(
-        &self,
-        py: Python<'py>,
-        key: (f64, String, String),
-    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
-        let opt_key = OpticalKey::from(key);
-        let (wl, data) = py.detach(|| self.inner.get_weaved(&opt_key))?;
-        Ok((wl.into_pyarray(py), data.into_pyarray(py)))
-    }
-    fn get_weaved_collections<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyDict>)>> {
-        let groups = py.detach(|| self.inner.get_weaved_collections());
-        let mut out = Vec::with_capacity(groups.len());
-        for (wl, data_map) in groups {
-            let wl_arr = wl.into_pyarray(py);
-            let dict = PyDict::new(py);
-            for (key, data) in data_map {
-                dict.set_item(key.as_tuple(), data.into_pyarray(py))?;
-            }
-            out.push((wl_arr, dict));
-        }
-        Ok(out)
-    }
-    fn unweave(
-        &self,
-        py: Python<'_>,
-        key: (f64, String, String),
-        full_wavelength: PyReadonlyArray1<'_, f64>,
-        full_data: PyReadonlyArray1<'_, f64>,
-    ) -> PyResult<usize> {
-        let key = OpticalKey::from(key);
-        let w_slice = full_wavelength.as_slice()?;
-        let w_ptr = w_slice.as_ptr() as usize;
-        let w_len = w_slice.len();
-        let d_slice = full_data.as_slice()?;
-        let d_ptr = d_slice.as_ptr() as usize;
-        let d_len = d_slice.len();
-        py.detach(move || {
-            let wl = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
-            let data = unsafe { std::slice::from_raw_parts(d_ptr as *const f64, d_len) };
-            self.inner.unweave(key, wl, data)
-        })
-    }
-    fn unweave_collection(
-        &self,
-        py: Python<'_>,
-        common_wavelength: PyReadonlyArray1<'_, f64>,
-        data_batch: &Bound<'_, PyDict>,
-    ) -> PyResult<usize> {
-        let w_slice = common_wavelength.as_slice()?;
-        let w_ptr = w_slice.as_ptr() as usize;
-        let w_len = w_slice.len();
-        let mut items = Vec::with_capacity(data_batch.len());
-        let mut py_arrays = Vec::with_capacity(data_batch.len());
-        for (key_obj, value_obj) in data_batch.iter() {
-            let key_tuple: (f64, String, String) = key_obj.extract()?;
-            let arr: PyReadonlyArray1<f64> = value_obj.extract()?;
-            let slice = arr.as_slice()?;
-            items.push((key_tuple, slice.as_ptr() as usize, slice.len()));
-            py_arrays.push(arr);
-        }
-        py.detach(move || {
-            let wl = unsafe { std::slice::from_raw_parts(w_ptr as *const f64, w_len) };
-            let mut batch = AHashMap::with_capacity(items.len());
-            for (key_tuple, ptr_addr, len) in items {
-                let slice = unsafe { std::slice::from_raw_parts(ptr_addr as *const f64, len) };
-                batch.insert(OpticalKey::from(key_tuple), slice);
-            }
-            self.inner.unweave_collection(wl, batch)
-        })
-    }
-    fn invalidate_cache(&self) {
-        self.inner.invalidate_cache();
     }
 }

@@ -17,7 +17,7 @@ try:
 except ImportError as exc:  # pragma: no cover - native not built yet
   raise ImportError(
     "OpticalFragment needs the compiled `navette._spectralweave` extension. "
-    "Build it with: maturin develop -m crates/navette-spectralweave/Cargo.toml"
+    "Build it with: maturin develop -m crates/navette-spectralweave-py/Cargo.toml"
   ) from exc
 
 # Type aliases for strict IDE hinting

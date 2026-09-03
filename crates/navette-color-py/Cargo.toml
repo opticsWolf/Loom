@@ -1,0 +1,16 @@
+[package]
+name = "navette-color-py"
+version = "0.2.0"
+edition = "2024"
+description = "Thin PyO3 bindings exposing navette-color as navette._color."
+license = "LGPL-3.0-or-later"
+
+[lib]
+name = "_color"
+crate-type = ["cdylib"]
+
+[dependencies]
+navette-color = { path = "../navette-color" }
+pyo3 = { workspace = true }
+numpy = { workspace = true }
+rayon = { workspace = true }

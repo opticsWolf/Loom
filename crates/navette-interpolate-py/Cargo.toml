@@ -1,0 +1,18 @@
+[package]
+name = "navette-interpolate-py"
+version = "0.2.0"
+edition = "2024"
+authors = ["opticswolf"]
+description = "Thin PyO3 bindings exposing navette-interpolate as navette._interpolate."
+license = "LGPL-3.0"
+
+[lib]
+name = "_interpolate"
+crate-type = ["cdylib"]
+
+[dependencies]
+navette-interpolate = { path = "../navette-interpolate" }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }
+numpy = { workspace = true }
+ndarray = "0.17"
+rayon = { workspace = true }

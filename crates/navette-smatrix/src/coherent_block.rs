@@ -1,6 +1,4 @@
 use num_complex::{Complex64, ComplexFloat};
-use numpy::PyReadonlyArray1;
-use pyo3::prelude::*;
 use std::f64::consts::PI;
 
 use crate::optics_core::{cexp_fast, csqrt_fast, redheffer_product_complex_field_inner, w_function_inner};
@@ -408,43 +406,4 @@ pub fn solve_coherent_block_fields_dual(
     let s_res = finalize(s_rf, s_tb, s_tf, s_rb, ys_first, ys_curr);
     let p_res = finalize(p_rf, p_tb, p_tf, p_rb, yp_first, yp_curr);
     (s_res, p_res)
-}
-
-/// Python-facing wrapper. Same contract as the reference `@njit` function:
-/// pass the FULL per-wavelength arrays plus absolute `start_idx`/`end_idx`.
-#[pyfunction]
-#[pyo3(name = "solve_coherent_block_fields")]
-#[allow(clippy::too_many_arguments)]
-pub fn solve_coherent_block_fields(
-    start_idx: i32,
-    end_idx: i32,
-    n_stack: PyReadonlyArray1<Complex64>,
-    d_stack: PyReadonlyArray1<f64>,
-    rough_vals: PyReadonlyArray1<f64>,
-    rough_types: PyReadonlyArray1<i32>,
-    lam: f64,
-    nsin_fi: Complex64,
-    pol: i32,
-) -> PyResult<BlockResult> {
-    let n_slice = n_stack.as_slice()?;
-    let d_slice = d_stack.as_slice()?;
-    let rv_slice = rough_vals.as_slice()?;
-    let rt_slice = rough_types.as_slice()?;
-
-    // Per-layer reciprocals (1/n). In the engines these are precomputed once
-    // per wavelength and reused across all angles; here it is a single call.
-    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
-
-    Ok(solve_coherent_block_fields_inner(
-        start_idx as usize,
-        end_idx as usize,
-        n_slice,
-        &inv_n,
-        d_slice,
-        rv_slice,
-        rt_slice,
-        lam,
-        nsin_fi,
-        pol,
-    ))
 }

@@ -13,4 +13,3 @@ dependencies = ["numpy"]
 # Private native extension; public API lives in src/navette/color/.
 python-source = "../../src"
 module-name = "navette._color"
-features = ["python", "parallel"]
