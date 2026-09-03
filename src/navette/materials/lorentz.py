@@ -17,10 +17,14 @@ Architecture:
 """
 
 import numpy as np
-from navette.materials._numba import njit
 from typing import List, Tuple, Dict, Union, Optional
 
 from .material import Material, compute_energy
+
+try:
+  from . import _native
+except ImportError:  # pragma: no cover - native not built yet
+  _native = None  # type: ignore[assignment]
 
 __all__ = ["LorentzOscillator"]
 
@@ -28,34 +32,6 @@ __all__ = ["LorentzOscillator"]
 _HC_EV_NM: float = 1239.8419843320028
 
 _PARAM_MAP: Dict[str, int] = {"E0": 0, "Gamma": 1, "f0": 2}
-
-
-@njit(cache=True, fastmath=True)
-def compute_lorentz_complex_nk(
-    E: np.ndarray,
-    lorentz_params: np.ndarray,
-    eps_inf: float,
-) -> np.ndarray:
-    """
-    Compute complex refractive index (n + ik) for Lorentz oscillators.
-
-    Args:
-        E: Photon energies [eV].
-        lorentz_params: Shape (N, 3) array of (E0, Gamma, f0) per oscillator.
-        eps_inf: High-frequency dielectric constant.
-
-    Returns:
-        Complex refractive index array (n + ik).
-    """
-    eps = np.full(E.shape, eps_inf + 0j, dtype=np.complex128)
-    E_sq = E * E
-
-    for j in range(lorentz_params.shape[0]):
-        E0, Gamma, f0 = lorentz_params[j]
-        E0_sq = E0 * E0
-        eps += (f0 * E0_sq) / ((E0_sq - E_sq) - 1j * (E * Gamma))
-
-    return np.sqrt(eps)
 
 
 def _validate_oscillator(E0: float, Gamma: float, f0: float, label: str = "") -> None:
@@ -221,8 +197,13 @@ class LorentzOscillator(Material):
             self.set_wavelength_range(wavelength)
 
         if self.nk is None:
-            self.nk = compute_lorentz_complex_nk(
-                self.E,
+            if _native is None:  # pragma: no cover
+              raise ImportError(
+                "LorentzOscillator needs the compiled `navette.materials._native` extension. "
+                "Build it with: maturin develop -m crates/navette-materials-py/Cargo.toml"
+              )
+            self.nk = _native.lorentz_nk(
+                self.wavelength,
                 self._lorentz_params,
                 float(self.params["epsilon_inf"]),
             )

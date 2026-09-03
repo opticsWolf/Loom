@@ -13,216 +13,20 @@ Optimized Version without verbose properties:
 """
 
 import numpy as np
-from navette.materials._numba import njit
 from typing import Dict, Union, Optional
 
 from .material import Material, compute_energy
+
+try:
+  from . import _native
+except ImportError:  # pragma: no cover - native not built yet
+  _native = None  # type: ignore[assignment]
 
 
 __all__ = ["Cauchy", "CauchyUrbach", "Sellmeier", "SellmeierUrbach"]
 
 # Physical constant: h·c in eV·nm
 _HC_EV_NM: float = 1239.8419843320028
-
-@njit(cache=True)
-def compute_cauchy_n_part(wavelength_µm_2: np.ndarray,
-                           A: float,
-                           B: float,
-                           C: float) -> np.ndarray:
-    """
-    Compute real part of refractive index from Cauchy model.
-
-    The Cauchy model describes chromatic dispersion using a polynomial
-    expansion: n(λ) = A + B/λ² + C/λ⁴
-
-    Args:
-        wavelength_µm_2: Array of wavelengths in µm squared
-        A: Constant term coefficient
-        B: 1/λ² term coefficient
-        C: 1/λ⁴ term coefficient
-
-    Returns:
-        Refractive index (real part) for given wavelengths
-    """
-    return A + B / wavelength_µm_2 + C / (wavelength_µm_2 ** 2)
-
-
-@njit(cache=True)
-def compute_cauchy_complex_nk(wavelength_µm_2: np.ndarray,
-                              A: float,
-                              B: float,
-                              C: float) -> np.ndarray:
-    """
-    Compute complex refractive index from Cauchy model with k=0.
-
-    Args:
-        wavelength_µm_2: Array of wavelengths in µm squared
-        A, B, C: Cauchy model coefficients for real part (n)
-
-    Returns:
-        Complex refractive index array where real part is from Cauchy model
-        and imaginary part is set to 0.
-    """
-    n = compute_cauchy_n_part(wavelength_µm_2, A, B, C)
-    k = np.zeros_like(wavelength_µm_2)
-    return n + 1j * k
-
-
-@njit(cache=True)
-def compute_sellmeier_n_part(wavelength_µm_2: np.ndarray,
-                        B1: float, C1: float,
-                        B2: float, C2: float,
-                        B3: float, C3: float) -> np.ndarray:
-    """
-    Compute refractive index from Sellmeier equation.
-
-    The Sellmeier equation describes chromatic dispersion:
-    n²(λ) = 1 + Σᵢ[Bᵢλ²/(λ² - Cᵢ)]
-
-    Args:
-        wavelength_µm_2: Array of wavelengths in µm squared
-        B1-B3: Numerator coefficients for the Sellmeier equation
-        C1-C3: Denominator coefficients
-
-    Returns:
-        Refractive index (n) as numpy array
-    """
-    term1 = B1 * wavelength_µm_2 / (wavelength_µm_2 - C1)
-    term2 = B2 * wavelength_µm_2 / (wavelength_µm_2 - C2)
-    term3 = np.where(B3 != 0.0, B3 * wavelength_µm_2 / (wavelength_µm_2 - C3), 0.0)
-    
-    n_squared = 1.0 + term1 + term2 + term3
-    return np.sqrt(n_squared)
-
-
-@njit(cache=True)
-def compute_sellmeier_complex_nk(wavelength_µm_2: np.ndarray,
-                             B1: float, C1: float,
-                             B2: float, C2: float,
-                             B3: float, C3: float) -> np.ndarray:
-    """
-    Compute complex refractive index for Sellmeier model with k=0.
-
-    Args:
-        wavelength_µm_2: Array of wavelengths in µm squared
-        B1-B3: Numerator coefficients for the Sellmeier equation
-        C1-C3: Denominator coefficients
-
-    Returns:
-        Complex refractive index array where real part is from Sellmeier model
-        and imaginary part is set to 0.
-    """
-    n = compute_sellmeier_n_part(wavelength_µm_2, B1, C1, B2, C2, B3, C3)
-    k = np.zeros_like(wavelength_µm_2)
-    return n + 1j * k
-
-
-@njit(cache=True)
-def compute_urbach_k_part(wavelength_m: np.ndarray,
-                            E: np.ndarray,
-                            alpha0: float,
-                            Eu: float,
-                            lambda_g: float,
-                            h_c: float) -> np.ndarray:
-    """
-    Compute Urbach extinction coefficient.
-
-    The Urbach model describes exponential absorption near band gaps:
-    k(λ) = α₀·exp((E - E₉)/Eᵤ) · λ/(4π)
-
-    Args:
-        wavelength_m: Array of wavelengths in m
-        E: Corresponding array of photon energies
-        alpha0: Absorption coefficient at band gap energy (1/cm)
-        Eu: Urbach energy parameter (eV)
-        lambda_g: Band gap wavelength (nm)
-        h_c: Product of Planck's constant and speed of light
-
-    Returns:
-        Extinction coefficient k for the given wavelengths
-    """
-    k_part = np.zeros_like(E)
-    E_g = h_c / lambda_g
-    
-    mask = E < E_g
-    if np.any(mask):
-        exponent = (E[mask] - E_g) / Eu
-        absorption_coeff = alpha0 * np.exp(exponent)
-        k_part[mask] = absorption_coeff * wavelength_m[mask] / (4 * np.pi)
-        
-    return k_part
-
-
-@njit(cache=True)
-def compute_cauchy_urbach_complex_nk(wavelength_m: np.ndarray, 
-                             wavelength_µm_2: np.ndarray,
-                             E: np.ndarray,
-                             A: float,
-                             B: float,
-                             C: float,
-                             alpha0: float,
-                             Eu: float,
-                             lambda_g: float,
-                             h_c) -> np.ndarray:
-    """
-    Compute complex refractive index from Cauchy and Urbach models.
-
-    Combines the Cauchy model (dispersion) with Urbach absorption (extinction).
-
-    Args:
-        wavelength_m: Array of wavelengths in m
-        wavelength_µm_2: Array of wavelengths in µm squared
-        E: Corresponding photon energies
-        A, B, C: Cauchy model coefficients for real part (n)
-        alpha0: Urbach absorption coefficient at band gap energy (1/cm)
-        Eu: Urbach energy parameter (eV)
-        lambda_g: Band gap wavelength (nm)
-        h_c: Product of Planck's constant and speed of light
-
-    Returns:
-        Complex refractive index array where real part is from Cauchy model
-        and imaginary part is from Urbach model extinction coefficient.
-    """
-    n = compute_cauchy_n_part(wavelength_µm_2, A, B, C)
-    k = compute_urbach_k_part(wavelength_m, E, alpha0, Eu, lambda_g, h_c)
-    return n + 1j * k
-
-
-@njit(cache=True)
-def compute_sellmeier_urbach_complex_nk(wavelength_m: np.ndarray,
-                             wavelength_µm_2: np.ndarray,
-                             E: np.ndarray,
-                             B1: float, C1: float,
-                             B2: float, C2: float,
-                             B3: float, C3: float,
-                             alpha0: float,
-                             Eu: float,
-                             lambda_g: float,
-                             h_c: float) -> np.ndarray:
-    """
-    Compute complex refractive index for Sellmeier model with Urbach k.
-
-    Combines the Sellmeier model (dispersion) with Urbach absorption (extinction).
-
-    Args:
-        wavelength_m: Array of wavelengths in m
-        wavelength_µm_2: Array of wavelengths in µm squared
-        E: Corresponding photon energies
-        B1-B3: Numerator coefficients for the Sellmeier equation
-        C1-C3: Denominator coefficients
-        alpha0: Absorption coefficient at band gap energy (1/cm)
-        Eu: Urbach energy parameter (eV)
-        lambda_g: Band gap wavelength (nm)
-        h_c: Product of Planck's constant and speed of light
-
-    Returns:
-        Complex refractive index array where real part is from Sellmeier model
-        and imaginary part is from Urbach model extinction coefficient.
-    """
-    n = compute_sellmeier_n_part(wavelength_µm_2, B1, C1, B2, C2, B3, C3)
-    k = compute_urbach_k_part(wavelength_m, E, alpha0, Eu, lambda_g, h_c)
-    return n + 1j * k
-
 
 class Cauchy(Material):
     """
@@ -304,8 +108,13 @@ class Cauchy(Material):
         if wavelength is not None:
             self.set_wavelength_range(wavelength)
 
-        self.nk = compute_cauchy_complex_nk(
-            self.wavelength_µm_2,
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "Dispersion models need the compiled `navette.materials._native` extension. "
+            "Build it with: maturin develop -m crates/navette-materials-py/Cargo.toml"
+          )
+        self.nk = _native.cauchy_nk(
+            self.wavelength,
             self.params['A'],
             self.params['B'],
             self.params['C']
@@ -444,17 +253,19 @@ class CauchyUrbach(Material):
         if wavelength is not None:
             self.set_wavelength_range(wavelength)
 
-        self.nk = compute_cauchy_urbach_complex_nk(
-            self.wavelength_m,
-            self.wavelength_µm_2,
-            self.E,
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "Dispersion models need the compiled `navette.materials._native` extension. "
+            "Build it with: maturin develop -m crates/navette-materials-py/Cargo.toml"
+          )
+        self.nk = _native.cauchy_urbach_nk(
+            self.wavelength,
             self.params['A'],
             self.params['B'],
             self.params['C'],
             self.params['alpha0'],
             self.params['Eu'],
-            self.params['lambda_g'],
-            _HC_EV_NM
+            self.params['lambda_g']
         )
         return self.nk
 
@@ -597,8 +408,13 @@ class Sellmeier(Material):
         if wavelength is not None:
             self.set_wavelength_range(wavelength)
 
-        self.nk = compute_sellmeier_complex_nk(
-            self.wavelength_µm_2,
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "Dispersion models need the compiled `navette.materials._native` extension. "
+            "Build it with: maturin develop -m crates/navette-materials-py/Cargo.toml"
+          )
+        self.nk = _native.sellmeier_nk(
+            self.wavelength,
             self.params['B1'], self.params['C1'],
             self.params['B2'], self.params['C2'],
             self.params['B3'], self.params['C3']
@@ -754,17 +570,19 @@ class SellmeierUrbach(Material):
         if wavelength is not None:
             self.set_wavelength_range(wavelength)
 
-        self.nk = compute_sellmeier_urbach_complex_nk(
-            self.wavelength_m,
-            self.wavelength_µm_2,
-            self.E,
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "Dispersion models need the compiled `navette.materials._native` extension. "
+            "Build it with: maturin develop -m crates/navette-materials-py/Cargo.toml"
+          )
+        self.nk = _native.sellmeier_urbach_nk(
+            self.wavelength,
             self.params['B1'], self.params['C1'],
             self.params['B2'], self.params['C2'],
             self.params['B3'], self.params['C3'],
             self.params['alpha0'],
             self.params['Eu'],
-            self.params['lambda_g'],
-            _HC_EV_NM
+            self.params['lambda_g']
         )
         return self.nk
 

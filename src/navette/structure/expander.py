@@ -2,7 +2,35 @@
 from typing import Dict, Iterator, List, Optional, Tuple, Union
 import numpy as np
 
-from navette.materials.ema_models import looyenga_eps
+try:
+  from navette.materials._native import ema_looyenga as _looyenga_eps
+except ImportError:  # pragma: no cover - native not built; numpy fallback below
+  _looyenga_eps = None  # type: ignore[assignment]
+
+
+def _looyenga_fallback(
+  n_i: np.ndarray, n_h: np.ndarray, f: float
+) -> np.ndarray:
+  """Landau-Lifshitz-Looyenga mixing (pure numpy; elementwise)."""
+  cbrt = (n_i * n_i) ** (1.0 / 3.0) * f + (n_h * n_h) ** (1.0 / 3.0) * (1.0 - f)
+  return cbrt ** 3.0
+
+
+def looyenga_eps(
+  n_i: np.ndarray, n_h: np.ndarray, f: float
+) -> np.ndarray:
+  """Interface mixing: native kernel when built, else numpy fallback."""
+  if _looyenga_eps is not None:
+    return _looyenga_eps(
+      np.ascontiguousarray(n_i, dtype=np.complex128),
+      np.ascontiguousarray(n_h, dtype=np.complex128),
+      float(f),
+    )
+  return _looyenga_fallback(
+    np.asarray(n_i, dtype=np.complex128),
+    np.asarray(n_h, dtype=np.complex128),
+    float(f),
+  )
 
 from .types import COMPLEX_TYPE, FLOAT_TYPE, INT_TYPE, ErrorMask, RoughnessType, SolverArrays
 from .materials import MaterialProvider

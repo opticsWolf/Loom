@@ -39,10 +39,16 @@ Optimisation features:
 """
 
 import numpy as np
-from navette.materials._numba import njit, prange
 from typing import Dict, List, Tuple, Union, Optional
 
 from .material import Material, compute_energy
+
+try:
+  from . import _native
+except ImportError:  # pragma: no cover - native not built yet
+  _native = None  # type: ignore[assignment]
+
+_NATIVE_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
 
 __all__ = ["CodyLorentz"]
 
@@ -58,24 +64,6 @@ _OSC_WIDTH: int = 4
 
 # Shared (scalar) parameter names
 _SHARED_PARAMS: Tuple[str, ...] = ("Eg", "Et", "Eu")
-
-
-# =====================================================================
-#  Module-global cached grid and KK kernel  (built once at import)
-# =====================================================================
-
-_E_FULL: np.ndarray = np.linspace(_GRID_MIN, _GRID_MAX, _GRID_N)
-
-# Precompute padded FFT size, frequency array, and Hilbert multiplier
-_M_RAW: int = 2 * _GRID_N + 1
-_KK_M: int = 1
-while _KK_M < _M_RAW:
-    _KK_M <<= 1
-
-_KK_dE: float = _E_FULL[1] - _E_FULL[0]
-_KK_H: np.ndarray = np.empty((_KK_M // 2) + 1, dtype=np.complex128)
-_KK_H[0] = 0.0
-_KK_H[1:] = -1j
 
 
 # =====================================================================
@@ -120,151 +108,6 @@ def _parse_osc_key(name: str) -> Optional[Tuple[str, int]]:
     if prefix in _OSC_PARAM_MAP and idx_str.isdigit():
         return prefix, int(idx_str)
     return None
-
-
-# =====================================================================
-#  ε₂ — Multi-oscillator Ferlauto Cody DOS + Lorentz
-# =====================================================================
-
-@njit(cache=True, fastmath=True, parallel=True)
-def _eps2_multi(E, Eg, Et, Eu, osc_params):
-    """
-    ε₂(E) for the multi-oscillator continuous Cody-Lorentz model.
-
-    Parameters
-    ----------
-    E : (N,) float64
-        Photon energies [eV].
-    Eg : float
-        Optical band gap [eV].
-    Et : float
-        Urbach–band transition energy [eV].
-    Eu : float
-        Urbach tail energy [eV].
-    osc_params : (N_osc, 4) float64
-        Per-oscillator parameters: columns [E0, A, Gamma, Ep].
-
-    Returns
-    -------
-    (N,) float64
-        ε₂ values.
-    """
-    n_E = E.shape[0]
-    n_osc = osc_params.shape[0]
-    out = np.zeros(n_E, dtype=np.float64)
-
-    # Pre-compute Urbach amplitude: total ε₂ at Et, C⁰-matched
-    Et2 = Et * Et
-    A_t_total = 0.0
-    for j in range(n_osc):
-        E0j   = osc_params[j, 0]
-        Aj    = osc_params[j, 1]
-        Gamj  = osc_params[j, 2]
-        Epj   = osc_params[j, 3]
-        E0jsq = E0j * E0j
-
-        if Et > Eg:
-            d = Et - Eg
-            cody_Et = (d * d) / (d * d + Epj * Epj)
-        else:
-            cody_Et = 0.0
-
-        denom_Et = (Et2 - E0jsq) ** 2 + (Et * Gamj) ** 2
-        A_t_total += Aj * cody_Et * (Et * Gamj) / denom_Et
-
-    inv_Eu = 1.0 / Eu
-
-    for i in prange(n_E):
-        Ei = E[i]
-        if Ei >= Et:
-            if Ei > Eg:
-                d = Ei - Eg
-                dsq = d * d
-                Ei2 = Ei * Ei
-                val = 0.0
-                for j in range(n_osc):
-                    E0j   = osc_params[j, 0]
-                    Aj    = osc_params[j, 1]
-                    Gamj  = osc_params[j, 2]
-                    Epj   = osc_params[j, 3]
-                    E0jsq = E0j * E0j
-                    cody  = dsq / (dsq + Epj * Epj)
-                    denom = (Ei2 - E0jsq) ** 2 + (Ei * Gamj) ** 2
-                    val  += Aj * cody * (Ei * Gamj) / denom
-                out[i] = val
-        elif Ei > 1e-9:
-            out[i] = A_t_total * (Et / Ei) * np.exp((Ei - Et) * inv_Eu)
-
-    return out
-
-
-# =====================================================================
-#  FFT Kramers-Kronig with odd extension (precomputed kernel)
-# =====================================================================
-
-def _kk_fft(eps2, eps_inf):
-    """
-    ε₁ via FFT Hilbert transform with proper odd extension.
-
-    Uses module-global precomputed _KK_H multiplier and _KK_M pad size.
-    Only the buffer fill and two FFT calls happen per invocation.
-    """
-    N = _GRID_N
-
-    buf = np.zeros(_KK_M, dtype=np.float64)
-    buf[N + 1 : N + 1 + N] = eps2
-    buf[1 : N + 1] = -eps2[::-1]
-
-    F = np.fft.rfft(buf)
-    hilb = np.fft.irfft(F * _KK_H, n=_KK_M)
-
-    return eps_inf - hilb[N : N + N]
-
-
-# =====================================================================
-#  Full pipeline: ε₂ → KK → interpolate → n̂
-# =====================================================================
-
-@njit(cache=True, fastmath=True, parallel=True)
-def _nk_from_eps(eps1, eps2):
-    """Convert (ε₁, ε₂) → n̂ = √(ε₁ + iε₂), Numba-parallel."""
-    n = eps1.shape[0]
-    out = np.empty(n, dtype=np.complex128)
-    for i in prange(n):
-        z = complex(eps1[i], eps2[i])
-        out[i] = np.sqrt(z)
-    return out
-
-
-def compute_nk(target_E: np.ndarray,
-               Eg: float, Et: float, Eu: float,
-               osc_params: np.ndarray,
-               eps_inf: float) -> np.ndarray:
-    """
-    Compute n̂(E) for an arbitrary target energy array.
-
-    Pipeline:
-        1. ε₂ on cached 8192-pt grid  (Numba parallel, multi-oscillator)
-        2. ε₁ via FFT KK              (O(N log N), precomputed kernel)
-        3. Interpolate ε₁ to target energies
-        4. ε₂ evaluated exactly at target energies
-        5. n̂ = √ε
-    """
-    eps2_full = _eps2_multi(_E_FULL, Eg, Et, Eu, osc_params)
-    eps1_full = _kk_fft(eps2_full, eps_inf)
-
-    # Guard against silent extrapolation outside the KK integration grid.
-    E_lo, E_hi = _E_FULL[0], _E_FULL[-1]
-    if target_E.min() < E_lo or target_E.max() > E_hi:
-        raise ValueError(
-            f"target energies [{target_E.min():.4f}, {target_E.max():.4f}] eV "
-            f"exceed KK grid [{E_lo:.4f}, {E_hi:.4f}] eV. "
-            f"Adjust wavelength range or _GRID_MIN/_GRID_MAX."
-        )
-
-    eps1_t = np.interp(target_E, _E_FULL, eps1_full)
-    eps2_t = _eps2_multi(target_E, Eg, Et, Eu, osc_params)
-    return _nk_from_eps(eps1_t, eps2_t)
 
 
 # =====================================================================
@@ -449,8 +292,13 @@ class CodyLorentz(Material):
             self.set_wavelength_range(wavelength)
 
         if self.nk is None:
-            self.nk = compute_nk(
-                self.E,
+            if _native is None:  # pragma: no cover
+              raise ImportError(
+                "CodyLorentz needs the compiled `navette.materials._native` extension. "
+                f"Build it with: {_NATIVE_BUILD_HINT}"
+              )
+            self.nk = _native.cody_lorentz_nk(
+                self.wavelength,
                 float(self.params["Eg"]),
                 float(self.params["Et"]),
                 float(self.params["Eu"]),

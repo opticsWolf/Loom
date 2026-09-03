@@ -46,10 +46,16 @@ v3 Updates (material.py / lorentz.py compatibility)
 """
 
 import numpy as np
-from navette.materials._numba import njit, prange
 from typing import Dict, Union, Optional, List, Tuple
 
 from .material import Material, compute_energy
+
+try:
+  from . import _native
+except ImportError:  # pragma: no cover - native not built yet
+  _native = None  # type: ignore[assignment]
+
+_NATIVE_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
 
 __all__ = ["UBF_CodyLorentz"]
 
@@ -66,168 +72,6 @@ _GRID_MIN: float = 0.01                  # eV
 _PARAM_MAP: Dict[str, int] = {
     "Eg": 0, "Ec": 1, "Eu": 2, "A": 3, "Gamma": 4, "gamma": 5,
 }
-
-
-# =====================================================================
-#  Module-global cached grid and KK kernel  (built once at import)
-# =====================================================================
-
-_E_FULL: np.ndarray = np.linspace(_GRID_MIN, _GRID_MAX, _GRID_N)
-
-_M_RAW: int = 2 * _GRID_N + 1
-_KK_M: int = 1
-while _KK_M < _M_RAW:
-    _KK_M <<= 1
-
-_KK_dE: float = _E_FULL[1] - _E_FULL[0]
-_KK_H: np.ndarray = np.empty((_KK_M // 2) + 1, dtype=np.complex128)
-_KK_H[0] = 0.0
-_KK_H[1:] = -1j
-
-
-# =====================================================================
-#  ε₂ — Monolog-Lorentz (multi-oscillator, Numba parallel)
-# =====================================================================
-
-@njit(cache=True, fastmath=True, parallel=True)
-def _eps2_monolog(E, oscillators):
-    """
-    ε₂(E) via the Monolog-Lorentz formulation.
-
-    For each oscillator j with parameters [Eg, Ec, β, A, Γ, γ]:
-
-        ε₂(E) += (A / E) · [ln(1 + exp(β(E − Eg)))]^γ
-                           · E·Γ·Ec / ((E² − Ec²)² + Γ²E²)
-
-    Parameters
-    ----------
-    E           : energy grid [eV]
-    oscillators : (N_osc, 6) array — rows are [Eg, Ec, β, A, Γ, γ]
-                  β = 1/Eu,  γ = 2.0 (indirect) or 0.5 (direct)
-    """
-    n_E = E.shape[0]
-    n_osc = oscillators.shape[0]
-    out = np.zeros(n_E, dtype=np.float64)
-
-    for i in prange(n_E):
-        Ei = E[i]
-        if Ei < 1e-9:
-            continue
-
-        Ei_sq = Ei * Ei
-        val = 0.0
-
-        for j in range(n_osc):
-            Eg = oscillators[j, 0]
-            Ec = oscillators[j, 1]
-            Beta = oscillators[j, 2]
-            A = oscillators[j, 3]
-            G = oscillators[j, 4]
-            Y = oscillators[j, 5]
-
-            # --- Monolog band-fluctuation term ---
-            # [ln(1 + exp(x))]^γ  with overflow/underflow guards
-            x = Beta * (Ei - Eg)
-            if x > 50.0:
-                base = x                       # ln(1+e^x) ≈ x
-            elif x < -50.0:
-                base = 0.0                     # ln(1+e^x) ≈ 0
-            else:
-                base = np.log(1.0 + np.exp(x))
-
-            # Fast-path common exponents, avoid pow() overhead
-            if Y == 2.0:
-                band = base * base
-            elif Y == 0.5:
-                band = np.sqrt(base)
-            elif Y == 1.0:
-                band = base
-            else:
-                band = base ** Y
-
-            # --- Lorentz oscillator ---
-            denom = (Ei_sq - Ec * Ec) ** 2 + (G * Ei) ** 2
-            lorentz = (Ei * G * Ec) / denom
-
-            # --- combine: (A/E) · band · lorentz ---
-            val += (A / Ei) * band * lorentz
-
-        out[i] = val
-
-    return out
-
-
-# =====================================================================
-#  FFT Kramers-Kronig with odd extension (precomputed kernel)
-# =====================================================================
-
-def _kk_fft(eps2, eps_inf):
-    """
-    ε₁ via FFT Hilbert transform with proper odd extension.
-
-    Uses module-global precomputed _KK_H multiplier and _KK_M pad size.
-    Only buffer fill + two FFT calls per invocation.
-    """
-    N = _GRID_N
-
-    buf = np.zeros(_KK_M, dtype=np.float64)
-    buf[N + 1 : N + 1 + N] = eps2
-    buf[1 : N + 1] = -eps2[::-1]
-
-    F = np.fft.rfft(buf)
-    hilb = np.fft.irfft(F * _KK_H, n=_KK_M)
-
-    return eps_inf - hilb[N : N + N]
-
-
-# =====================================================================
-#  Complex sqrt  (Numba parallel)
-# =====================================================================
-
-@njit(cache=True, fastmath=True, parallel=True)
-def _nk_from_eps(eps1, eps2):
-    """Convert (ε₁, ε₂) → n̂ = √(ε₁ + iε₂)."""
-    n = eps1.shape[0]
-    out = np.empty(n, dtype=np.complex128)
-    for i in prange(n):
-        out[i] = np.sqrt(complex(eps1[i], eps2[i]))
-    return out
-
-
-# =====================================================================
-#  Full pipeline
-# =====================================================================
-
-def compute_nk(target_E: np.ndarray,
-               oscillators: np.ndarray,
-               eps_inf: float) -> np.ndarray:
-    """
-    Compute n̂(E) for an arbitrary target energy array.
-
-    Pipeline:
-        1. ε₂ on cached 8192-pt grid   (Numba parallel)
-        2. ε₁ via FFT KK               (O(N log N), precomputed kernel)
-        3. Interpolate ε₁ to target energies
-        4. ε₂ evaluated exactly at target energies
-        5. n̂ = √ε
-    """
-    # 1 + 2: full-grid ε₂ → KK → ε₁
-    eps2_full = _eps2_monolog(_E_FULL, oscillators)
-    eps1_full = _kk_fft(eps2_full, eps_inf)
-
-    # 3: bounds check then interpolate ε₁
-    E_lo, E_hi = _E_FULL[0], _E_FULL[-1]
-    if target_E.min() < E_lo or target_E.max() > E_hi:
-        raise ValueError(
-            f"target energies [{target_E.min():.4f}, {target_E.max():.4f}] eV "
-            f"exceed KK grid [{E_lo:.4f}, {E_hi:.4f}] eV. "
-            f"Adjust wavelength range or _GRID_MIN/_GRID_MAX."
-        )
-    eps1_t = np.interp(target_E, _E_FULL, eps1_full)
-
-    # 4 + 5: exact ε₂ at targets → n̂
-    eps2_t = _eps2_monolog(target_E, oscillators)
-    return _nk_from_eps(eps1_t, eps2_t)
 
 
 # =====================================================================
@@ -441,8 +285,13 @@ class UBF_CodyLorentz(Material):
                 raise AttributeError(
                     "Wavelength range must be set before computing n̂."
                 )
-            self.nk = compute_nk(
-                self.E,
+            if _native is None:  # pragma: no cover
+              raise ImportError(
+                "UBF_CodyLorentz needs the compiled `navette.materials._native` extension. "
+                f"Build it with: {_NATIVE_BUILD_HINT}"
+              )
+            self.nk = _native.ubf_nk(
+                self.wavelength,
                 self._osc_array,
                 float(self.params["epsilon_inf"]),
             )

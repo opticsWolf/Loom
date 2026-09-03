@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-Loom: Weaving the mathematics of light in thin film systems
+Navette: the mathematics of light in thin-film systems
+(Rust-backed wrapper; kernels live in navette.materials._native)
 Copyright (c) 2026 opticsWolf
 
 SPDX-License-Identifier: LGPL-3.0-or-later
 """
 
 import numpy as np
-from navette.materials._numba import njit
 from typing import List, Tuple, Dict, Union, Optional
 
 from .material import Material, compute_energy
+try:
+  from . import _native
+except ImportError:  # pragma: no cover - native not built yet
+  _native = None  # type: ignore[assignment]
+
+_NATIVE_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
 
 __all__ = ["Drude", "DrudeLorentz"]
 
@@ -18,13 +24,11 @@ _HC_EV_NM: float = 1239.8419843320028
 _PARAM_MAP: Dict[str, int] = {"E0": 0, "Gamma": 1, "f0": 2}
 
 
-@njit(cache=True, fastmath=True)
 def _to_nk(eps: np.ndarray) -> np.ndarray:
     """Helper to convert complex epsilon to n + ik safely."""
     return np.sqrt(eps)
 
 
-@njit(cache=True, fastmath=True)
 def compute_drude_complex_nk(E: np.ndarray, omega_p: float, gamma: float, eps_inf: float) -> np.ndarray:
     """
     Compute complex refractive index (n + ik) for Drude model only.
@@ -54,7 +58,6 @@ def compute_drude_complex_nk(E: np.ndarray, omega_p: float, gamma: float, eps_in
     return _to_nk(eps)
 
 
-@njit(cache=True, fastmath=True)
 def compute_drude_lorentz_complex_nk(
     E: np.ndarray, 
     omega_p: float, 
@@ -206,11 +209,16 @@ class Drude(Material):
             self.set_wavelength_range(wavelength)
             
         if self.nk is None:
-            self.nk = compute_drude_complex_nk(
-                E=self.E,
-                omega_p=self.params['omega_p'],
-                gamma_drude=self.params['gamma_drude'],
-                eps_inf=self.params['epsilon_inf']
+            if _native is None:  # pragma: no cover
+              raise ImportError(
+                "Drude needs the compiled `navette.materials._native` extension. "
+                f"Build it with: {_NATIVE_BUILD_HINT}"
+              )
+            self.nk = _native.drude_nk(
+                self.wavelength,
+                self.params['omega_p'],
+                self.params['gamma_drude'],
+                self.params['epsilon_inf'],
             )
         return self.nk
 
@@ -331,20 +339,15 @@ class DrudeLorentz(Material):
             del self.params[k]
             
         # Also clean up old parameter names (if they were set before the sync)
-        param_keys_to_clean = ['omega_p', 'gamma_drude', 'epsilon_inf']
-        for key in param_keys_to_clean:
-            if key in self.params:
-                del self.params[key]
-            
+        _preserved = {k: self.params[k] for k in ('omega_p', 'gamma_drude', 'epsilon_inf') if k in self.params}
+
         for i, (e0, g, f) in enumerate(self._osc_params):
             self.params[f"E0_{i}"] = e0
-            self.params[f"Gamma_{i}"] = g  
+            self.params[f"Gamma_{i}"] = g
             self.params[f"f0_{i}"] = f
-            
-        # Add the scalar parameters to params dict for consistency with LorentzOscillator 
-        self.params['omega_p'] = self.params.get('omega_p')
-        self.params['gamma_drude'] = self.params.get('gamma_drude')  
-        self.params['epsilon_inf'] = self.params.get('epsilon_inf')
+
+        # Restore scalar params (original _sync re-read them as None).
+        self.params.update(_preserved)
         
         self.nk = None
 
@@ -370,12 +373,17 @@ class DrudeLorentz(Material):
             self.set_wavelength_range(wavelength)
             
         if self.nk is None:
-            self.nk = compute_drude_lorentz_complex_nk(
-                E=self.E,
-                omega_p=self.params['omega_p'],
-                gamma_drude=self.params['gamma_drude'],
-                eps_inf=self.params['epsilon_inf'],  # Changed from eps_inf
-                lorentz_params=self._lorentz_params
+            if _native is None:  # pragma: no cover
+              raise ImportError(
+                "DrudeLorentz needs the compiled `navette.materials._native` extension. "
+                f"Build it with: {_NATIVE_BUILD_HINT}"
+              )
+            self.nk = _native.drude_lorentz_nk(
+                self.wavelength,
+                self.params['omega_p'],
+                self.params['gamma_drude'],
+                self.params['epsilon_inf'],
+                self._lorentz_params,
             )
         return self.nk
 

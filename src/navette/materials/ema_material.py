@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Loom: Weaving the mathematics of light in thin film systems
+Navette: the mathematics of light in thin-film systems
+(Rust-backed wrapper; kernels live in navette.materials._native)
 Copyright (c) 2026 opticsWolf
 
 SPDX-License-Identifier: LGPL-3.0-or-later
@@ -8,29 +9,24 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 
 import numpy as np
 from typing import Dict, Union, Optional, Any
-from navette.materials._numba import njit, prange
 
 # Import your base class
 from .material import Material
+try:
+  from . import _native
+except ImportError:  # pragma: no cover - native not built yet
+  _native = None  # type: ignore[assignment]
+
+_NATIVE_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
 
 # Import your optimized EMA kernels
-from .ema_models import (
-    lichtenecker_eps,
-    looyenga_eps,
-    general_power_law_eps,
-    maxwell_garnett_eps,
-    bruggeman_eps,
-    mori_tanaka_eps,
-    roughness_interface_eps,
-    wiener_bounds
-)
+# EMA mixing kernels are provided by navette.materials._native
 
 __all__ = ["EMAMaterial", "RoughnessMaterial"]
 
 
 # --- Optimized Helper Kernels ---
 
-@njit(cache=True, fastmath=True, parallel=True)
 def _parallel_sqrt(arr: np.ndarray) -> np.ndarray:
     """
     Calculates the square root of a complex array in parallel.
@@ -46,7 +42,7 @@ def _parallel_sqrt(arr: np.ndarray) -> np.ndarray:
     flat_arr = arr.ravel()
     flat_res = res.ravel()
     
-    for i in prange(n):
+    for i in range(n):
         flat_res[i] = np.sqrt(flat_arr[i])
         
     return res
@@ -66,15 +62,28 @@ class EffectiveMaterial(Material):
         model (str): The name of the EMA model to use.
     """
 
-    # Dispatch table mapping model names to Numba functions
-    _MODEL_DISPATCH = {
-        'bruggeman': bruggeman_eps,
-        'maxwell_garnett': maxwell_garnett_eps,
-        'looyenga': looyenga_eps,
-        'lichtenecker': lichtenecker_eps,
-        'mori_tanaka': mori_tanaka_eps,
-        'birchak': general_power_law_eps,
-    }
+    # Dispatch table mapping model names to native kernels. Resolved lazily
+    # (class level must not touch `_native` so `import navette.materials`
+    # works without a Rust build; the ImportError surfaces on first use).
+    _MODEL_DISPATCH: dict = {}
+
+    @classmethod
+    def _dispatch(cls) -> dict:
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "EffectiveMaterial needs the compiled `navette.materials._native` extension. "
+            f"Build it with: {_NATIVE_BUILD_HINT}"
+          )
+        if not cls._MODEL_DISPATCH:
+          cls._MODEL_DISPATCH = {
+            'bruggeman': _native.ema_bruggeman,
+            'maxwell_garnett': _native.ema_maxwell_garnett,
+            'looyenga': _native.ema_looyenga,
+            'lichtenecker': _native.ema_lichtenecker,
+            'mori_tanaka': (lambda n_i, n_h, f, L=0.3333333333333333: _native.ema_mori_tanaka(n_i, n_h, f, L)),
+            'birchak': (lambda n_i, n_h, f, alpha=0.5: _native.ema_power_law(n_i, n_h, f, alpha)),
+          }
+        return cls._MODEL_DISPATCH
 
     def __init__(self, 
                  host: Material, 
@@ -108,15 +117,15 @@ class EffectiveMaterial(Material):
             
         self.fraction = float(fraction)
 
-        if model not in self._MODEL_DISPATCH:
-            raise ValueError(f"Unknown EMA model '{model}'. Available: {list(self._MODEL_DISPATCH.keys())}")
+        if model not in self._dispatch():
+            raise ValueError(f"Unknown EMA model '{model}'. Available: {list(self._dispatch().keys())}")
 
         self.model_name = model
-        self.model_func = self._MODEL_DISPATCH[model]
+        self.model_func = self._dispatch()[model]
         self.model_args = model_args if model_args else {}
 
         # Dummy params for base class compatibility
-        super().__init__({'A': 0.0}, wavelength)
+        super().__init__(wavelength=wavelength, params={'A': 0.0})
 
     def set_wavelength_range(self, wavelength: np.ndarray) -> None:
         """
@@ -168,7 +177,12 @@ class EffectiveMaterial(Material):
 
         # 3. Convert Permittivity to Refractive Index
         # Optimization: Use parallel Numba kernel instead of serial np.sqrt
-        self.nk = _parallel_sqrt(eps_eff)
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "EffectiveMaterial needs the compiled `navette.materials._native` extension. "
+            f"Build it with: {_NATIVE_BUILD_HINT}"
+          )
+        self.nk = _native.eps_to_nk(eps_eff)
         
         return self.nk
 
@@ -215,5 +229,10 @@ class RoughnessMaterial(EffectiveMaterial):
 
         # Use the specific kernel for interfaces (f=0.5 hardcoded internally)
         # Optimization: Combined parallel sqrt + roughness calculation
-        self.nk = _parallel_sqrt(roughness_interface_eps(n_bot, n_top))
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "RoughnessMaterial needs the compiled `navette.materials._native` extension. "
+            f"Build it with: {_NATIVE_BUILD_HINT}"
+          )
+        self.nk = _native.eps_to_nk(_native.ema_roughness(n_bot, n_top))
         return self.nk

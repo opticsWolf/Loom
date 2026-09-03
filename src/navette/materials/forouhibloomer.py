@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Loom: Weaving the mathematics of light in thin film systems
+Navette: the mathematics of light in thin-film systems
+(Rust-backed wrapper; kernels live in navette.materials._native)
 Copyright (c) 2026 opticsWolf
 
 SPDX-License-Identifier: LGPL-3.0-or-later
@@ -31,7 +32,12 @@ References:
 """
 
 import numpy as np
-from navette.materials._numba import njit
+try:
+  from . import _native
+except ImportError:  # pragma: no cover - native not built yet
+  _native = None  # type: ignore[assignment]
+
+_NATIVE_BUILD_HINT = "maturin develop -m crates/navette-materials-py/Cargo.toml"
 from typing import Dict, Union, Optional, List
 
 # Try importing from local structure, mock if missing for standalone usage
@@ -47,7 +53,6 @@ __all__ = ["ForouhiBloomerInterbandSingle", "ForouhiBloomerInterbandMulti",
            "ForouhiBloomerMetal2021"]
 
 # --- Interband Term (FB 2019 Rational Formulation) ---
-@njit(cache=True)
 def compute_single_fb2019_term(E: np.ndarray,
                                Eg: float, A: float, B: float, C: float) -> np.ndarray:
     """
@@ -129,7 +134,6 @@ def compute_single_fb2019_term(E: np.ndarray,
     return n_contribution + 1j * k
 
 # --- Intraband/Metal Term (FB 2021) ---
-@njit(cache=True)
 def compute_fb_metal_fe_nk(E: np.ndarray, A_fe: float, B_fe: float, C_fe: float) -> np.ndarray:
     """
     Computes the Free-Electron (Intraband) contribution for Metals (FB 2021).
@@ -165,7 +169,6 @@ def compute_fb_metal_fe_nk(E: np.ndarray, A_fe: float, B_fe: float, C_fe: float)
     return compute_single_fb2019_term(E, Eg_fe, A_fe, B_fe, C_fe)
 
 
-@njit(cache=True)
 def _compute_nk_interband_only(E: np.ndarray,
                                n_inf: float,
                                ib_terms: np.ndarray) -> np.ndarray:
@@ -192,7 +195,6 @@ def _compute_nk_interband_only(E: np.ndarray,
     return total_n + 1j * total_k
 
 
-@njit(cache=True)
 def _compute_nk_metal_full(E: np.ndarray,
                             n_inf: float,
                             fe_params: np.ndarray, 
@@ -244,7 +246,7 @@ class ForouhiBloomerInterbandSingle(Material):
     """
 
     def __init__(self, params: Dict[str, Union[float, int]], wavelength: Optional[np.ndarray] = None):
-        super().__init__({'A': params.get('A', 0.0)}, wavelength)
+        super().__init__(wavelength=wavelength, params={'A': params.get('A', 0.0)})
 
         self.n_inf = params.get('n_inf', 1.0)
         self.Eg = params.get('Eg')
@@ -262,6 +264,7 @@ class ForouhiBloomerInterbandSingle(Material):
              raise ValueError("Physical violation: 4*C must be > B^2 to ensure stability.")
 
         self._fb_term_params = np.array([self.Eg, self.A, self.B, self.C], dtype=np.float64)
+        self._ib_terms_array = self._fb_term_params.reshape(1, 4)
         self.h_c_by_eV_nm = 1239.8419843320028 
         
         if wavelength is not None:
@@ -290,8 +293,13 @@ class ForouhiBloomerInterbandSingle(Material):
              raise AttributeError("Wavelength range must be set.")
              
         # Pass E, n_inf, and the [1, 4] array to the Numba driver
-        self.nk = _compute_nk_interband_only(
-            self.E, 
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "ForouhiBloomerInterbandSingle needs the compiled `navette.materials._native` extension. "
+            f"Build it with: {_NATIVE_BUILD_HINT}"
+          )
+        self.nk = _native.fb_interband_nk(
+            self.wavelength, 
             float(self.n_inf), 
             self._ib_terms_array
         )
@@ -315,7 +323,7 @@ class ForouhiBloomerInterbandMulti(Material):
     from different quantum transitions are additive.
     """
     def __init__(self, params: Dict[str, Union[float, int, List]], wavelength: Optional[np.ndarray] = None):
-        super().__init__({'A': 0.0}, wavelength)
+        super().__init__(wavelength=wavelength, params={'A': 0.0})
         self.n_inf = params.get('n_inf', 1.0)
         self.ib_params = params.get('ib_params', [])
         
@@ -368,8 +376,13 @@ class ForouhiBloomerInterbandMulti(Material):
         #ib_terms = self._ib_terms_array if len(self._ib_terms_array) > 0 else np.zeros((0, 4), dtype=np.float64)
 
         # Pass E, n_inf, and the [N, 4] array to the Numba driver
-        self.nk = _compute_nk_interband_only(
-            self.E, 
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "ForouhiBloomerInterbandMulti needs the compiled `navette.materials._native` extension. "
+            f"Build it with: {_NATIVE_BUILD_HINT}"
+          )
+        self.nk = _native.fb_interband_nk(
+            self.wavelength, 
             float(self.n_inf), 
             self._ib_terms_array
         )
@@ -408,7 +421,7 @@ class ForouhiBloomerMetalSingle(Material):
                  params: Dict[str, Union[float, int]],
                  wavelength: Optional[np.ndarray] = None):
         
-        super().__init__({'A': params.get('A', 0.0)}, wavelength)
+        super().__init__(wavelength=wavelength, params={'A': params.get('A', 0.0)})
         
         self.n_inf = params.get('n_inf', 1.0)
         
@@ -483,8 +496,13 @@ class ForouhiBloomerMetalSingle(Material):
         ib_terms = self._ib_term_params.reshape(1, 4)
 
         # Call the Metal Numba driver
-        self.nk = _compute_nk_metal_full(
-            self.E, 
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "ForouhiBloomerMetalSingle needs the compiled `navette.materials._native` extension. "
+            f"Build it with: {_NATIVE_BUILD_HINT}"
+          )
+        self.nk = _native.fb_metal_nk(
+            self.wavelength, 
             n_inf, 
             fe_params, 
             ib_terms
@@ -529,7 +547,7 @@ class ForouhiBloomerMetal2021(Material):
         - 'ib_params': list of dicts [{'Eg', 'A', 'B', 'C'}, ...] for Interband terms.
     """
     def __init__(self, params: Dict[str, Union[float, int, Dict, List]], wavelength: Optional[np.ndarray] = None):
-        super().__init__({'A': 0.0}, wavelength)
+        super().__init__(wavelength=wavelength, params={'A': 0.0})
         
         self.n_inf = params.get('n_inf', 1.0)
         self.fe_params = params.get('fe_params', {})
@@ -594,8 +612,13 @@ class ForouhiBloomerMetal2021(Material):
         ib_terms = self._ib_terms_array if len(self._ib_terms_array) > 0 else np.zeros((0, 4), dtype=np.float64)
 
         # Pass E, n_inf, and the [N, 4] array to the Numba driver
-        self.nk = _compute_nk_interband_only(
-            self.E, 
+        if _native is None:  # pragma: no cover
+          raise ImportError(
+            "ForouhiBloomerMetal2021 needs the compiled `navette.materials._native` extension. "
+            f"Build it with: {_NATIVE_BUILD_HINT}"
+          )
+        self.nk = _native.fb_interband_nk(
+            self.wavelength, 
             float(self.n_inf), 
             ib_terms
         )
