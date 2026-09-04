@@ -107,6 +107,8 @@ pub enum ConstraintKind {
     Range,
     /// Soft box of half-width `band`: reduced `(d/band)` inside,
     /// exceedance plus continuity level outside (bare band falls back to exact).
+    /// NOTE for the needle fold: the `+1` level is gradient-free and dropped
+    /// there by design (see `docs/spectralweave-target-kinds.md`).
     CenterBand,
 }
 

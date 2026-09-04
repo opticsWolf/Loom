@@ -96,7 +96,10 @@ pub fn build_scan_sites(films: &[crate::synthesis::structure::LayerSpec], scan_s
 ///   `current_sim` every kind folds conservatively (Range/CenterBand as
 ///   Exact at the centre).
 /// * The CenterBand `+1` merit level is a constant offset: it shifts merit
-///   values but not needle gradients, so the fold drops it by design.
+///   values but not needle gradients, so the fold drops it by design —
+///   folded merit reads lower than `calculate_merit` by exactly the count
+///   of currently-violated `c` points (`M_true = M_folded + N_outside`).
+///   See `docs/spectralweave-target-kinds.md` for the full kind/fold reference.
 pub fn build_needle_targets(
     spec: &MeritSpec,
     angles: &[f64],
