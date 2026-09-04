@@ -18,22 +18,9 @@ try:
 except ImportError:
     print("Note: Original numba version not found. Running rust-only validation.")
 
-import importlib.util
-target_dir = os.path.join(OUTPUT_DIR, "target", "release")
-if sys.platform == "win32":
-    so_name = "navette_matrix.pyd"
-elif sys.platform == "darwin":
-    so_name = "navette_matrix.dylib"
-else:
-    so_name = "libnavette_matrix.so"
-so_path = os.path.join(target_dir, so_name)
-if not os.path.exists(so_path):
-    print(f"FATAL: Rust module not built at {so_path}")
-    sys.exit(1)
-spec = importlib.util.spec_from_file_location("navette_matrix", so_path)
-rust_mod = importlib.util.module_from_spec(spec)
+# Unified layout: kernels live in navette._smatrix (aggregated extension).
+import navette._smatrix as rust_mod
 sys.modules["navette_matrix"] = rust_mod
-spec.loader.exec_module(rust_mod)
 
 if hasattr(rust_mod, UNIT_NAME):
     rust_func = getattr(rust_mod, UNIT_NAME)
@@ -51,15 +38,15 @@ def generate_test_case(rng, num_layers=6):
     total_needed = num_layers + 2
     lam = rng.uniform(400.0, 800.0)
     theta_deg = rng.uniform(10.0, 60.0)
-    NSinFi = np.complex128((np.sin(np.radians(theta_deg)), 0.0))
+    NSinFi = complex(np.sin(np.radians(theta_deg)), 0.0)
     n_stack = np.empty(total_needed, dtype=np.complex128)
     for i in range(num_layers):
         if rng.random() < 0.3:
-            n_stack[i] = np.complex128((rng.uniform(0.5, 2.0), rng.uniform(3.0, 7.0)))
+            n_stack[i] = complex(rng.uniform(0.5, 2.0), rng.uniform(3.0, 7.0))
         else:
-            n_stack[i] = np.complex128((rng.uniform(1.3, 2.5), rng.uniform(-0.01, 0.01)))
-    n_stack[num_layers]   = np.complex128((1.0, 0.0))
-    n_stack[num_layers+1] = np.complex128((rng.uniform(1.5, 4.0), rng.uniform(-0.01, 0.01)))
+            n_stack[i] = complex(rng.uniform(1.3, 2.5), rng.uniform(-0.01, 0.01))
+    n_stack[num_layers]   = complex(1.0, 0.0)
+    n_stack[num_layers+1] = complex(rng.uniform(1.5, 4.0), rng.uniform(-0.01, 0.01))
     d_stack = np.zeros(total_needed, dtype=np.float64)
     for i in range(num_layers):
         d_stack[i] = rng.uniform(1.0, 500.0)

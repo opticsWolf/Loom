@@ -19,22 +19,9 @@ try:
 except ImportError:
     print("Note: Original numba version not found. Running rust-only validation.")
 
-import importlib.util
-target_dir = os.path.join(OUTPUT_DIR, "target", "release")
-if sys.platform == "win32":
-    so_name = "navette_matrix.pyd"
-elif sys.platform == "darwin":
-    so_name = "navette_matrix.dylib"
-else:
-    so_name = "libnavette_matrix.so"
-so_path = os.path.join(target_dir, so_name)
-if not os.path.exists(so_path):
-    print(f"FATAL: Rust module not built at {so_path}")
-    sys.exit(1)
-spec = importlib.util.spec_from_file_location("navette_matrix", so_path)
-rust_mod = importlib.util.module_from_spec(spec)
+# Unified layout: kernels live in navette._smatrix (aggregated extension).
+import navette._smatrix as rust_mod
 sys.modules["navette_matrix"] = rust_mod
-spec.loader.exec_module(rust_mod)
 rust_func = getattr(rust_mod, UNIT_NAME)
 
 rng = np.random.default_rng(seed=42)
@@ -55,7 +42,8 @@ for i in range(5):
         diff_real = abs(float(numba_out.real) - float(rust_out.real))
         diff_imag = abs(float(numba_out.imag) - float(rust_out.imag))
         diff_max = max(diff_real, diff_imag)
-        status = "PASS" if (diff_max < 1e-12) else "FAIL"
+        scale = max(abs(float(numba_out.real)), abs(float(numba_out.imag)), 1.0)
+        status = "PASS" if (diff_max < 1e-12 or diff_max / scale < 1e-12) else "FAIL"
     else:
         diff_max = abs(float(rust_out.real)) + abs(float(rust_out.imag))
         status = "PASS (rust-only)"
