@@ -88,9 +88,15 @@ pub fn build_scan_sites(films: &[crate::synthesis::structure::LayerSpec], scan_s
 ///   brute-force scan handled T implicitly through the full merit; the
 ///   analytic pass is R-only until a transmission sensitivity kernel lands.)
 /// * Only **linear** normalization folds; Log/Phase/Complex return Err.
-/// * `current_sim`, when given, activates the one-sided kinds: satisfied
-///   Above/Below points contribute nothing (matching calculate_merit's
-///   masking at the current operating point).
+/// * `current_sim`, when given, activates the one-sided and banded kinds at
+///   the current operating point: satisfied Above/Below points and in-band
+///   Range points contribute nothing; Range/CenterBand violations fold to
+///   the nearest band edge, CenterBand interiors fold to the centre with
+///   reduced weight `nf²/bw²` (matching calculate_merit's masking). Without
+///   `current_sim` every kind folds conservatively (Range/CenterBand as
+///   Exact at the centre).
+/// * The CenterBand `+1` merit level is a constant offset: it shifts merit
+///   values but not needle gradients, so the fold drops it by design.
 pub fn build_needle_targets(
     spec: &MeritSpec,
     angles: &[f64],
@@ -143,34 +149,77 @@ pub fn build_needle_targets(
 
         let twl: &[f64] = &t.wavelengths;
         for &twl_i in twl.iter() {
-            // Interpolate normalized target and tolerance onto this solver
-            // wavelength (edge-clamped; target grids are ascending).
+            // Interpolate normalized target, tolerance and band half-width
+            // onto this solver wavelength (edge-clamped; ascending grids).
             let tgt_norm = interp_clamped(twl, &t.normalized_targets, twl_i);
             let tol = interp_clamped(twl, &t.tolerances, twl_i).max(1e-300);
+            let bw = if t.band.is_empty() { 0.0 } else { interp_clamped(twl, &t.band, twl_i).max(0.0) };
             let raw_target = tgt_norm / t.norm_factor;
-            let w = t.norm_factor * t.norm_factor / (tol * tol);
+            let nf2 = t.norm_factor * t.norm_factor;
 
-            // One-sided activation at the current operating point.
-            if let (Some(curve), true) = (sim_curve, n_sim_wav > 0) {
-                let r_sim = interp_clamped(
-                    &current_sim.unwrap().wavelengths,
-                    curve,
-                    twl_i,
-                );
-                let scaled_diff = r_sim * t.norm_factor - tgt_norm;
-                let active = match t.kind {
-                    crate::synthesis::merit::ConstraintKind::Exact => true,
-                    crate::synthesis::merit::ConstraintKind::Above => scaled_diff < 0.0,
-                    crate::synthesis::merit::ConstraintKind::Below => scaled_diff > 0.0,
-                };
-                if !active {
-                    continue;
-                }
-            }
+            // Operating-point residual for activation (None before the
+            // first simulation).
+            let d_opt: Option<f64> = match (sim_curve, n_sim_wav > 0) {
+                (Some(curve), true) => {
+                    let r_sim = interp_clamped(
+                        &current_sim.unwrap().wavelengths,
+                        curve,
+                        twl_i,
+                    );
+                    Some(r_sim * t.norm_factor - tgt_norm)
+                },
+                _ => None,
+            };
+
+            // Fold to an equivalent (raw_target, weight) quadratic, or skip.
+            let folded: Option<(f64, f64)> = match t.kind {
+                crate::synthesis::merit::ConstraintKind::Exact => {
+                    Some((raw_target, nf2 / (tol * tol)))
+                },
+                crate::synthesis::merit::ConstraintKind::Above => match d_opt {
+                    Some(d) if d >= 0.0 => None,
+                    _ => Some((raw_target, nf2 / (tol * tol))),
+                },
+                crate::synthesis::merit::ConstraintKind::Below => match d_opt {
+                    Some(d) if d <= 0.0 => None,
+                    _ => Some((raw_target, nf2 / (tol * tol))),
+                },
+                crate::synthesis::merit::ConstraintKind::Range => {
+                    let bw_eff = if bw <= 0.0 { tol } else { bw };
+                    match d_opt {
+                        // No sim yet: conservative exact fold at the centre.
+                        None => Some((raw_target, nf2 / (tol * tol))),
+                        Some(d) if d.abs() <= bw_eff => None,
+                        Some(d) => {
+                            let edge_raw = (tgt_norm + d.signum() * bw_eff) / t.norm_factor;
+                            Some((edge_raw, nf2 / (tol * tol)))
+                        },
+                    }
+                },
+                crate::synthesis::merit::ConstraintKind::CenterBand => {
+                    if bw <= 0.0 {
+                        Some((raw_target, nf2 / (tol * tol)))
+                    } else {
+                        match d_opt {
+                            // No sim yet: exact fold at the centre.
+                            None => Some((raw_target, nf2 / (tol * tol))),
+                            // Inside: reduced weight nf²/bw² at the centre.
+                            Some(d) if d.abs() <= bw => Some((raw_target, nf2 / (bw * bw))),
+                            // Outside: nearest edge drives (the +1 merit
+                            // level is gradient-free, dropped by design).
+                            Some(d) => {
+                                let edge_raw = (tgt_norm + d.signum() * bw) / t.norm_factor;
+                                Some((edge_raw, nf2 / (tol * tol)))
+                            },
+                        }
+                    }
+                },
+            };
+            let Some((rt, w)) = folded else { continue };
 
             let k = row * nw + solver_wav_index(wavelengths, twl_i);
             w_sum[k] += w;
-            targets[k] += w * raw_target;
+            targets[k] += w * rt;
         }
     }
 
@@ -585,6 +634,19 @@ mod tests {
         nf: f64,
         kind: ConstraintKind,
     ) -> MeritSpec {
+        spec_banded(angle, curve, wl, norm_targets, tols, &[], nf, kind)
+    }
+
+    fn spec_banded(
+        angle: f64,
+        curve: CurveId,
+        wl: &[f64],
+        norm_targets: &[f64],
+        tols: &[f64],
+        band: &[f64],
+        nf: f64,
+        kind: ConstraintKind,
+    ) -> MeritSpec {
         let mut spec = MeritSpec::new();
         let k = spec.add_key(MeritKey { angle, curve });
         spec.add_target(MeritTarget {
@@ -595,9 +657,20 @@ mod tests {
             norm_factor: nf,
             normalized_targets: norm_targets.to_vec().into(),
             tolerances: tols.to_vec().into(),
+            band: band.to_vec().into(),
         })
         .unwrap();
         spec
+    }
+
+    fn sim_single(angle: f64, wl: f64, curve: CurveId, val: f64) -> SimCurves {
+        let mut sim = SimCurves {
+            angles: vec![angle].into(),
+            wavelengths: vec![wl].into(),
+            curves: [None, None, None, None, None, None],
+        };
+        sim.curves[curve.index()] = Some(vec![val].into());
+        sim
     }
 
     #[test]
@@ -640,6 +713,7 @@ mod tests {
             norm_factor: nf,
             normalized_targets: vec![norm_t].into(),
             tolerances: vec![tol].into(),
+            band: vec![].into(),
         };
         let (nfa, nfb) = (2.0_f64, 3.0_f64);
         spec.add_target(mk(0.4 * nfa, 0.1, nfa)).unwrap();
@@ -686,6 +760,47 @@ mod tests {
     }
 
     #[test]
+    fn targets_builder_range_folds_to_edge_or_masks() {
+        // Centre 0.5 (nf=1), tol 0.1, band 0.05 → edges at 0.45/0.55, w=100.
+        let spec = spec_banded(0.0, CurveId::Rs, &[400.0], &[0.5], &[0.1],
+            &[0.05], 1.0, ConstraintKind::Range);
+        // In-band operating point → masked out.
+        let sim_in = sim_single(0.0, 400.0, CurveId::Rs, 0.52);
+        let (_, w) = build_needle_targets(&spec, &[0.0], &[400.0], Some(&sim_in)).unwrap();
+        assert_eq!(w[0], 0.0);
+        // Violated above → nearest (upper) edge drives.
+        let sim_hi = sim_single(0.0, 400.0, CurveId::Rs, 0.6);
+        let (t, w) = build_needle_targets(&spec, &[0.0], &[400.0], Some(&sim_hi)).unwrap();
+        assert!((t[0] - 0.55).abs() < 1e-14);
+        assert!((w[0] - 100.0).abs() < 1e-9);
+        // Violated below → lower edge drives.
+        let sim_lo = sim_single(0.0, 400.0, CurveId::Rs, 0.3);
+        let (t, w) = build_needle_targets(&spec, &[0.0], &[400.0], Some(&sim_lo)).unwrap();
+        assert!((t[0] - 0.45).abs() < 1e-14);
+        assert!((w[0] - 100.0).abs() < 1e-9);
+        // No sim yet → conservative exact fold at the centre.
+        let (t, w) = build_needle_targets(&spec, &[0.0], &[400.0], None).unwrap();
+        assert!((t[0] - 0.5).abs() < 1e-14);
+        assert!((w[0] - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn targets_builder_centerband_reduced_weight_inside() {
+        // Centre 0.5 (nf=1), tol 0.1, band 0.05: inside w = 1/0.05² = 400.
+        let spec = spec_banded(0.0, CurveId::Rs, &[400.0], &[0.5], &[0.1],
+            &[0.05], 1.0, ConstraintKind::CenterBand);
+        let sim_in = sim_single(0.0, 400.0, CurveId::Rs, 0.52);
+        let (t, w) = build_needle_targets(&spec, &[0.0], &[400.0], Some(&sim_in)).unwrap();
+        assert!((t[0] - 0.5).abs() < 1e-14);
+        assert!((w[0] - 400.0).abs() < 1e-9);
+        // Outside → upper edge with the outer weight.
+        let sim_hi = sim_single(0.0, 400.0, CurveId::Rs, 0.6);
+        let (t, w) = build_needle_targets(&spec, &[0.0], &[400.0], Some(&sim_hi)).unwrap();
+        assert!((t[0] - 0.55).abs() < 1e-14);
+        assert!((w[0] - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn targets_builder_rejects_transmission_and_log() {
         let spec_t = spec_single(0.0, CurveId::Ts, &[400.0], &[0.9], &[0.01], 1.0,
             ConstraintKind::Exact);
@@ -702,6 +817,7 @@ mod tests {
             norm_factor: 1.0,
             normalized_targets: vec![1.0].into(),
             tolerances: vec![0.01].into(),
+            band: vec![].into(),
         })
         .unwrap();
         assert!(build_needle_targets(&spec_log, &[0.0], &[400.0], None).is_err());

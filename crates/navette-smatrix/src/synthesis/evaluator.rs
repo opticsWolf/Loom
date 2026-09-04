@@ -192,6 +192,7 @@ mod tests {
             norm_factor: 1.0,
             normalized_targets: vec![0.0].into(), // R = 0 demanded
             tolerances: vec![0.01].into(),
+            band: vec![].into(),
         })
         .unwrap();
         spec

@@ -5,10 +5,15 @@
 //! Bridge between navette_spectralweave's TargetWeaver and the synthesis
 //! loop. The residual math below is lifted VERBATIM from
 //! `calculate_merit` (navette_spectralweave/src/targetweaver.rs):
-//!   * Exact/Above/Below activation (`kind`)
+//!   * Exact/Above/Below/Range/CenterBand activation (`kind`)
 //!   * Linear/Log/Phase/Complex sim-side transforms (`transform`)
 //!   * bit-exact aligned-grid fast path + two-pointer monotone interpolation
 //!   * overlap-skip and missing-key penalty semantics
+//!
+//! Residual space is the square root of merit space: `merit()` sums `r²`,
+//! so the Range/CenterBand arms return `0`/`(ad-bw)/tol` and `d/bw` /
+//! `sqrt(((ad-bw)/tol)² + 1)` respectively — the `+1` under the root is the
+//! band-edge continuity level from `calculate_merit`.
 //! Normalization itself is NOT re-implemented: it happened at ingestion in
 //! TargetWeaver::register_metadata, and the Python converter copies the
 //! finished (normalized_targets, norm_factor, floored tolerances) over.
@@ -97,6 +102,27 @@ pub enum ConstraintKind {
     Above,
     /// Active only while sim is ABOVE target (driving it down).
     Below,
+    /// Hard box of half-width `band`: zero inside, exceedance outside
+    /// (paired `Above`/`Below` at centre∓band; bare band falls back to tol).
+    Range,
+    /// Soft box of half-width `band`: reduced `(d/band)` inside,
+    /// exceedance plus continuity level outside (bare band falls back to exact).
+    CenterBand,
+}
+
+impl ConstraintKind {
+    /// Parse `"e"/"a"/"b"/"r"/"c"` (spectralweave `TargetKind` codes);
+    /// None for anything else.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "e" => Some(ConstraintKind::Exact),
+            "a" => Some(ConstraintKind::Above),
+            "b" => Some(ConstraintKind::Below),
+            "r" => Some(ConstraintKind::Range),
+            "c" => Some(ConstraintKind::CenterBand),
+            _ => None,
+        }
+    }
 }
 
 /// Sim-side transform — mirrors spectralweave `ResolvedNormMode`.
@@ -179,6 +205,9 @@ pub struct MeritTarget {
     pub normalized_targets: Arc<[f64]>,
     /// Floored tolerances copied verbatim from the TargetEntry.
     pub tolerances: Arc<[f64]>,
+    /// Scaled band half-widths for `Range`/`CenterBand`, copied verbatim
+    /// from the TargetEntry (empty means all-zero = unused).
+    pub band: Arc<[f64]>,
 }
 
 /// Flat, immutable, Send+Sync target description.
@@ -201,7 +230,8 @@ impl MeritSpec {
 
     /// Append one target frame to key group `key_idx`.
     ///
-    /// All per-point arrays must have equal length.
+    /// Wavelengths/targets/tolerances must have equal length; `band` must
+    /// either be empty (all-zero = unused) or match that length.
     pub fn add_target(&mut self, target: MeritTarget) -> Result<(), String> {
         let n = target.wavelengths.len();
         if target.normalized_targets.len() != n || target.tolerances.len() != n {
@@ -210,6 +240,13 @@ impl MeritSpec {
                 n,
                 target.normalized_targets.len(),
                 target.tolerances.len()
+            ));
+        }
+        if !target.band.is_empty() && target.band.len() != n {
+            return Err(format!(
+                "MeritTarget band mismatch: wl={} band={}",
+                n,
+                target.band.len()
             ));
         }
         if target.key_idx as usize >= self.keys.len() {
@@ -364,11 +401,28 @@ impl MeritSpec {
                 };
 
                 let tol = t.tolerances[i];
+                let bw = t.band.get(i).copied().unwrap_or(0.0);
 
                 let r = match t.kind {
                     ConstraintKind::Exact => scaled_diff / tol,
                     ConstraintKind::Above if scaled_diff < 0.0 => scaled_diff / tol,
                     ConstraintKind::Below if scaled_diff > 0.0 => scaled_diff / tol,
+                    ConstraintKind::Range => {
+                        // Bare `r` without a band falls back to the tolerance
+                        // as half-width (paired a/b at centre∓tol).
+                        let bw_eff = if bw <= 0.0 { tol } else { bw };
+                        let ad = scaled_diff.abs();
+                        if ad <= bw_eff { 0.0 } else { (ad - bw_eff) / tol }
+                    },
+                    ConstraintKind::CenterBand => {
+                        if bw <= 0.0 {
+                            scaled_diff / tol
+                        } else {
+                            let ad = scaled_diff.abs();
+                            if ad <= bw { scaled_diff / bw }
+                            else { (((ad - bw) / tol).powi(2) + 1.0).sqrt() }
+                        }
+                    },
                     _ => 0.0,
                 };
                 out.push(r);
@@ -406,6 +460,19 @@ mod tests {
         transform: SimTransform,
         norm_factor: f64,
     ) -> MeritTarget {
+        entry_banded(key_idx, wl, targets, tols, vec![], kind, transform, norm_factor)
+    }
+
+    fn entry_banded(
+        key_idx: u32,
+        wl: Vec<f64>,
+        targets: Vec<f64>,
+        tols: Vec<f64>,
+        band: Vec<f64>,
+        kind: ConstraintKind,
+        transform: SimTransform,
+        norm_factor: f64,
+    ) -> MeritTarget {
         MeritTarget {
             key_idx,
             wavelengths: wl.into(),
@@ -414,6 +481,7 @@ mod tests {
             norm_factor,
             normalized_targets: targets.into(),
             tolerances: tols.into(),
+            band: band.into(),
         }
     }
 
@@ -684,6 +752,69 @@ mod tests {
         let r_interp = out2[0];
 
         assert!((r_aligned - r_interp).abs() < 1e-9);
+    }
+
+    #[test]
+    fn constraint_kind_from_str() {
+        assert_eq!(ConstraintKind::from_str("e"), Some(ConstraintKind::Exact));
+        assert_eq!(ConstraintKind::from_str("a"), Some(ConstraintKind::Above));
+        assert_eq!(ConstraintKind::from_str("b"), Some(ConstraintKind::Below));
+        assert_eq!(ConstraintKind::from_str("r"), Some(ConstraintKind::Range));
+        assert_eq!(ConstraintKind::from_str("c"), Some(ConstraintKind::CenterBand));
+        assert_eq!(ConstraintKind::from_str("x"), None);
+    }
+
+    #[test]
+    fn range_box_dead_band() {
+        // target 0.5 (nf=1), tol 0.1, band 0.05.
+        let mk = |band: Vec<f64>| {
+            let mut s = MeritSpec::new();
+            let k = s.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+            s.add_target(entry_banded(k as u32, vec![400.0], vec![0.5], vec![0.1],
+                band, ConstraintKind::Range, SimTransform::Linear, 1.0)).unwrap();
+            s
+        };
+        let spec = mk(vec![0.05]);
+        assert_eq!(spec.merit(&sim_one_angle(&[0.5, 0., 0., 0., 0.]), 0.0), 0.0);
+        assert_eq!(spec.merit(&sim_one_angle(&[0.53, 0., 0., 0., 0.]), 0.0), 0.0); // d=0.03 in band
+        // d=0.1 → ((0.1−0.05)/0.1)² = 0.25
+        assert!((spec.merit(&sim_one_angle(&[0.6, 0., 0., 0., 0.]), 0.0) - 0.25).abs() < 1e-14);
+        // Bare band falls back to tol as half-width: d=0.05 inside → 0.
+        let bare = mk(vec![]);
+        assert_eq!(bare.merit(&sim_one_angle(&[0.55, 0., 0., 0., 0.]), 0.0), 0.0);
+        // d=0.2 → ((0.2−0.1)/0.1)² = 1.
+        assert!((bare.merit(&sim_one_angle(&[0.7, 0., 0., 0., 0.]), 0.0) - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn centerband_soft_box() {
+        // target 0.5 (nf=1), tol 0.1, band 0.05.
+        let mk = |band: Vec<f64>| {
+            let mut s = MeritSpec::new();
+            let k = s.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+            s.add_target(entry_banded(k as u32, vec![400.0], vec![0.5], vec![0.1],
+                band, ConstraintKind::CenterBand, SimTransform::Linear, 1.0)).unwrap();
+            s
+        };
+        let spec = mk(vec![0.05]);
+        assert_eq!(spec.merit(&sim_one_angle(&[0.5, 0., 0., 0., 0.]), 0.0), 0.0);
+        // Inside: (0.02/0.05)² = 0.16.
+        assert!((spec.merit(&sim_one_angle(&[0.52, 0., 0., 0., 0.]), 0.0) - 0.16).abs() < 1e-14);
+        // At the edge: 1.0 from both sides (continuity).
+        assert!((spec.merit(&sim_one_angle(&[0.55, 0., 0., 0., 0.]), 0.0) - 1.0).abs() < 1e-14);
+        // Outside: ((0.05)/0.1)² + 1 = 1.25.
+        assert!((spec.merit(&sim_one_angle(&[0.6, 0., 0., 0., 0.]), 0.0) - 1.25).abs() < 1e-14);
+        // Bare band degrades to exact: (0.1/0.1)² = 1.
+        let bare = mk(vec![]);
+        assert!((bare.merit(&sim_one_angle(&[0.6, 0., 0., 0., 0.]), 0.0) - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn band_length_mismatch_rejected() {
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        assert!(spec.add_target(entry_banded(k as u32, vec![400.0], vec![0.0], vec![1.0],
+            vec![0.1, 0.2], ConstraintKind::Range, SimTransform::Linear, 1.0)).is_err());
     }
 
     #[test]

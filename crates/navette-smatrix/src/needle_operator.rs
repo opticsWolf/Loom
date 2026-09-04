@@ -15,16 +15,20 @@
 //! ------
 //! Split the stack at a plane at depth z inside host layer j:
 //!
+//! ```text
 //!     S_total(z) = U(z) ⊗ N ⊗ L(z)
+//! ```
 //!
 //! where U = everything above the plane (ambient side), L = everything below,
 //! and N is the "needle": an infinitesimal slab of candidate material n'
 //! embedded in the host medium n_j. To first order in its thickness δ the
 //! needle's S-matrix entries are
 //!
+//! ```text
 //!     rho(δ) = δ·rho_hat,   tau(δ) = 1 + δ·tau_hat
 //!     rho_hat = -2i·beta'·r12        / (1 - r12²)
 //!     tau_hat =  i·beta'·(1 + r12²)  / (1 - r12²)
+//! ```
 //!
 //! with r12 = (y_j − y')/(y_j + y'), beta' = k0·n'·cosθ', y the wave
 //! admittance (s: n·cosθ, p: n/cosθ). The exact-to-first-order sensitivity of
@@ -32,13 +36,17 @@
 //! dual-number needle, and L through the SAME Redheffer star product used by
 //! the forward solver, using complex dual numbers (value, d/dδ):
 //!
+//! ```text
 //!     ∂r_k/∂δ (z) = slope of [ U ⊗ N_dual ⊗ L ]_r_front
+//! ```
 //!
 //! This captures every first-order multiple-reflection path automatically —
 //! no hand-expanded algebra to get wrong. The Tikhonravov merit P-function is
 //! then the residual-weighted accumulation over spectral points:
 //!
+//! ```text
 //!     P(z) = Σ_k 2·w_k·(R_k − R_target,k)·Re{ conj(r_k) · ∂r_k/∂δ (z) }
+//! ```
 //!
 //! which equals ∂f₁/∂δ for f₁ = Σ_k w_k·(R_k − R_target,k)². Negative minima
 //! of P(z) mark the most profitable needle insertion points.
