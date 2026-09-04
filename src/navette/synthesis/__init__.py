@@ -136,33 +136,62 @@ def build_merit_spec(collection: TargetCollection,
     weaver = collection.build_weaver(cache_size=cache_size,
                                      tolerance_floor=tolerance_floor)
     entries = weaver.export_entries()
-    # Join phase flags by creation order: spectral entries (uid order) align
-    # with spectral_targets, angular frames (uid order) with angular_targets
-    # (frames are pushed on creation; uids are monotonic).
+    # Join each exported entry with its Python target by grid content:
+    # spectral frames hold the target's wavelength grid at its angle,
+    # angular frames hold one single-point entry per angle. (Matching by
+    # grid length alone misclassifies single-point spectral targets.)
     spec_targets = list(collection.spectral_targets)
     ang_targets = list(collection.angular_targets)
-    spec_entries = []
-    ang_frames: Dict[int, list] = {}
+    by_uid: Dict[int, list] = {}
     for e in entries:
-        uid = int(e["uid"])
-        # Angular frames hold N single-point keys; spectral frames hold one
-        # curve. Distinguish by grid length AND key count per frame below.
-        ang_frames.setdefault(uid, []).append(e)
-    # Spectral entries: frames with a multi-point grid.
-    spectral_by_uid = sorted(
-        ((uid, es[0]) for uid, es in ang_frames.items()
-         if len(es) == 1 and np.asarray(es[0]["wavelengths"]).size > 1),
-        key=lambda t: t[0],
-    )
-    angular_by_uid = sorted(
-        ((uid, es) for uid, es in ang_frames.items()
-         if not (len(es) == 1 and np.asarray(es[0]["wavelengths"]).size > 1)),
-        key=lambda t: t[0],
-    )
-    if len(spectral_by_uid) != len(spec_targets):
-        raise RuntimeError("build_merit_spec: spectral entry/target count mismatch.")
-    if len(angular_by_uid) != len(ang_targets):
-        raise RuntimeError("build_merit_spec: angular entry/target count mismatch.")
+        by_uid.setdefault(int(e["uid"]), []).append(e)
+    used: set = set()
+
+    def take_spectral(t) -> dict:
+        grid = np.asarray(t.wavelengths, dtype=np.float64).ravel()
+        for uid in sorted(by_uid):
+            if uid in used:
+                continue
+            es = by_uid[uid]
+            if (len(es) == 1 and es[0]["spectral"] == t.spectral
+                    and es[0]["polarization"] == t.polarization
+                    and float(es[0]["angle"]) == float(t.angle)
+                    and np.allclose(np.asarray(es[0]["wavelengths"],
+                                               dtype=np.float64).ravel(),
+                                    grid)):
+                used.add(uid)
+                return es[0]
+        raise RuntimeError(
+            "build_merit_spec: no exported entry matches a spectral target "
+            f"(spectral={t.spectral!r}, polarization={t.polarization!r}, "
+            f"angle={t.angle!r})."
+        )
+
+    def take_angular(t) -> list:
+        angs = np.asarray(t.angles, dtype=np.float64).ravel()
+        for uid in sorted(by_uid):
+            if uid in used:
+                continue
+            es = by_uid[uid]
+            got = sorted(float(e["angle"]) for e in es)
+            if (len(es) == angs.size
+                    and np.allclose(got, np.sort(angs))
+                    and all(e["spectral"] == t.spectral
+                            and e["polarization"] == t.polarization
+                            and np.asarray(e["wavelengths"]).size == 1
+                            and np.allclose(float(e["wavelengths"][0]),
+                                            float(t.wavelength))
+                            for e in es)):
+                used.add(uid)
+                return sorted(es, key=lambda d: float(d["angle"]))
+        raise RuntimeError(
+            "build_merit_spec: no exported entries match an angular target "
+            f"(spectral={t.spectral!r}, polarization={t.polarization!r}, "
+            f"wavelength={t.wavelength!r})."
+        )
+
+    spectral_pairs = [(take_spectral(t), t) for t in spec_targets]
+    angular_pairs = [(take_angular(t), t) for t in ang_targets]
 
     spec = _NativeMeritSpec()
     keys: Dict[tuple, int] = {}
@@ -212,11 +241,11 @@ def build_merit_spec(collection: TargetCollection,
             integral=bool(e["integral"]),
         )
 
-    for (_, e), t in zip(spectral_by_uid, spec_targets):
+    for e, t in spectral_pairs:
         convert_one(e, t)
 
-    for (_, es), t in zip(angular_by_uid, ang_targets):
-        for e in sorted(es, key=lambda d: float(d["angle"])):
+    for es, t in angular_pairs:
+        for e in es:
             convert_one(e, t)
     return spec
 

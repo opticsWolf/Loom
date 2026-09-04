@@ -11,6 +11,21 @@ use pyo3::prelude::*;
 
 use navette::color::common::{REF_WHITE_D50, REF_WHITE_D65};
 
+/// Broadcast guard for the ΔE batch entry points: the core's `map_pairs`
+/// panics on incompatible shapes, and a Rust panic crossing the FFI
+/// boundary surfaces as an uncatchable-looking `PanicException`. Reject
+/// early with a clean `ValueError` instead (same rule as the core).
+fn check_broadcast(a: &[[f64; 3]], b: &[[f64; 3]]) -> PyResult<()> {
+    let (n1, n2) = (a.len(), b.len());
+    if n1 == n2 || n1 == 1 || n2 == 1 {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "shapes {n1} and {n2} are not broadcastable"
+        )))
+    }
+}
+
 // ---- Zero-Copy Memory Helpers ------------------------------------------
 
 /// Zero-copy view of an (N, 3) C-contiguous numpy array as `&[[f64; 3]]`.
@@ -440,6 +455,7 @@ fn delta_e_2000<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: Py
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
     let (kl, kc, kh) = if textiles { (2.0, 1.0, 1.0) } else { (k_L, k_C, k_H) };
+    check_broadcast(a, b)?;
     Ok(navette::color::func_16::delta_e_2000(a, b, kl, kc, kh).into_pyarray(py))
 }
 
@@ -448,6 +464,7 @@ fn delta_e_2000<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: Py
 fn delta_e_76<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyReadonlyArray2<'py, f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
+    check_broadcast(a, b)?;
     Ok(navette::color::func_09::delta_e_76(a, b).into_pyarray(py))
 }
 
@@ -462,6 +479,7 @@ fn delta_e_94<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyRe
     } else {
         navette::color::func_10::De94Params::GRAPHIC
     };
+    check_broadcast(a, b)?;
     Ok(navette::color::func_10::delta_e_94(a, b, p).into_pyarray(py))
 }
 
@@ -471,6 +489,7 @@ fn delta_e_94<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyRe
 fn delta_e_cmc<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: PyReadonlyArray2<'py, f64>, pl: f64, pc: f64) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
+    check_broadcast(a, b)?;
     Ok(navette::color::func_11::delta_e_cmc(a, b, pl, pc).into_pyarray(py))
 }
 
@@ -481,6 +500,7 @@ fn delta_e_din99<'py>(py: Python<'py>, lab1: PyReadonlyArray2<'py, f64>, lab2: P
     let a = as_slice3(&lab1)?;
     let b = as_slice3(&lab2)?;
     let (ke, kch) = if textiles { (2.0, 0.5) } else { (1.0, 1.0) };
+    check_broadcast(a, b)?;
     Ok(navette::color::func_12::delta_e_din99(a, b, ke, kch).into_pyarray(py))
 }
 

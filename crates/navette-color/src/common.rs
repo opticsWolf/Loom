@@ -36,11 +36,15 @@ pub const REF_WHITE_D65: [f64; 3] = [
     1.0890577507598784, // Z = (1−x−y)/y
 ];
 /// CIE standard illuminant D50 (horizon light, ~5003K), used in printing.
-/// xy = (0.34570291578402855, 0.35853859611489403)
+/// xy = (0.34570, 0.35850) — the standard locus point, matching
+/// `colour-science` (`CCS_ILLUMINANTS`) and the loom reference engine.
+/// (A previous revision carried a slightly different locus point
+/// (0.34570291…, 0.35853859…); it skewed every D50 Bradford matrix by
+/// ~2e-4 and disagreed with the golden vectors, so it was corrected.)
 pub const REF_WHITE_D50: [f64; 3] = [
-    0.9642021227646206, // X = x/y
+    0.9642956764295677, // X = x/y
     1.0,
-    0.8249054456675906, // Z = (1−x−y)/y
+    0.8251046025104605, // Z = (1−x−y)/y
 ];
 
 // -----------------------------------------------------------------------------
