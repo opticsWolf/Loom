@@ -493,6 +493,119 @@ pub fn p_coherent_from_fields(
     out
 }
 
+/// Transmission-merit needle gradient for front incidence.
+///
+/// T = |t_fwd|² · f with the forward flux factor `f = Re(y_last)/Re(y_first)`
+/// (see [`block_flux_factors`]; boundary media are needle-invariant so `f`
+/// is constant under δ). Merit `w·(T − T_target)²` gives
+/// P_T(z) = 2·w·(T − T_t)·f·Re{conj(t)·∂t/∂δ} with the channel-2 slope of
+/// [`needle_slopes4_ddz`]. Back-incidence transmission (t_back) is a
+/// different experiment — drive it from channel-1 slopes directly.
+pub fn p_coherent_T_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    target: f64,
+    weight: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    let t_k = fields.s_left[end_idx].2;
+    let f = block_flux_factors(fields, pol)[2];
+    let t_int = t_k.norm_sqr() * f;
+    let resid = 2.0 * weight * (t_int - target);
+    let tc = t_k.conj();
+    let mut out = vec![0.0; z_grid.len()];
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let dt = needle_slopes4_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam)[2];
+        out[zi] = resid * f * (tc * dt).re;
+    }
+    out
+}
+
+/// Absorption-merit needle gradient for front incidence.
+///
+/// A = 1 − R − T with R = |r|² and flux-corrected T = |t_fwd|²·f.
+/// Flux factors depend only on the boundary half-spaces, hence are
+/// δ-constants: ∂A/∂δ = −2·Re{conj(r)·∂r/∂δ} − 2·f·Re{conj(t)·∂t/∂δ}.
+/// Back-incidence transmission is excluded (front-incidence experiment).
+pub fn p_coherent_A_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    target: f64,
+    weight: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    let m = fields.s_left[end_idx];
+    let (r_k, t_k) = (m.0, m.2);
+    let f = block_flux_factors(fields, pol)[2];
+    let a = 1.0 - r_k.norm_sqr() - t_k.norm_sqr() * f;
+    let resid = 2.0 * weight * (a - target);
+    let (rc, tc) = (r_k.conj(), t_k.conj());
+    let mut out = vec![0.0; z_grid.len()];
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let s = needle_slopes4_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam);
+        // Half-gradient parts (dA/2): mirror the R convention in
+        // `p_coherent_from_fields` so `resid` keeps its 2·w·(A−A_t) form.
+        let slope_part = -((rc * s[0]).re + f * (tc * s[2]).re);
+        out[zi] = resid * slope_part;
+    }
+    out
+}
+
+/// Phase-merit needle gradient for one S-matrix element.
+///
+/// φ = arg(a_ch), Q(z) = Im{conj(a)·∂a/∂δ}/|a|² (0 where |a|² < 1e-20,
+/// degenerate phase). Merit `w·wrap(φ − φ_t)²` gives
+/// P_φ(z) = 2·w·wrap(φ − φ_t)·Q(z) with the residual wrapped to [−π,π]
+/// without trig (same convention as the spectralweave merit kernel).
+/// `channel`: 0 = r_front, 1 = t_back, 2 = t_fwd, 3 = r_back.
+pub fn p_coherent_phi_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    channel: usize,
+    target: f64,
+    weight: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    debug_assert!(channel < 4, "channel must be 0..=3");
+    let m = fields.s_left[end_idx];
+    let a_k = [m.0, m.1, m.2, m.3][channel];
+    let r2 = a_k.norm_sqr();
+    let mut diff = a_k.arg() - target;
+    diff -= std::f64::consts::TAU * (diff / std::f64::consts::TAU).round();
+    let resid = 2.0 * weight * diff;
+    let ac = a_k.conj();
+    let mut out = vec![0.0; z_grid.len()];
+    if r2 <= 1e-20 {
+        return out; // degenerate phase; Q stays 0
+    }
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let da = needle_slopes4_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam)[channel];
+        out[zi] = resid * (ac * da).im / r2;
+    }
+    out
+}
+
 /// Map every z in `z_grid` to its owning coherent block of an incoherent
 /// stack: `(block_index, host_layer, xi)`. Rejects flagged spacer hosts;
 /// masked-out hosts are skipped. Reference plane: top of film layer 1.
@@ -1056,8 +1169,11 @@ pub fn phase_dispersion_sensitivity(
             let np = needle_n_per_wav[w];
             let k = a * num_wavs + w;
             for (zi, &(j, xi)) in locs.iter().enumerate() {
-                let dr = needle_dr_ddz(&fields, nsin_fi, j, xi, np, pol, lam);
-                q[k][zi] = (amp.conj() * dr).im / r2;
+                // Per-channel slope: the phase of element `channel` moves
+                // with that element's own needle derivative (using the
+                // channel-0 slope here would mix r-motion into t-phase).
+                let da = needle_slopes4_ddz(&fields, nsin_fi, j, xi, np, pol, lam)[channel];
+                q[k][zi] = (amp.conj() * da).im / r2;
             }
         }
     }
@@ -1172,7 +1288,105 @@ mod tests {
             err < 2e-3,
             "{name}: fd={fd:.6e} analytic={an:.6e} rel_err={err:.2e}"
         );
-    }    #[test]
+    }    /// Full composed amplitudes + forward flux factor (front incidence).
+    fn solve_all(
+        n: &[Complex64], d: &[f64], rv: &[f64], rt: &[i32],
+        lam: f64, sin_t: f64, pol: i32,
+    ) -> ((Complex64, Complex64, Complex64, Complex64), f64) {
+        let nsin = n[0] * cplx(sin_t, 0.0);
+        let f = build_stack_fields(n, d, rv, rt, lam, nsin, pol);
+        let m = *f.s_left.last().unwrap();
+        (m, block_flux_factors(&f, pol)[2])
+    }
+
+    #[test]
+    fn p_transmission_matches_merit_finite_difference() {
+        // target 0, weight 1 → P = 2·T0·(dT-part); oracle is the FD of T².
+        for pol in [0, 1] {
+            let (n, d, rv, rt) = stack_a();
+            let (j, xi) = (2usize, 40.0f64);
+            let n_prime = n_(1.9, 0.0);
+            let sin_t = 0.3;
+            let end = n.len() - 1;
+            let nsin = n[0] * cplx(sin_t, 0.0);
+            let fields = build_stack_fields_range(0, end, &n, &d, &rv, &rt, LAM, nsin, pol);
+            let z = d[1] + xi; // absolute, from top of layer 1
+            let p = p_coherent_T_from_fields(
+                &fields, nsin, LAM, pol, n_prime, 0.0, 1.0, &d, 0, end, &[z]);
+            let (m0, f0) = solve_all(&n, &d, &rv, &rt, LAM, sin_t, pol);
+            let t0 = m0.2.norm_sqr() * f0;
+            let delta = 5e-4_f64;
+            let (nn, dd, rr, tt) = insert_needle(&n, &d, &rv, &rt, j, xi, n_prime, delta);
+            let (m1, f1) = solve_all(&nn, &dd, &rr, &tt, LAM, sin_t, pol);
+            let t1 = m1.2.norm_sqr() * f1;
+            // Half-gradient convention (see `p_coherent_from_fields`): P is
+            // ½·d/dδ of the merit, hence the oracle carries the /2.
+            let fd = (t1 * t1 - t0 * t0) / delta / 2.0;
+            let scale = fd.abs().max(p[0].abs()).max(1e-12);
+            let err = (fd - p[0]).abs() / scale;
+            assert!(err < 2e-3, "T pol={pol}: fd={fd:.6e} analytic={:.6e} rel_err={err:.2e}", p[0]);
+        }
+    }
+
+    #[test]
+    fn p_absorption_matches_merit_finite_difference() {
+        // Absorbing stack so A0 > 0; FD of A² with target 0, weight 1.
+        for pol in [0, 1] {
+            let (n, d, rv, rt) = stack_absorbing();
+            let (j, xi) = (2usize, 25.0f64);
+            let n_prime = n_(1.9, 0.0);
+            let sin_t = 0.3;
+            let end = n.len() - 1;
+            let nsin = n[0] * cplx(sin_t, 0.0);
+            let fields = build_stack_fields_range(0, end, &n, &d, &rv, &rt, LAM, nsin, pol);
+            let z = d[1] + xi;
+            let p = p_coherent_A_from_fields(
+                &fields, nsin, LAM, pol, n_prime, 0.0, 1.0, &d, 0, end, &[z]);
+            let (m0, f0) = solve_all(&n, &d, &rv, &rt, LAM, sin_t, pol);
+            let a0 = 1.0 - m0.0.norm_sqr() - m0.2.norm_sqr() * f0;
+            assert!(a0 > 1e-3, "test stack should absorb: A0={a0}");
+            let delta = 5e-4_f64;
+            let (nn, dd, rr, tt) = insert_needle(&n, &d, &rv, &rt, j, xi, n_prime, delta);
+            let (m1, f1) = solve_all(&nn, &dd, &rr, &tt, LAM, sin_t, pol);
+            let a1 = 1.0 - m1.0.norm_sqr() - m1.2.norm_sqr() * f1;
+            // Half-gradient convention: P is ½·d/dδ of the merit.
+            let fd = (a1 * a1 - a0 * a0) / delta / 2.0;
+            let scale = fd.abs().max(p[0].abs()).max(1e-12);
+            let err = (fd - p[0]).abs() / scale;
+            assert!(err < 2e-3, "A pol={pol}: fd={fd:.6e} analytic={:.6e} rel_err={err:.2e}", p[0]);
+        }
+    }
+
+    #[test]
+    fn p_phase_matches_merit_finite_difference() {
+        // Offset target (φ0 − 0.05) so the residual is nonzero; exercises the
+        // t_fwd channel, covering the per-channel slope fix as well.
+        for pol in [0, 1] {
+            let (n, d, rv, rt) = stack_a();
+            let (j, xi) = (2usize, 40.0f64);
+            let n_prime = n_(1.9, 0.0);
+            let sin_t = 0.3;
+            let end = n.len() - 1;
+            let nsin = n[0] * cplx(sin_t, 0.0);
+            let fields = build_stack_fields_range(0, end, &n, &d, &rv, &rt, LAM, nsin, pol);
+            let z = d[1] + xi;
+            let (m0, _) = solve_all(&n, &d, &rv, &rt, LAM, sin_t, pol);
+            let phi0 = m0.2.arg();
+            let tgt = phi0 - 0.05;
+            let p = p_coherent_phi_from_fields(
+                &fields, nsin, LAM, pol, n_prime, 2, tgt, 1.0, &d, 0, end, &[z]);
+            let wrap = |x: f64| x - std::f64::consts::TAU * (x / std::f64::consts::TAU).round();
+            let delta = 5e-4_f64;
+            let (nn, dd, rr, tt) = insert_needle(&n, &d, &rv, &rt, j, xi, n_prime, delta);
+            let (m1, _) = solve_all(&nn, &dd, &rr, &tt, LAM, sin_t, pol);
+            let fd = (wrap(m1.2.arg() - tgt).powi(2) - 0.05f64.powi(2)) / delta;
+            let scale = fd.abs().max(p[0].abs()).max(1e-12);
+            let err = (fd - p[0]).abs() / scale;
+            assert!(err < 2e-3, "phi pol={pol}: fd={fd:.6e} analytic={:.6e} rel_err={err:.2e}", p[0]);
+        }
+    }
+
+    #[test]
     fn subblock_range_matches_sliced_arrays() {
         // Block [1, 4) on the full arrays must reproduce the amplitude AND
         // needle sensitivity of an independent solve on the sliced arrays.

@@ -23,6 +23,12 @@ Conventions
 * Merit convention (half-gradient): a single point contributes
   ``2·w·(R − R_target)·Re{conj(r)·∂r/∂δ}``; aggregate over points at the call
   site, e.g. for a GDD merit ``∂F/∂δ(z) = Σ_k 2·w_k·(GDD_k − GDD_t_k)·dgdd[k,z]``.
+  The T/A siblings follow the same convention with flux-corrected
+  ``T = |t_fwd|²·f`` and ``A = 1 − R − T`` (front incidence); the phase
+  channel is the full gradient ``2·w·wrap(φ − φ_t)·Q`` (phase is not an
+  intensity, so no half factor applies).
+* ``Pmb`` stays reflectance-only (intensity cascade); T/A/phase gradients
+  are coherent-path only.
 * Results are returned as ``(n_angles, n_wavs, n_depths)`` float64 arrays.
 """
 
@@ -39,6 +45,9 @@ try:
         needle_engine as _rs_needle_engine,
         NREQ_P as _NREQ_P,
         NREQ_P_MB as _NREQ_P_MB,
+        NREQ_P_T as _NREQ_P_T,
+        NREQ_P_A as _NREQ_P_A,
+        NREQ_P_PHI as _NREQ_P_PHI,
         NREQ_DPHI as _NREQ_DPHI,
         NREQ_DGD as _NREQ_DGD,
         NREQ_DGDD as _NREQ_DGDD,
@@ -64,6 +73,9 @@ class NeedleRequest(IntFlag):
 
     P = _NREQ_P            # coherent merit gradient P(z)
     P_MB = _NREQ_P_MB      # multiblock P(z) through the intensity cascade
+    P_T = _NREQ_P_T        # coherent transmission-merit gradient P_T(z)
+    P_A = _NREQ_P_A        # coherent absorption-merit gradient P_A(z)
+    P_PHI = _NREQ_P_PHI    # coherent phase-merit gradient P_PHI(z)
     DPHI = _NREQ_DPHI      # ∂φ/∂δ
     DGD = _NREQ_DGD        # ∂(dφ/dω)/∂δ  (group delay)
     DGDD = _NREQ_DGDD      # ∂(d²φ/dω²)/∂δ  (group-delay dispersion)
@@ -87,6 +99,12 @@ def needle_gradient(
     *,
     targets_r: Union[float, Sequence[float], np.ndarray, None] = None,
     weights_r: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_t: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_t: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_a: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_a: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_phi: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_phi: Union[float, Sequence[float], np.ndarray, None] = None,
     start_idx: int = 0,
     end_idx: Optional[int] = None,
     channel: int = 0,
@@ -108,6 +126,13 @@ def needle_gradient(
     targets_r / weights_r : None, scalar, or (n_angles·n_wavs,) array
         Per-spectral-point reflectance targets / merit weights (angle-major).
         Defaults: target 0, weight 1.
+    targets_t / weights_t : same layout, for ``P_T`` (flux-corrected
+        transmittance ``|t_fwd|²·f``, front incidence).
+    targets_a / weights_a : same layout, for ``P_A`` (absorptance
+        ``1 − R − T``, front incidence).
+    targets_phi / weights_phi : same layout, for ``P_PHI`` (phase of the
+        ``channel`` element, in radians; residual wrapped to [-π, π]).
+        Only honoured when ``P_PHI`` is requested.
     start_idx, end_idx : int
         Coherent sub-block confinement; ``end_idx`` is the *index* of the
         terminating medium (default: last layer). Hosts must lie strictly
@@ -123,9 +148,9 @@ def needle_gradient(
     Returns
     -------
     dict[str, ndarray]
-        ``P_s``, ``P_p``, ``Pmb_s``, ``Pmb_p``, ``dphi_s``, ``dgdd_p``, ...
-        depending on ``request`` and ``pol``; each shaped
-        ``(n_angles, n_wavs, n_depths)``.
+        ``P_s``, ``P_p``, ``Pmb_s``, ``Pmb_p``, ``P_T_s``, ``P_A_p``,
+        ``P_PHI_s``, ``dphi_s``, ``dgdd_p``, ... depending on ``request``
+        and ``pol``; each shaped ``(n_angles, n_wavs, n_depths)``.
     """
     if pol not in ("s", "p", "sp"):
         raise ValueError("pol must be 's', 'p', or 'sp'.")
@@ -158,6 +183,12 @@ def needle_gradient(
 
     tgt = _per_point(targets_r, "targets_r", np.float64)
     wgt = _per_point(weights_r, "weights_r", np.float64)
+    tgt_t = _per_point(targets_t, "targets_t", np.float64)
+    wgt_t = _per_point(weights_t, "weights_t", np.float64)
+    tgt_a = _per_point(targets_a, "targets_a", np.float64)
+    wgt_a = _per_point(weights_a, "weights_a", np.float64)
+    tgt_phi = _per_point(targets_phi, "targets_phi", np.float64)
+    wgt_phi = _per_point(weights_phi, "weights_phi", np.float64)
     mask = None if host_mask is None else np.ascontiguousarray(
         np.asarray(host_mask, dtype=bool).ravel()
     )
@@ -179,6 +210,12 @@ def needle_gradient(
         stack.incoherent_flags if (req & NeedleRequest.P_MB) else None,
         tgt,
         wgt,
+        tgt_t,
+        wgt_t,
+        tgt_a,
+        wgt_a,
+        tgt_phi,
+        wgt_phi,
         int(start_idx),
         None if end_idx is None else int(end_idx),
         int(channel),

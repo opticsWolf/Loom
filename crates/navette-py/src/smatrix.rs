@@ -13,7 +13,7 @@ use std::f64::consts::PI;
 
 use navette::smatrix::coherent_block::*;
 use navette::smatrix::core_engine::*;
-use navette::smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_MB};
+use navette::smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_A, NREQ_P_MB, NREQ_P_PHI, NREQ_P_T};
 use navette::smatrix::needle_operator::*;
 use navette::smatrix::optics_core::*;
 use navette::smatrix::optimizer::*;
@@ -431,6 +431,8 @@ pub fn core_engine(
     rough_types, rough_vals, needle_n_per_wav, z_grid,
     requested,
     incoherent_flags=None, targets_r=None, weights_r=None,
+    targets_t=None, weights_t=None, targets_a=None, weights_a=None,
+    targets_phi=None, weights_phi=None,
     start_idx=0, end_idx=None, channel=0,
     calc_s=true, calc_p=true, host_mask=None
 ))]
@@ -450,6 +452,12 @@ pub fn needle_engine<'py>(
     incoherent_flags: Option<PyReadonlyArray1<i32>>,
     targets_r: Option<PyReadonlyArray1<f64>>,
     weights_r: Option<PyReadonlyArray1<f64>>,
+    targets_t: Option<PyReadonlyArray1<f64>>,
+    weights_t: Option<PyReadonlyArray1<f64>>,
+    targets_a: Option<PyReadonlyArray1<f64>>,
+    weights_a: Option<PyReadonlyArray1<f64>>,
+    targets_phi: Option<PyReadonlyArray1<f64>>,
+    weights_phi: Option<PyReadonlyArray1<f64>>,
     start_idx: usize,
     end_idx: Option<usize>,
     channel: usize,
@@ -497,6 +505,9 @@ pub fn needle_engine<'py>(
     }
     let want_p = requested & NREQ_P != 0;
     let want_pmb = requested & NREQ_P_MB != 0;
+    let want_pt = requested & NREQ_P_T != 0;
+    let want_pa = requested & NREQ_P_A != 0;
+    let want_pphi = requested & NREQ_P_PHI != 0;
     let want_disp = max_disp_order(requested).is_some();
     if !calc_s && !calc_p {
         return Err(pyo3::exceptions::PyValueError::new_err("no polarization branch enabled"));
@@ -532,6 +543,34 @@ pub fn needle_engine<'py>(
     };
     let target_of = |k: usize| tgt.as_ref().map(|t| t[k]).unwrap_or(0.0);
     let weight_of = |k: usize| wgt.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    // Optional per-point merit inputs for the T/A/phase gradients
+    // (default: target 0, weight 1 — same as the R pair).
+    let load_pair = |a: &Option<PyReadonlyArray1<f64>>, name: &str| -> PyResult<Option<Vec<f64>>> {
+        match a {
+            Some(arr) => {
+                let v = arr.as_slice()?;
+                if v.len() != total_points {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "{name} must have num_angles*num_wavs entries (angle-major)",
+                    )));
+                }
+                Ok(Some(v.to_vec()))
+            }
+            None => Ok(None),
+        }
+    };
+    let tgt_t = load_pair(&targets_t, "targets_t")?;
+    let wgt_t = load_pair(&weights_t, "weights_t")?;
+    let tgt_a = load_pair(&targets_a, "targets_a")?;
+    let wgt_a = load_pair(&weights_a, "weights_a")?;
+    let tgt_phi = load_pair(&targets_phi, "targets_phi")?;
+    let wgt_phi = load_pair(&weights_phi, "weights_phi")?;
+    let target_t_of = |k: usize| tgt_t.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_t_of = |k: usize| wgt_t.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_a_of = |k: usize| tgt_a.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_a_of = |k: usize| wgt_a.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_phi_of = |k: usize| tgt_phi.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_phi_of = |k: usize| wgt_phi.as_ref().map(|t| t[k]).unwrap_or(1.0);
 
     // Incoherent flags only needed for the multiblock path.
     let inc = match (&incoherent_flags, want_pmb) {
@@ -570,7 +609,7 @@ pub fn needle_engine<'py>(
             .map_err(pyo3::exceptions::PyValueError::new_err)?),
         None => None,
     };
-    let coh_locs: Vec<(usize, f64)> = if want_p || want_disp {
+    let coh_locs: Vec<(usize, f64)> = if want_p || want_pt || want_pa || want_pphi || want_disp {
         z_slice
             .iter()
             .map(|&z| locate_depth_in(thick_slice, start_idx, idx_end, z))
@@ -583,10 +622,16 @@ pub fn needle_engine<'py>(
         p: [Option<Vec<f64>>; 2],
         pmb: [Option<Vec<f64>>; 2],
         q: [Option<Vec<f64>>; 2], // Q rows (order 0), flattened nz
+        pt: [Option<Vec<f64>>; 2],
+        pa: [Option<Vec<f64>>; 2],
+        pphi: [Option<Vec<f64>>; 2],
     }
     impl PointOut {
         fn empty() -> Self {
-            PointOut { p: [None, None], pmb: [None, None], q: [None, None] }
+            PointOut {
+                p: [None, None], pmb: [None, None], q: [None, None],
+                pt: [None, None], pa: [None, None], pphi: [None, None],
+            }
         }
     }
 
@@ -613,7 +658,7 @@ pub fn needle_engine<'py>(
                 let mut o = PointOut::empty();
 
                 // Coherent observables share ONE fields build per polarization.
-                if want_p || want_disp {
+                if want_p || want_pt || want_pa || want_pphi || want_disp {
                     for (pi, &on) in pol_on.iter().enumerate() {
                         if !on {
                             continue;
@@ -629,6 +674,27 @@ pub fn needle_engine<'py>(
                                 thick_slice, start_idx, idx_end, z_slice,
                             ));
                         }
+                        if want_pt {
+                            o.pt[pi] = Some(p_coherent_T_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_t_of(k), weight_t_of(k),
+                                thick_slice, start_idx, idx_end, z_slice,
+                            ));
+                        }
+                        if want_pa {
+                            o.pa[pi] = Some(p_coherent_A_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_a_of(k), weight_a_of(k),
+                                thick_slice, start_idx, idx_end, z_slice,
+                            ));
+                        }
+                        if want_pphi {
+                            o.pphi[pi] = Some(p_coherent_phi_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c, channel,
+                                target_phi_of(k), weight_phi_of(k),
+                                thick_slice, start_idx, idx_end, z_slice,
+                            ));
+                        }
                         if want_disp {
                             let m = fields.s_left[idx_end];
                             let amp = [m.0, m.1, m.2, m.3][channel];
@@ -636,9 +702,11 @@ pub fn needle_engine<'py>(
                             let mut qv = vec![0.0_f64; nz];
                             if r2 > 1e-20 {
                                 for (zi, &(j, xi)) in coh_locs.iter().enumerate() {
-                                    let dr =
-                                        needle_dr_ddz(&fields, nsin_fi, j, xi, np_c, pol, lam);
-                                    qv[zi] = (amp.conj() * dr).im / r2;
+                                    // Per-channel slope (channel-0 here would
+                                    // mix r-motion into t-phase).
+                                    let da = needle_slopes4_ddz(
+                                        &fields, nsin_fi, j, xi, np_c, pol, lam)[channel];
+                                    qv[zi] = (amp.conj() * da).im / r2;
                                 }
                             }
                             o.q[pi] = Some(qv);
@@ -722,6 +790,27 @@ pub fn needle_engine<'py>(
         for pi in 0..2 {
             if pol_on[pi] {
                 emit!(format!("P_{}", pol_suffix(pi)), p, pi);
+            }
+        }
+    }
+    if want_pt {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_T_{}", pol_suffix(pi)), pt, pi);
+            }
+        }
+    }
+    if want_pa {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_A_{}", pol_suffix(pi)), pa, pi);
+            }
+        }
+    }
+    if want_pphi {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_PHI_{}", pol_suffix(pi)), pphi, pi);
             }
         }
     }
@@ -1201,6 +1290,9 @@ pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(needle_engine, m)?)?;
     m.add("NREQ_P", NREQ_P)?;
     m.add("NREQ_P_MB", NREQ_P_MB)?;
+    m.add("NREQ_P_T", NREQ_P_T)?;
+    m.add("NREQ_P_A", NREQ_P_A)?;
+    m.add("NREQ_P_PHI", NREQ_P_PHI)?;
     m.add("NREQ_DPHI", NREQ_DPHI)?;
     m.add("NREQ_DGD", NREQ_DGD)?;
     m.add("NREQ_DGDD", NREQ_DGDD)?;

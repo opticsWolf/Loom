@@ -42,6 +42,12 @@ pub const NREQ_DGDD: u64 = 1 << 4;
 pub const NREQ_DTOD: u64 = 1 << 5;
 /// Request FOD sensitivity (dispersion-order needle channel).
 pub const NREQ_DFOD: u64 = 1 << 6;
+/// Request coherent transmission-merit gradient P_T(z) (t_fwd + flux).
+pub const NREQ_P_T: u64 = 1 << 7;
+/// Request coherent absorption-merit gradient P_A(z) (A = 1 − R − T).
+pub const NREQ_P_A: u64 = 1 << 8;
+/// Request coherent phase-merit gradient P_PHI(z) for the selected channel.
+pub const NREQ_P_PHI: u64 = 1 << 9;
 
 /// Highest dispersion derivative order implied by the request mask.
 pub fn max_disp_order(requested: u64) -> Option<usize> {
