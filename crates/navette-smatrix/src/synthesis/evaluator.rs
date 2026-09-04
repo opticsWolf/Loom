@@ -232,6 +232,9 @@ mod tests {
             band: vec![].into(),
             phase: false,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         spec
@@ -282,6 +285,9 @@ mod tests {
             band: vec![].into(),
             phase: true,
             differential_passes: Some(1.0),
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         SmatrixContext {
@@ -389,6 +395,9 @@ mod tests {
             band: vec![].into(),
             phase: true,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         let ctx = SmatrixContext {
@@ -484,6 +493,9 @@ mod tests {
             band: vec![].into(),
             phase: true,
             differential_passes: Some(1.0),
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         assert!(spec.merit(&sim, 1e6) < 1e-20, "m={}", spec.merit(&sim, 1e6));
@@ -515,6 +527,9 @@ mod tests {
             band: vec![].into(),
             phase: true,
             differential_passes: Some(1.0),
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         let mut ctx = ar_ctx(1000.0);

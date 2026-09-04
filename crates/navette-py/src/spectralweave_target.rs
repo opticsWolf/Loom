@@ -31,9 +31,13 @@ impl PyTargetWeaver {
         }
     }
 
-    #[pyo3(signature = (wavelengths, values, tolerances, angle, polarization, spectral, kind, norm_mode, band=None))]
+    #[pyo3(signature = (wavelengths, values, tolerances, angle, polarization, spectral, kind, norm_mode, band=None, weight=1.0, normalize_count=false, integral=false))]
 /// Ingest one target curve over wavelengths (kind e/a/b/r/c, norm mode).
 /// `band` holds optional per-point half-widths for `r`/`c` (raw units).
+/// `weight` scales the frame's merit sum; `normalize_count` divides it by
+/// the point count (target-level equal say regardless of sampling density).
+/// `integral` constrains the MEAN of the scaled diffs (single residual);
+/// it rejects `normalize_count` (the mean already is one).
     fn add_spectral_target(
         &self,
         py: Python<'_>,
@@ -46,9 +50,22 @@ impl PyTargetWeaver {
         kind: String,
         norm_mode: String,
         band: Option<PyReadonlyArray1<'_, f64>>,
+        weight: f64,
+        normalize_count: bool,
+        integral: bool,
     ) -> PyResult<()> {
         let k = TargetKind::from_str(&kind)
             .ok_or_else(|| PyValueError::new_err("Invalid kind (use 'e', 'a', 'b', 'r', or 'c')"))?;
+        if !weight.is_finite() || weight < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "weight must be finite and >= 0 (got {weight})"
+            )));
+        }
+        if integral && normalize_count {
+            return Err(PyValueError::new_err(
+                "integral targets reject normalize_count (the mean already is one)",
+            ));
+        }
         let wl = wavelengths.as_slice()?;
         let val = values.as_slice()?;
         let tol = tolerances.as_slice()?;
@@ -88,7 +105,8 @@ impl PyTargetWeaver {
                 .map_err(PyValueError::new_err)?;
             self.inner.inner.inner.map_frame_to_key(&key, &frame);
 
-            self.inner.register_metadata(frame.uid, key, val_data, tol_data, k, &norm_mode, band_data);
+            let count_norm = normalize_count.then(|| val_len as f64);
+            self.inner.register_metadata(frame.uid, key, val_data, tol_data, k, &norm_mode, band_data, weight, count_norm, integral);
             Ok(())
         })
     }
@@ -124,15 +142,22 @@ impl PyTargetWeaver {
                 d.set_item("kind", entry.kind.as_str())?;
                 d.set_item("mode", entry.resolved_mode.as_str())?;
                 d.set_item("norm_factor", entry.norm_factor)?;
+                d.set_item("weight", entry.weight)?;
+                d.set_item("count_norm", entry.count_norm)?;
+                d.set_item("integral", entry.integral)?;
                 out.push(d.unbind());
             }
         }
         Ok(out)
     }
 
-    #[pyo3(signature = (wavelength, angles, values, tolerances, polarization, spectral, kind, norm_mode, band=None))]
+    #[pyo3(signature = (wavelength, angles, values, tolerances, polarization, spectral, kind, norm_mode, band=None, weight=1.0, normalize_count=false, integral=false))]
 /// Ingest one target curve over angles (kind e/a/b/r/c, norm mode).
 /// `band` holds optional per-point half-widths for `r`/`c` (raw units).
+/// `weight` scales the target's merit sum; `normalize_count` divides by
+/// the TARGET-level angle count (shared across this target's single-point
+/// entries — per-entry counts would no-op at 1). `integral` constrains the
+/// mean over angles (rejects `normalize_count`).
     fn add_angular_target(
         &self,
         py: Python<'_>,
@@ -145,9 +170,22 @@ impl PyTargetWeaver {
         kind: String,
         norm_mode: String,
         band: Option<PyReadonlyArray1<'_, f64>>,
+        weight: f64,
+        normalize_count: bool,
+        integral: bool,
     ) -> PyResult<()> {
         let k = TargetKind::from_str(&kind)
             .ok_or_else(|| PyValueError::new_err("Invalid kind (use 'e', 'a', 'b', 'r', or 'c')"))?;
+        if !weight.is_finite() || weight < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "weight must be finite and >= 0 (got {weight})"
+            )));
+        }
+        if integral && normalize_count {
+            return Err(PyValueError::new_err(
+                "integral targets reject normalize_count (the mean already is one)",
+            ));
+        }
         let angs = angles.as_slice()?;
         let vals = values.as_slice()?;
         let tols = tolerances.as_slice()?;
@@ -203,7 +241,9 @@ impl PyTargetWeaver {
                     .map_err(PyValueError::new_err)?;
                 self.inner.inner.inner.map_frame_to_key(&key, &frame);
 
-                self.inner.register_metadata_resolved(frame.uid, key, &val_arr, &tol_arr, k, shared_mode, shared_nf, &band_arr);
+                // Target-level count shared across this target's entries.
+                let count_norm = normalize_count.then(|| a_len as f64);
+                self.inner.register_metadata_resolved(frame.uid, key, &val_arr, &tol_arr, k, shared_mode, shared_nf, &band_arr, weight, count_norm, integral);
             }
             Ok(())
         })
@@ -213,6 +253,36 @@ impl PyTargetWeaver {
 // ---------------------------------------------------------------------------
 // Zero-Allocation Merit Function
 // ---------------------------------------------------------------------------
+/// One frame-point merit contribution (squared forms), shared by the
+/// pointwise path and the integral mean path (which calls it once with
+/// mean diff/tol/band). Extracted verbatim — formulas bit-identical.
+fn kind_contribution(kind: TargetKind, scaled_diff: f64, tol: f64, band: f64) -> f64 {
+    match kind {
+        TargetKind::Exact => (scaled_diff / tol).powi(2),
+        TargetKind::Above if scaled_diff < 0.0 => (scaled_diff / tol).powi(2),
+        TargetKind::Below if scaled_diff > 0.0 => (scaled_diff / tol).powi(2),
+        TargetKind::Range => {
+            // Hard box: bare `r` without a band falls back to
+            // the tolerance as half-width (paired a/b).
+            let bw_eff = if band <= 0.0 { tol } else { band };
+            let ad = scaled_diff.abs();
+            if ad <= bw_eff { 0.0 } else { ((ad - bw_eff) / tol).powi(2) }
+        },
+        TargetKind::CenterBand => {
+            // Soft box: reduced `(d/bw)^2` inside (exact scaled
+            // by `(tol/bw)^2`), exceedance plus continuity outside.
+            if band <= 0.0 {
+                (scaled_diff / tol).powi(2)
+            } else {
+                let ad = scaled_diff.abs();
+                if ad <= band { (scaled_diff / band).powi(2) }
+                else { ((ad - band) / tol).powi(2) + 1.0 }
+            }
+        },
+        _ => 0.0,
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (sim_weaver, target_weaver, missing_penalty=1e6))]
 /// Merit of simulated weaves vs targets (exact/above/below residuals).
@@ -273,6 +343,14 @@ pub fn calculate_merit(
                 // Misaligned case: two-pointer interpolation. `sim_idx` advances
                 // monotonically across the sorted target grid, giving O(n + m)
                 // instead of an O(m log n) per-point binary search.
+                // Frame-local sum: user weight + count normalization apply
+                // ONCE per frame below (defaults 1.0/None = legacy sum).
+                // Integral frames instead accumulate mean diff/tol/band and
+                // apply the kind ONCE to the mean (see `kind_contribution`).
+                let mut frame_sum = 0.0;
+                let mut int_d = 0.0;
+                let mut int_tol = 0.0;
+                let mut int_bw = 0.0;
                 let mut sim_idx = 0;
                 for i in 0..t_wl.len() {
                     let sim_raw = if aligned {
@@ -318,34 +396,28 @@ pub fn calculate_merit(
 
                     let tol = entry.tolerances[i];
 
-                    let residual = match entry.kind {
-                        TargetKind::Exact => (scaled_diff / tol).powi(2),
-                        TargetKind::Above if scaled_diff < 0.0 => (scaled_diff / tol).powi(2),
-                        TargetKind::Below if scaled_diff > 0.0 => (scaled_diff / tol).powi(2),
-                        TargetKind::Range => {
-                            // Hard box: bare `r` without a band falls back to
-                            // the tolerance as half-width (paired a/b).
-                            let bw = entry.band[i];
-                            let bw_eff = if bw <= 0.0 { tol } else { bw };
-                            let ad = scaled_diff.abs();
-                            if ad <= bw_eff { 0.0 } else { ((ad - bw_eff) / tol).powi(2) }
-                        },
-                        TargetKind::CenterBand => {
-                            // Soft box: reduced `(d/bw)^2` inside (exact scaled
-                            // by `(tol/bw)^2`), exceedance plus continuity outside.
-                            let bw = entry.band[i];
-                            if bw <= 0.0 {
-                                (scaled_diff / tol).powi(2)
-                            } else {
-                                let ad = scaled_diff.abs();
-                                if ad <= bw { (scaled_diff / bw).powi(2) }
-                                else { ((ad - bw) / tol).powi(2) + 1.0 }
-                            }
-                        },
-                        _ => 0.0,
-                    };
-
-                    total_merit += residual;
+                    if entry.integral {
+                        // Mean branch: accumulate raw ingredients; the kind
+                        // applies ONCE to the mean after the loop.
+                        int_d += scaled_diff;
+                        int_tol += tol;
+                        int_bw += entry.band.get(i).copied().unwrap_or(0.0);
+                    } else {
+                        frame_sum += kind_contribution(entry.kind, scaled_diff, tol,
+                            entry.band.get(i).copied().unwrap_or(0.0));
+                    }
+                }
+                if entry.integral {
+                    // Single mean residual R = mean(d)/mean(tol); kinds
+                    // constrain the MEAN (integral-`a` = lower bound on the
+                    // average). Weight multiplies; count is moot (rejected
+                    // at ingestion — the mean already is one).
+                    let n = t_wl.len() as f64;
+                    let tol_bar = (int_tol / n).max(1e-300);
+                    total_merit += entry.weight * kind_contribution(
+                        entry.kind, int_d / n, tol_bar, int_bw / n);
+                } else {
+                    total_merit += frame_sum * entry.weight / entry.count_norm.unwrap_or(1.0);
                 }
             }
         }

@@ -54,6 +54,40 @@ Resolution scope and guards:
 - `complex` is currently **raw-scale linear** (real f64 data, nf = 1) —
   an opt-out of normalization, not complex-number support.
 
+## Weights, count normalization, integral targets
+
+Merit is a sum over points — a 200-point target outweighs a 10-point one
+20:1 at equal residuals (measured), and a single angular point drowns next
+to dense spectral curves. Two per-target knobs control this (all engines —
+weaver, spec/LM, fold/needle — apply them identically):
+
+- `weight` (default 1): multiplies the frame's merit sum (residuals scale
+  by √weight, so LM Jacobians stay consistent). Relative importance across
+  targets; finite and ≥ 0 (rejected otherwise, at every trust boundary).
+- `normalize_count` (default off): divides the frame's sum by the
+  target-level point count (spectral grid size, angular angle count —
+  resolved at ingestion, since angular targets span many single-point
+  entries). Turns the sum into a mean: equal say regardless of sampling.
+  `tol·√N` per frame is exactly equivalent (pinned by test).
+- `integral` (default off): constrains the MEAN of the scaled diffs —
+  single residual `R = mean(d)/mean(tol)` with kinds applied once to the
+  mean (integral-`a` = lower bound on the average). Rejects
+  `normalize_count` (the mean already is one — the combo would
+double-dilute). Regular and integral targets mix freely in one run.
+
+Frame contribution = `weight × (Σr² / count)` pointwise,
+`weight × kind(R)` integral. Missing-data penalties are unaffected by
+weights (drop a target to silence those — weight 0 only mutes present
+data). The CenterBand `+1` accounting becomes
+$M_{true} = M_{folded} + \Sigma\, weight/count$ over violated `c` points.
+
+The integral fold matches the mean-form merit's UNIFORM gradient exactly
+at the operating point (`w_i = W/N²`, `t_i = s_i − N·G` per point) —
+values differ by dropped constants (same loss class as the `+1`/overlap
+terms), gradients superpose exactly across overlapping integral frames,
+and the PD gain-shift formula needs no changes (it lands on
+$−2W(\bar m−T)\overline{k_z}$ automatically).
+
 ## Kinds (per point, merit space)
 
 Scaled residual `d = sim_scaled − target_scaled`, floored tolerance `tol`,

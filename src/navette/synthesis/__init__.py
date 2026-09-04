@@ -206,6 +206,10 @@ def build_merit_spec(collection: TargetCollection,
             band=np.ascontiguousarray(band, dtype=np.float64),
             phase=bool(t.phase),
             differential_passes=(diff[2] if diff is not None else None),
+            weight=float(t.weight),
+            count_norm=(None if e["count_norm"] is None
+                        else float(e["count_norm"])),
+            integral=bool(e["integral"]),
         )
 
     for (_, e), t in zip(spectral_by_uid, spec_targets):

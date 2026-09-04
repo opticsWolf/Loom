@@ -87,6 +87,19 @@ pub struct TargetEntry {
     pub normalized_targets: Arc<[f64]>,
     pub tolerances: Arc<[f64]>,
     pub band: Arc<[f64]>,
+    /// User weight (default 1): multiplies the frame's merit sum.
+    /// Validated at the bindings (finite, >= 0).
+    pub weight: f64,
+    /// Count normalization divisor (default None = off): the frame's sum
+    /// is divided by this (target-level point count — the bindings resolve
+    /// it, since angular targets span many single-point entries). None
+    /// keeps the legacy pure sum.
+    pub count_norm: Option<f64>,
+    /// Integral target: merit constrains the MEAN of the scaled diffs
+    /// (single residual `R = mean(d)/mean(tol)`), not each point. Kinds
+    /// apply once to the mean (integral-`a` = lower bound on the average).
+    /// Rejected in combination with `count_norm` (the mean already is one).
+    pub integral: bool,
 }
 
 #[derive(Default, Clone)]
@@ -205,14 +218,14 @@ impl TargetWeaver {
     /// `band` holds raw-unit half-widths for the `r`/`c` kinds (empty or
     /// all-zero when unused); it is scaled by the same `norm_factor` as the
     /// targets (per-point exact mapping in log mode, first-order otherwise).
-    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str, band: &[f64]) {
+    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str, band: &[f64], weight: f64, count_norm: Option<f64>, integral: bool) {
         let (resolved_mode, norm_factor) = Self::resolve_norm(raw_targets, mode_str);
-        self.register_metadata_resolved(uid, key, raw_targets, tolerances, kind, resolved_mode, norm_factor, band)
+        self.register_metadata_resolved(uid, key, raw_targets, tolerances, kind, resolved_mode, norm_factor, band, weight, count_norm, integral)
     }
 
     /// `register_metadata` with a pre-resolved `(mode, factor)` — the
     /// angular path resolves once over the full curve and shares it.
-    pub fn register_metadata_resolved(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, resolved_mode: ResolvedNormMode, norm_factor: f64, band: &[f64]) {
+    pub fn register_metadata_resolved(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, resolved_mode: ResolvedNormMode, norm_factor: f64, band: &[f64], weight: f64, count_norm: Option<f64>, integral: bool) {
         // Normalization itself lives in `norm_factor_for` (shared); here we
         // only apply it. Phase/Complex resolve to nf == 1 by construction.
         let mut normalized_targets = Vec::with_capacity(raw_targets.len());
@@ -261,6 +274,9 @@ impl TargetWeaver {
             normalized_targets: Arc::from(normalized_targets),
             tolerances: Arc::from(floored_tols),
             band: Arc::from(band_scaled),
+            weight,
+            count_norm,
+            integral,
         };
 
         let mut meta_guard = self.target_metadata.write();

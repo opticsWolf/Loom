@@ -40,6 +40,18 @@ class SpectralTarget:
     omit it and ``r`` falls back to ±``tolerances``, ``c`` to ``e``.
     Tolerances are fractions of the curve level (linear/log), absolute
     radians (phase) — see ``docs/spectralweave-target-kinds.md``.
+    ``weight`` multiplies the target's merit sum (default 1; relative
+    importance across targets — the 200-pt vs 10-pt density question).
+    ``normalize_count=True`` additionally divides by the target-level point
+    count (spectral grid size, angular angle count), turning the sum into a
+    mean: equal say regardless of sampling density. Both flow verbatim into
+    ``MeritSpec`` and the needle fold (missing-data penalties unaffected —
+    drop a target to silence those, weight 0 only mutes present data).
+    ``integral=True`` instead constrains the MEAN of the scaled diffs
+    (single residual ``mean(d)/mean(tol)`` — kinds apply once to the mean,
+    e.g. integral-``a`` is a lower bound on the average); it rejects
+    ``normalize_count`` (the mean already is one). Regular and integral
+    targets mix freely in one collection/run.
     Note for needle optimization: the folded needle evaluation drops the
     ``c`` +1 outside-level (constant offset — gradients exact, values read
     lower by the violated-point count); see
@@ -55,9 +67,14 @@ class SpectralTarget:
     normalization_mode: NormalizationMode = "auto"
     band:         Union[np.ndarray, float, None] = None
     phase:        bool = False
+    weight:       float = 1.0
+    normalize_count: bool = False
+    integral:     bool = False
 
     def __post_init__(self) -> None:
         _validate_shapes(self.wavelengths, self.values, self.tolerances, label="SpectralTarget")
+        _validate_weight(self.weight, label="SpectralTarget")
+        _validate_integral(self.integral, self.normalize_count, label="SpectralTarget")
         band = _normalize_band(self.band, self.values.shape, label="SpectralTarget")
         # FFI Guard: Ensure contiguous float64 memory to prevent Rust segfaults.
         # This is an O(1) no-op if the array is already correctly formatted.
@@ -83,9 +100,14 @@ class AngularTarget:
     normalization_mode: NormalizationMode = "auto"
     band:         Union[np.ndarray, float, None] = None
     phase:        bool = False
+    weight:       float = 1.0
+    normalize_count: bool = False
+    integral:     bool = False
 
     def __post_init__(self) -> None:
         _validate_shapes(self.angles, self.values, self.tolerances, label="AngularTarget")
+        _validate_weight(self.weight, label="AngularTarget")
+        _validate_integral(self.integral, self.normalize_count, label="AngularTarget")
         band = _normalize_band(self.band, self.values.shape, label="AngularTarget")
         # FFI Guard
         object.__setattr__(self, 'angles', np.ascontiguousarray(self.angles, dtype=np.float64))
@@ -94,6 +116,20 @@ class AngularTarget:
         object.__setattr__(self, 'band', band)
 
 BaseTarget = Union[SpectralTarget, AngularTarget]
+
+def _validate_weight(weight: float, label: str = "") -> None:
+    """Trust boundary: weights scale merit sums — NaN/negative is rejected."""
+    if not isinstance(weight, (int, float)) or not np.isfinite(weight) or weight < 0:
+        raise ValueError(f"{label}: weight must be finite and >= 0 (got {weight!r}).")
+
+
+def _validate_integral(integral: bool, normalize_count: bool, label: str = "") -> None:
+    """Integral targets already are means — a count divisor would double-dilute."""
+    if integral and normalize_count:
+        raise ValueError(
+            f"{label}: integral targets reject normalize_count (the mean already is one)."
+        )
+
 
 def _validate_shapes(*arrays: np.ndarray, label: str = "") -> None:
     shapes = [a.shape for a in arrays]
@@ -172,6 +208,8 @@ class TargetCollection:
                 t.angle, t.polarization, t.spectral, t.kind,
                 "phase" if t.spectral in ("PDts", "PDtp") else t.normalization_mode,
                 t.band,
+                weight=t.weight, normalize_count=t.normalize_count,
+                integral=t.integral,
             )
 
         for t in self._angular_targets:
@@ -180,6 +218,8 @@ class TargetCollection:
                 t.polarization, t.spectral, t.kind,
                 "phase" if t.spectral in ("PDts", "PDtp") else t.normalization_mode,
                 t.band,
+                weight=t.weight, normalize_count=t.normalize_count,
+                integral=t.integral,
             )
 
         return weaver

@@ -394,6 +394,34 @@ impl SimCurves {
 // MeritSpec
 // ---------------------------------------------------------------------------
 
+/// One residual from a scaled diff (signed forms), shared by the pointwise
+/// path and the integral mean path (which calls it once with mean
+/// diff/tol/band). Extracted verbatim — formulas bit-identical.
+fn kind_residual(kind: ConstraintKind, scaled_diff: f64, tol: f64, bw: f64) -> f64 {
+    match kind {
+        ConstraintKind::Exact => scaled_diff / tol,
+        ConstraintKind::Above if scaled_diff < 0.0 => scaled_diff / tol,
+        ConstraintKind::Below if scaled_diff > 0.0 => scaled_diff / tol,
+        ConstraintKind::Range => {
+            // Bare `r` without a band falls back to the tolerance
+            // as half-width (paired a/b at centre∓tol).
+            let bw_eff = if bw <= 0.0 { tol } else { bw };
+            let ad = scaled_diff.abs();
+            if ad <= bw_eff { 0.0 } else { (ad - bw_eff) / tol }
+        },
+        ConstraintKind::CenterBand => {
+            if bw <= 0.0 {
+                scaled_diff / tol
+            } else {
+                let ad = scaled_diff.abs();
+                if ad <= bw { scaled_diff / bw }
+                else { (((ad - bw) / tol).powi(2) + 1.0).sqrt() }
+            }
+        },
+        _ => 0.0,
+    }
+}
+
 /// One unique (angle, curve) demand — mirrors an `OpticalKey`.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct MeritKey {
@@ -430,6 +458,19 @@ pub struct MeritTarget {
     /// `phase` (rejected otherwise); `passes` is 1 for transmitted, 2 for a
     /// reflection round trip; must be finite and non-negative.
     pub differential_passes: Option<f64>,
+    /// User weight (default 1): multiplies this frame's merit sum.
+    /// Applied at the residual level (`r × √(weight/count)`) so values,
+    /// LM Jacobians and the needle fold stay consistent by construction.
+    pub weight: f64,
+    /// Count-normalization divisor (default None = off): the frame's sum
+    /// is divided by this (target-level point count — the converter
+    /// resolves it, since angular targets span many single-point frames).
+    /// `Some(n)` needs `n > 0` (rejected otherwise).
+    pub count_norm: Option<f64>,
+    /// Integral target: constrain the MEAN of the scaled diffs (single
+    /// residual `R = mean(d)/mean(tol)`), not each point. Kinds apply once
+    /// to the mean. Rejected with `count_norm` (the mean already is one).
+    pub integral: bool,
 }
 
 /// Flat, immutable, Send+Sync target description.
@@ -504,6 +545,23 @@ impl MeritSpec {
             if !(passes >= 0.0) || !passes.is_finite() {
                 return Err(format!("differential passes must be finite and >= 0 (got {passes})"));
             }
+        }
+        // Weight/count trust boundary (bindings + converter pass user
+        // values straight through; garbage here means NaN merits).
+        if !target.weight.is_finite() || target.weight < 0.0 {
+            return Err(format!(
+                "weight must be finite and >= 0 (got {})", target.weight
+            ));
+        }
+        if let Some(n) = target.count_norm {
+            if !n.is_finite() || n <= 0.0 {
+                return Err(format!("count_norm must be finite and > 0 (got {n})"));
+            }
+        }
+        // Integral targets already are means — a count divisor would
+        // double-dilute silently.
+        if target.integral && target.count_norm.is_some() {
+            return Err("integral targets reject count_norm (the mean already is one)".into());
         }
         self.targets.push(target);
         Ok(())
@@ -703,6 +761,14 @@ impl MeritSpec {
             // helper converts internally. The medium lookup stays INSIDE
             // the `if let` below so non-differential keys pay nothing.
             let diff_passes = t.differential_passes;
+            // Weight + count normalization at the residual level (once per
+            // frame): merit scales by weight/count exactly, and LM
+            // Jacobians differentiate the scaled residuals consistently.
+            // Defaults (1.0/None) are the identity — legacy paths bit-safe.
+            let rscale = (t.weight / t.count_norm.unwrap_or(1.0)).sqrt();
+            let mut acc_d = 0.0;
+            let mut acc_tol = 0.0;
+            let mut acc_bw = 0.0;
             for i in 0..t_wl.len() {
                 let sim_raw = match &input {
                     TargetInput::Intensity(row) => sample(row, i, &mut sim_idx),
@@ -749,29 +815,23 @@ impl MeritSpec {
                 let tol = t.tolerances[i];
                 let bw = t.band.get(i).copied().unwrap_or(0.0);
 
-                let r = match t.kind {
-                    ConstraintKind::Exact => scaled_diff / tol,
-                    ConstraintKind::Above if scaled_diff < 0.0 => scaled_diff / tol,
-                    ConstraintKind::Below if scaled_diff > 0.0 => scaled_diff / tol,
-                    ConstraintKind::Range => {
-                        // Bare `r` without a band falls back to the tolerance
-                        // as half-width (paired a/b at centre∓tol).
-                        let bw_eff = if bw <= 0.0 { tol } else { bw };
-                        let ad = scaled_diff.abs();
-                        if ad <= bw_eff { 0.0 } else { (ad - bw_eff) / tol }
-                    },
-                    ConstraintKind::CenterBand => {
-                        if bw <= 0.0 {
-                            scaled_diff / tol
-                        } else {
-                            let ad = scaled_diff.abs();
-                            if ad <= bw { scaled_diff / bw }
-                            else { (((ad - bw) / tol).powi(2) + 1.0).sqrt() }
-                        }
-                    },
-                    _ => 0.0,
-                };
-                out.push(r);
+                if t.integral {
+                    // Mean branch: accumulate raw ingredients; the kind
+                    // applies ONCE to the mean after the loop.
+                    acc_d += scaled_diff;
+                    acc_tol += tol;
+                    acc_bw += bw;
+                } else {
+                    out.push(kind_residual(t.kind, scaled_diff, tol, bw) * rscale);
+                }
+            }
+            if t.integral {
+                // Single mean residual R = mean(d)/mean(tol); kinds
+                // constrain the MEAN (integral-`a` = lower bound on the
+                // average). Weight multiplies (count rejected at intake).
+                let n = t_wl.len() as f64;
+                let tol_bar = (acc_tol / n).max(1e-300);
+                out.push(kind_residual(t.kind, acc_d / n, tol_bar, acc_bw / n) * rscale);
             }
         }
         Ok(())
@@ -835,6 +895,9 @@ mod tests {
             band: band.into(),
             phase: false,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         }
     }
 
@@ -858,6 +921,9 @@ mod tests {
             band: Vec::new().into(),
             phase: true,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         }
     }
 
@@ -1408,6 +1474,114 @@ mod tests {
             t2.differential_passes = Some(bad);
             assert!(spec.add_target(t2).is_err(), "passes={bad}");
         }
+    }
+
+    #[test]
+    fn weight_and_count_scale_merit() {
+        // Base: two Exact points, nf = 1, tol 0.1, sim 0.1 off →
+        // r = ±1/point → merit 2.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        spec.add_target(entry(k as u32, vec![400.0, 500.0], vec![0.5, 0.5],
+            vec![0.1, 0.1], ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        let mut sim = sim_one_angle(&[0.6, 0.4, 0.0, 0.0, 0.0]);
+        assert!((spec.merit(&sim, 1e6) - 2.0).abs() < 1e-12);
+        // weight 2 → merit 4 (residuals scale by √2).
+        let mut sw = MeritSpec::new();
+        let kw = sw.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        let mut tw = entry(kw as u32, vec![400.0, 500.0], vec![0.5, 0.5],
+            vec![0.1, 0.1], ConstraintKind::Exact, SimTransform::Linear, 1.0);
+        tw.weight = 2.0;
+        sw.add_target(tw).unwrap();
+        assert!((sw.merit(&sim, 1e6) - 4.0).abs() < 1e-12);
+        let mut out = Vec::new();
+        sw.residuals(&sim, &mut out).unwrap();
+        assert!((out[0].abs() - 2.0f64.sqrt()).abs() < 1e-12);
+        // count 2 → merit 1 (mean, not sum).
+        let mut sc = MeritSpec::new();
+        let kc = sc.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        let mut tc = entry(kc as u32, vec![400.0, 500.0], vec![0.5, 0.5],
+            vec![0.1, 0.1], ConstraintKind::Exact, SimTransform::Linear, 1.0);
+        tc.count_norm = Some(2.0);
+        sc.add_target(tc).unwrap();
+        assert!((sc.merit(&sim, 1e6) - 1.0).abs() < 1e-12);
+        // weight 3 + count 2 → 3.
+        let mut sb = MeritSpec::new();
+        let kb = sb.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        let mut tb = entry(kb as u32, vec![400.0, 500.0], vec![0.5, 0.5],
+            vec![0.1, 0.1], ConstraintKind::Exact, SimTransform::Linear, 1.0);
+        tb.weight = 3.0;
+        tb.count_norm = Some(2.0);
+        sb.add_target(tb).unwrap();
+        assert!((sb.merit(&sim, 1e6) - 3.0).abs() < 1e-12);
+        // Trust boundary: negative/NaN weight, non-positive count rejected.
+        for (w, c) in [(-1.0, None), (f64::NAN, None), (1.0, Some(0.0)), (1.0, Some(-2.0))] {
+            let mut sx = MeritSpec::new();
+            let kx = sx.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+            let mut tx = entry(kx as u32, vec![400.0], vec![0.5],
+                vec![0.1], ConstraintKind::Exact, SimTransform::Linear, 1.0);
+            tx.weight = w;
+            tx.count_norm = c;
+            assert!(sx.add_target(tx).is_err(), "w={w} c={c:?}");
+        }
+        let _ = &mut sim;
+    }
+
+    fn entry_integral(key_idx: u32, kind: ConstraintKind) -> MeritTarget {
+        let mut t = entry(key_idx, vec![400.0, 500.0, 600.0], vec![0.5, 0.5, 0.5],
+            vec![0.1, 0.1, 0.1], kind, SimTransform::Linear, 1.0);
+        t.integral = true;
+        t
+    }
+
+    #[test]
+    fn integral_mean_single_residual() {
+        // Sim [0.6, 0.5, 0.4] vs 0.5: mean diff 0 → merit 0, ONE residual.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        spec.add_target(entry_integral(k as u32, ConstraintKind::Exact)).unwrap();
+        let sim = sim_one_angle(&[0.6, 0.5, 0.4, 0.0, 0.0]);
+        assert!(spec.merit(&sim, 1e6) < 1e-28);
+        let mut out = Vec::new();
+        spec.residuals(&sim, &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+        // Sim [0.7, 0.6, 0.5]: mean diff 0.1, tol 0.1 → R = 1 → merit 1.
+        let sim2 = sim_one_angle(&[0.7, 0.6, 0.5, 0.0, 0.0]);
+        assert!((spec.merit(&sim2, 1e6) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn integral_kinds_mask_the_mean() {
+        // Above: mean above target → silent; mean below → active.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        spec.add_target(entry_integral(k as u32, ConstraintKind::Above)).unwrap();
+        // Mean 0.6 ≥ 0.5 → 0 (even though point 600 dips to 0.4!).
+        let sim_hi = sim_one_angle(&[0.7, 0.7, 0.4, 0.0, 0.0]);
+        assert!(spec.merit(&sim_hi, 1e6) < 1e-28);
+        // Mean 0.4 < 0.5 → ((0.4−0.5)/0.1)² = 1.
+        let sim_lo = sim_one_angle(&[0.4, 0.4, 0.4, 0.0, 0.0]);
+        assert!((spec.merit(&sim_lo, 1e6) - 1.0).abs() < 1e-12);
+        // Range with band 0.05 (raw, nf = 1): mean inside → 0.
+        let mut spec_r = MeritSpec::new();
+        let kr = spec_r.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        let mut tr = entry_integral(kr as u32, ConstraintKind::Range);
+        tr.band = vec![0.05, 0.05, 0.05].into();
+        spec_r.add_target(tr).unwrap();
+        let sim_in = sim_one_angle(&[0.54, 0.54, 0.54, 0.0, 0.0]);
+        assert!(spec_r.merit(&sim_in, 1e6) < 1e-28);
+        // Mean 0.6: exceedance (0.1−0.05)/0.1 = 0.5 → 0.25.
+        let sim_out = sim_one_angle(&[0.6, 0.6, 0.6, 0.0, 0.0]);
+        assert!((spec_r.merit(&sim_out, 1e6) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn integral_rejects_count_norm() {
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        let mut t = entry_integral(k as u32, ConstraintKind::Exact);
+        t.count_norm = Some(3.0);
+        assert!(spec.add_target(t).is_err());
     }
 
     #[test]

@@ -163,11 +163,15 @@ impl PyMeritSpec {
     }
 
     #[pyo3(signature = (key_idx, wavelengths, normalized, tolerances, kind, transform,
-                        norm_factor, band=None, phase=false, differential_passes=None))]
+                        norm_factor, band=None, phase=false, differential_passes=None,
+                        weight=1.0, count_norm=None, integral=false))]
     /// Append one target frame. Arrays are per-point values on `wavelengths`.
     /// `differential_passes` (None = absolute phase; 1.0 = `PDts`/`PDtp`
     /// transmitted) subtracts the equivalent-medium reference (see
     /// `SimCurves` metadata); requires `phase=true`.
+    /// `weight` scales the frame's merit sum; `count_norm` (target-level
+    /// point count, resolved by the converter) divides it. `integral`
+    /// constrains the mean of the scaled diffs (single residual).
     #[allow(clippy::too_many_arguments)]
     fn add_target(
         &mut self,
@@ -181,6 +185,9 @@ impl PyMeritSpec {
         band: Option<PyReadonlyArray1<'_, f64>>,
         phase: bool,
         differential_passes: Option<f64>,
+        weight: f64,
+        count_norm: Option<f64>,
+        integral: bool,
     ) -> PyResult<()> {
         let wl = wavelengths.as_slice()?;
         let nt = normalized.as_slice()?;
@@ -201,6 +208,9 @@ impl PyMeritSpec {
                 band: Arc::from(b.as_slice()),
                 phase,
                 differential_passes,
+                weight,
+                count_norm,
+                integral,
             })
             .map_err(PyValueError::new_err)
     }

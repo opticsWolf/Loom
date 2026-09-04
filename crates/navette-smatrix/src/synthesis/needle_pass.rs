@@ -32,7 +32,7 @@ use num_complex::Complex64;
 use rayon::prelude::*;
 
 use crate::needle_operator::{build_stack_fields_range, p_coherent_from_fields};
-use crate::synthesis::merit::{CurveId, MeritSpec, SimCurves};
+use crate::synthesis::merit::{CurveId, MeritKey, MeritSpec, MeritTarget, SimCurves};
 
 // ---------------------------------------------------------------------------
 // Scan candidates (Python-parity grid)
@@ -106,6 +106,53 @@ pub struct NeedleTargets {
     pub phi_gain_shift: [f64; 4],
 }
 
+/// Demand bucket: absorption derives from companions, intensities fold to
+/// their own quantity, phase demands to their element pair.
+#[derive(Clone, Copy)]
+enum BucketKind {
+    Pair(usize),
+    Phi(usize),
+}
+
+/// Operating-point rows for activation, sliced to the demand angle.
+enum OpRows<'a> {
+    Intensity(&'a [f64]),
+    Absorption(&'a [f64], &'a [f64]),
+    Phase(&'a [Complex64]),
+}
+
+/// Operating-point sample in demand space (Δφ with the reference subtracted
+/// for PD demands). Shared by the pointwise and integral folds.
+fn sample_op_value(
+    rows: &OpRows,
+    sim: &SimCurves,
+    twl_i: f64,
+    t: &MeritTarget,
+    key: &MeritKey,
+    n_inc: Option<f64>,
+) -> f64 {
+    match rows {
+        OpRows::Intensity(r) => interp_clamped(&sim.wavelengths, r, twl_i),
+        OpRows::Absorption(r, t2) => {
+            1.0 - interp_clamped(&sim.wavelengths, r, twl_i)
+                - interp_clamped(&sim.wavelengths, t2, twl_i)
+        },
+        OpRows::Phase(c) => {
+            let mut a = cinterp_clamped(&sim.wavelengths, c, twl_i).arg();
+            if let Some(passes) = t.differential_passes {
+                a -= crate::optics_core::reference_phase(
+                    twl_i,
+                    n_inc.unwrap_or(1.0),
+                    key.angle,
+                    sim.total_d,
+                    passes,
+                );
+            }
+            a
+        },
+    }
+}
+
 /// Fold a [`MeritSpec`] into flat per-quantity needle inputs.
 ///
 /// * Intensity demands (front and back R/T) fold to their own quantity
@@ -144,10 +191,7 @@ pub fn build_needle_targets(
 
     for t in spec.targets() {
         let key = &spec.keys()[t.key_idx as usize];
-        // Demand bucket: absorption derives from companions, intensities
-        // fold to their own quantity, phase demands to their element pair.
         // (index-based so the loop holds no &mut across iterations)
-        enum BucketKind { Pair(usize), Phi(usize) }
         let bucket = if t.phase {
             match key.curve.phase_channel() {
                 Some(ch) => BucketKind::Phi(ch),
@@ -198,11 +242,6 @@ pub fn build_needle_targets(
         // banded/one-sided kinds fold conservatively). Rows are sliced to
         // the demand angle (the old code sampled the whole row-major
         // array, misreading multi-angle sims).
-        enum OpRows<'a> {
-            Intensity(&'a [f64]),
-            Absorption(&'a [f64], &'a [f64]),
-            Phase(&'a [Complex64]),
-        }
         let op: Option<OpRows> = match current_sim {
             None => None,
             Some(sim) => {
@@ -243,6 +282,16 @@ pub fn build_needle_targets(
         let n_inc = current_sim.map(|sim| {
             if key.curve.is_back() { sim.n_back_re } else { sim.n_front_re }
         });
+        // Integral demands fold the MEAN (own two-pass block below): the
+        // mean-form merit is non-diagonal, so the fold matches its UNIFORM
+        // gradient (exact at the op point, values up to dropped constants —
+        // same loss class as the +1/overlap terms). Pointwise continues.
+        if t.integral {
+            fold_integral_demand(t, key, twl, current_sim, &op, n_inc,
+                row, wavelengths, nw, bucket, &mut buckets, &mut phi,
+                &mut phi_gain_shift)?;
+            continue;
+        }
         for &twl_i in twl.iter() {
             // Interpolate normalized target, tolerance and band half-width
             // onto this solver wavelength (edge-clamped; ascending grids).
@@ -261,27 +310,7 @@ pub fn build_needle_targets(
                 && t.transform == crate::synthesis::merit::SimTransform::Phase;
             let s_op: Option<f64> = match (current_sim, &op) {
                 (Some(sim), Some(rows)) => {
-                    let v = match rows {
-                        OpRows::Intensity(r) => interp_clamped(&sim.wavelengths, r, twl_i),
-                        OpRows::Absorption(r, t2) => {
-                            1.0 - interp_clamped(&sim.wavelengths, r, twl_i)
-                                - interp_clamped(&sim.wavelengths, t2, twl_i)
-                        },
-                        OpRows::Phase(c) => {
-                            let mut a = cinterp_clamped(&sim.wavelengths, c, twl_i).arg();
-                            if let Some(passes) = t.differential_passes {
-                                a -= crate::optics_core::reference_phase(
-                                    twl_i,
-                                    n_inc.unwrap_or(1.0),
-                                    key.angle,
-                                    sim.total_d,
-                                    passes,
-                                );
-                            }
-                            a
-                        },
-                    };
-                    Some(v)
+                    Some(sample_op_value(rows, sim, twl_i, t, key, n_inc))
                 },
                 _ => None,
             };
@@ -338,6 +367,11 @@ pub fn build_needle_targets(
                 },
             };
             let Some((rt, w)) = folded else { continue };
+            // User weight + count normalization, applied once at emission:
+            // folded merit scales by weight/count exactly, and the gain
+            // shift below inherits the scaled `w` consistently. Defaults
+            // (1.0/None) are the identity — legacy folds bit-safe.
+            let w = w * t.weight / t.count_norm.unwrap_or(1.0);
 
             let k = row * nw + solver_wav_index(wavelengths, twl_i);
             match bucket {
@@ -378,6 +412,174 @@ pub fn build_needle_targets(
     }
     let [r, t, a, rb, tb, ab] = buckets;
     Ok(NeedleTargets { r, t, a, rb, tb, ab, phi, phi_gain_shift })
+}
+
+/// How an integral demand emits after mean activation.
+enum IntGap {
+    Skip,
+    /// Centre form at the op mean (Exact / violated one-sided).
+    CentreMean(f64),
+    /// Reduced-weight centre form (CenterBand inside).
+    InsideMean(f64),
+    /// Edge form at the op mean (Range / CenterBand outside).
+    EdgeMean(f64, f64),
+    /// No sim yet: per-point raw targets, Exact-like weight.
+    Conservative,
+}
+
+/// Fold ONE integral demand (see the call site for the derivation): the
+/// mean-form merit `W·(m−T)²` is non-diagonal, so the fold matches its
+/// UNIFORM gradient — exact at the operating point — with per-point pairs
+/// `w_i = W_eff/N²`, `t_i = s_i − N·G` (`G` = raw gap to the centre/edge
+/// mean, `N` = demand count). Values differ by dropped constants (same
+/// loss class as the +1/overlap terms); gradients — what the needle
+/// consumes — are exact, and overlapping integral frames superpose
+/// gradient-exactly. Without sim, conservative centre form.
+#[allow(clippy::too_many_arguments)]
+fn fold_integral_demand(
+    t: &MeritTarget,
+    key: &MeritKey,
+    twl: &[f64],
+    current_sim: Option<&SimCurves>,
+    op: &Option<OpRows>,
+    n_inc: Option<f64>,
+    row: usize,
+    wavelengths: &[f64],
+    nw: usize,
+    bucket: BucketKind,
+    buckets: &mut [(Vec<f64>, Vec<f64>); 6],
+    phi: &mut [(Vec<f64>, Vec<f64>); 4],
+    phi_gain_shift: &mut [f64; 4],
+) -> Result<(), String> {
+    use crate::synthesis::merit::{ConstraintKind, SimTransform};
+    let n = twl.len() as f64;
+    let nf = t.norm_factor;
+    let wrap_phase =
+        t.phase && t.transform == SimTransform::Phase;
+    // Pass 1: means of normalized target / tol / band.
+    let mut t_bar = 0.0;
+    let mut tol_sum = 0.0;
+    let mut bw_sum = 0.0;
+    for &twl_i in twl {
+        t_bar += interp_clamped(twl, &t.normalized_targets, twl_i);
+        tol_sum += interp_clamped(twl, &t.tolerances, twl_i).max(1e-300);
+        bw_sum += if t.band.is_empty() {
+            0.0
+        } else {
+            interp_clamped(twl, &t.band, twl_i).max(0.0)
+        };
+    }
+    t_bar /= n;
+    let tol_bar = (tol_sum / n).max(1e-300);
+    let bw_bar = bw_sum / n;
+    let t_raw = t_bar / nf;
+    // Pass 2: op means (None before the first simulation).
+    let mut s_vals: Vec<f64> = Vec::new();
+    let opm: Option<(f64, f64)> = match (current_sim, op) {
+        (Some(sim), Some(rows)) => {
+            let mut m = 0.0;
+            let mut d = 0.0;
+            s_vals.reserve(twl.len());
+            for &twl_i in twl {
+                let s = sample_op_value(rows, sim, twl_i, t, key, n_inc);
+                s_vals.push(s);
+                m += s;
+                let tgt_j = interp_clamped(twl, &t.normalized_targets, twl_i);
+                let mut dj = s * nf - tgt_j;
+                if wrap_phase {
+                    dj -= std::f64::consts::TAU * (dj / std::f64::consts::TAU).round();
+                }
+                d += dj;
+            }
+            Some((m / n, d / n))
+        },
+        _ => None,
+    };
+    let w_centre = t.weight * nf * nf / (tol_bar * tol_bar);
+    // Kind activation on the mean residual R = d_bar / tol_bar.
+    let gap = match t.kind {
+        ConstraintKind::Exact => match opm {
+            Some((m, _)) => IntGap::CentreMean(m),
+            None => IntGap::Conservative,
+        },
+        ConstraintKind::Above => match opm {
+            Some((m, d_bar)) if d_bar / tol_bar >= 0.0 => IntGap::Skip,
+            Some((m, _)) => IntGap::CentreMean(m),
+            None => IntGap::Conservative,
+        },
+        ConstraintKind::Below => match opm {
+            Some((m, d_bar)) if d_bar / tol_bar <= 0.0 => IntGap::Skip,
+            Some((m, _)) => IntGap::CentreMean(m),
+            None => IntGap::Conservative,
+        },
+        ConstraintKind::Range => {
+            let bw_eff = if bw_bar <= 0.0 { tol_bar } else { bw_bar };
+            match opm {
+                None => IntGap::Conservative,
+                Some((m, d_bar)) if d_bar.abs() <= bw_eff => IntGap::Skip,
+                Some((m, _)) => IntGap::EdgeMean(m, bw_eff),
+            }
+        },
+        ConstraintKind::CenterBand => {
+            if bw_bar <= 0.0 {
+                // Degrades to Exact (mirrors the pointwise rule).
+                match opm {
+                    Some((m, _)) => IntGap::CentreMean(m),
+                    None => IntGap::Conservative,
+                }
+            } else {
+                match opm {
+                    None => IntGap::Conservative,
+                    Some((m, d_bar)) if d_bar.abs() <= bw_bar => IntGap::InsideMean(m),
+                    Some((m, _)) => IntGap::EdgeMean(m, bw_bar),
+                }
+            }
+        },
+    };
+    if matches!(gap, IntGap::Skip) {
+        return Ok(());
+    }
+    let w_inside = t.weight * nf * nf / (bw_bar * bw_bar);
+    // d_bar for the edge gap (opm is Some whenever we emit edge forms).
+    let d_bar = opm.map(|(_, d)| d).unwrap_or(0.0);
+    for (j, &twl_i) in twl.iter().enumerate() {
+        let (rt_j, w_j) = match &gap {
+            IntGap::Skip => unreachable!("returned above"),
+            IntGap::Conservative => {
+                let tj = interp_clamped(twl, &t.normalized_targets, twl_i) / nf;
+                (tj, w_centre / (n * n))
+            },
+            IntGap::CentreMean(m) => (s_vals[j] - n * (m - t_raw), w_centre / (n * n)),
+            IntGap::InsideMean(m) => (s_vals[j] - n * (m - t_raw), w_inside / (n * n)),
+            IntGap::EdgeMean(_, bw_eff) => {
+                let g = d_bar.signum() * (d_bar.abs() - bw_eff) / nf;
+                (s_vals[j] - n * g, w_centre / (n * n))
+            },
+        };
+        let k = row * nw + solver_wav_index(wavelengths, twl_i);
+        match bucket {
+            BucketKind::Pair(i) => {
+                buckets[i].1[k] += w_j;
+                buckets[i].0[k] += w_j * rt_j;
+            },
+            BucketKind::Phi(ch) => {
+                phi[ch].1[k] += w_j;
+                phi[ch].0[k] += w_j * rt_j;
+                // Gain shift with the EMITTED pair (exact dM/dD at the op
+                // point — the uniform-gradient construction makes the
+                // per-emission formula land on −2·W·(m−T)·mean(kz)).
+                // No-sim arm has no op value → contributes 0.
+                if let (Some(passes), Some(nn), Some(&s)) =
+                    (t.differential_passes, n_inc, s_vals.get(j))
+                {
+                    let kz = passes
+                        * crate::optics_core::reference_wavenumber(twl_i, nn, key.angle);
+                    phi_gain_shift[ch] += -2.0 * kz * w_j * (s - rt_j);
+                }
+            },
+        }
+    }
+    Ok(())
 }
 
 /// One angle row of a row-major [n_angles, n_wav] sim curve.
@@ -831,6 +1033,9 @@ mod tests {
             band: vec![].into(),
             phase: true,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         spec
@@ -848,6 +1053,9 @@ mod tests {
             band: vec![].into(),
             phase: true,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         }
     }
 
@@ -874,6 +1082,9 @@ mod tests {
             band: band.to_vec().into(),
             phase: false,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         spec
@@ -915,6 +1126,9 @@ mod tests {
             band: vec![].into(),
             phase: true,
             differential_passes: Some(1.0),
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         let mk_sim = |d: f64| {
@@ -955,6 +1169,158 @@ mod tests {
         // ref(400) = π/2 exactly.
         assert!((spec.merit(&mk_sim(100.0), 1e6) - 0.08).abs() < 1e-12);
         assert!((ref_of(400.0) - PI / 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn fold_applies_weight_and_count() {
+        // Exact Rs demand, nf = 1, tol 0.1 → base folded w = 100 at 400.
+        // weight 3 + count 2 → 150; raw target untouched.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: vec![400.0].into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Linear,
+            norm_factor: 1.0,
+            normalized_targets: vec![0.5].into(),
+            tolerances: vec![0.1].into(),
+            band: vec![].into(),
+            phase: false,
+            differential_passes: None,
+            integral: false,
+            weight: 3.0,
+            count_norm: Some(2.0),
+        })
+        .unwrap();
+        let nt = build_needle_targets(&spec, &[0.0], &[400.0], None).unwrap();
+        assert!((nt.r.1[0] - 150.0).abs() < 1e-9, "w={}", nt.r.1[0]);
+        assert!((nt.r.0[0] - 0.5).abs() < 1e-14);
+        // Gain shift inherits the same factor (PD demand, weight 2 →
+        // shift doubles vs the unweighted `phi_gain_shift_matches_fd`).
+        use std::f64::consts::TAU;
+        let ref_of = |wl: f64| TAU * 100.0 / wl;
+        let mut pspec = MeritSpec::new();
+        let pk = pspec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        let tgt: Vec<f64> = [400.0].iter().map(|&w| 0.3 - ref_of(w) + 0.01).collect();
+        pspec.add_target(MeritTarget {
+            key_idx: pk as u32,
+            wavelengths: vec![400.0].into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Phase,
+            norm_factor: 1.0,
+            normalized_targets: tgt.into(),
+            tolerances: vec![0.05].into(),
+            band: vec![].into(),
+            phase: true,
+            differential_passes: Some(1.0),
+            integral: false,
+            weight: 2.0,
+            count_norm: None,
+        })
+        .unwrap();
+        let mut sim = SimCurves {
+            angles: vec![0.0].into(),
+            wavelengths: vec![400.0].into(),
+            curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
+            total_d: 100.0,
+            n_front_re: 1.0,
+            n_back_re: 1.0,
+        };
+        sim.cplx[3] = Some(vec![Complex64::from_polar(0.7, 0.3)].into());
+        let pnt = build_needle_targets(&pspec, &[0.0], &[400.0], Some(&sim)).unwrap();
+        // Hand: −2·kz·w·Δ with w = 2/0.05² = 800, Δ = −0.01.
+        let expect = -2.0 * (TAU / 400.0) * 800.0 * (-0.01);
+        assert!((pnt.phi_gain_shift[2] - expect).abs() < 1e-9,
+            "shift={} expect={}", pnt.phi_gain_shift[2], expect);
+    }
+
+    fn spec_integral(angle: f64, kind: ConstraintKind) -> MeritSpec {
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle, curve: CurveId::Rs });
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: vec![400.0, 500.0, 600.0].into(),
+            kind,
+            transform: SimTransform::Linear,
+            norm_factor: 1.0,
+            normalized_targets: vec![0.5, 0.5, 0.5].into(),
+            tolerances: vec![0.1, 0.1, 0.1].into(),
+            band: vec![].into(),
+            phase: false,
+            differential_passes: None,
+            weight: 1.0,
+            count_norm: None,
+            integral: true,
+        })
+        .unwrap();
+        spec
+    }
+
+    fn sim_rs(vals: [f64; 3]) -> SimCurves {
+        let mut sim = SimCurves {
+            angles: vec![0.0].into(),
+            wavelengths: vec![400.0, 500.0, 600.0].into(),
+            curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
+            ..Default::default()
+        };
+        sim.curves[CurveId::Rs.index()] = Some(vec![vals[0], vals[1], vals[2]].into());
+        sim
+    }
+
+    #[test]
+    fn integral_fold_uniform_gradient() {
+        // Exact integral, sim [0.7, 0.6, 0.5]: m = 0.6, T = 0.5, N = 3,
+        // W = 1/0.01 = 100. True per-point gradient g = 2·W·(m−T)/N =
+        // 200·0.1/3 ≈ 6.6667 — UNIFORM across the band. Folded pairs must
+        // reproduce exactly that: 2·w_i·(s_i−t_i) == g for every i.
+        let spec = spec_integral(0.0, ConstraintKind::Exact);
+        let sim = sim_rs([0.7, 0.6, 0.5]);
+        let nt = build_needle_targets(&spec, &[0.0], &[400.0, 500.0, 600.0],
+            Some(&sim)).unwrap();
+        let g = 2.0 * 100.0 * 0.1 / 3.0;
+        // Direct: folded w_i = W/N² = 100/9, t_i = s_i − N·G = s_i − 0.3.
+        for i in 0..3 {
+            assert!((nt.r.1[i] - 100.0 / 9.0).abs() < 1e-9, "w[{}]={}", i, nt.r.1[i]);
+            let expect_t = [0.7, 0.6, 0.5][i] - 0.3;
+            assert!((nt.r.0[i] - expect_t).abs() < 1e-12, "t[{}]={}", i, nt.r.0[i]);
+            // Per-point folded gradient 2·w·(s−t) equals the uniform g.
+            let gi = 2.0 * nt.r.1[i] * ([0.7, 0.6, 0.5][i] - nt.r.0[i]);
+            assert!((gi - g).abs() < 1e-9, "g[{i}]={gi} expect={g}");
+        }
+        // Uniform-shift FD: dM/dε for s→s+ε must equal Σ folded gradients.
+        let h = 1e-6;
+        let m_hi = spec.merit(&sim_rs([0.7 + h, 0.6 + h, 0.5 + h]), 1e6);
+        let m_lo = spec.merit(&sim_rs([0.7 - h, 0.6 - h, 0.5 - h]), 1e6);
+        let fd = (m_hi - m_lo) / (2.0 * h);
+        assert!((fd - 3.0 * g).abs() < 1e-6, "fd={fd} expect={}", 3.0 * g);
+    }
+
+    #[test]
+    fn integral_range_skips_inband_mean() {
+        // Range integral, band 0.05: mean diff 0.04 → all weights zero.
+        let mut spec = spec_integral(0.0, ConstraintKind::Range);
+        // (spec_integral has empty band → bare-r fallback ±tol = ±0.1;
+        // mean diff 0.04 is inside → skip.)
+        let sim = sim_rs([0.54, 0.54, 0.54]);
+        let nt = build_needle_targets(&spec, &[0.0], &[400.0, 500.0, 600.0],
+            Some(&sim)).unwrap();
+        assert!(nt.r.1.iter().all(|&w| w == 0.0));
+        // Mean diff 0.2 → violated: uniform edge pairs, w = 100/9 each.
+        let sim2 = sim_rs([0.7, 0.7, 0.7]);
+        let nt2 = build_needle_targets(&spec, &[0.0], &[400.0, 500.0, 600.0],
+            Some(&sim2)).unwrap();
+        for i in 0..3 {
+            assert!((nt2.r.1[i] - 100.0 / 9.0).abs() < 1e-9);
+            // edge gap G = (0.2−0.1)/1 = 0.1 → t = 0.7 − 0.3 = 0.4.
+            assert!((nt2.r.0[i] - 0.4).abs() < 1e-12, "t[{}]={}", i, nt2.r.0[i]);
+        }
     }
 
     #[test]
@@ -1000,6 +1366,9 @@ mod tests {
             band: vec![].into(),
             phase: false,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         };
         let (nfa, nfb) = (2.0_f64, 3.0_f64);
         spec.add_target(mk(0.4 * nfa, 0.1, nfa)).unwrap();
@@ -1173,6 +1542,9 @@ mod tests {
             band: vec![].into(),
             phase: false,
             differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
         })
         .unwrap();
         assert!(build_needle_targets(&spec_log, &[0.0], &[400.0], None).is_err());
