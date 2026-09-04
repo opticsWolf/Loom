@@ -237,6 +237,12 @@ pub fn build_needle_targets(
         };
 
         let twl: &[f64] = &t.wavelengths;
+        // Loop-invariant: the demand's incidence medium (None without sim).
+        // Hoisted — the per-point loop below must stay lean for
+        // intensity-only demand sets.
+        let n_inc = current_sim.map(|sim| {
+            if key.curve.is_back() { sim.n_back_re } else { sim.n_front_re }
+        });
         for &twl_i in twl.iter() {
             // Interpolate normalized target, tolerance and band half-width
             // onto this solver wavelength (edge-clamped; ascending grids).
@@ -253,9 +259,6 @@ pub fn build_needle_targets(
             // Residuals wrap exactly when the evaluator would (Phase mode).
             let wrap_phase = t.phase
                 && t.transform == crate::synthesis::merit::SimTransform::Phase;
-            let n_inc = current_sim.map(|sim| {
-                if key.curve.is_back() { sim.n_back_re } else { sim.n_front_re }
-            });
             let s_op: Option<f64> = match (current_sim, &op) {
                 (Some(sim), Some(rows)) => {
                     let v = match rows {

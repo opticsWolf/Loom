@@ -114,20 +114,31 @@ impl SmatrixContext {
         curves[CurveId::Rp.index()] = Some(mk(CurveId::Rp));
         curves[CurveId::Ts.index()] = Some(mk(CurveId::Ts));
         curves[CurveId::Tp.index()] = Some(mk(CurveId::Tp));
-        // Complex forward-t rows for (differential-)phase demands.
+        // Complex forward-t rows for (differential-)phase demands — ONLY
+        // when the spec asks (two allocations + O(grid) copies saved per
+        // merit call for intensity-only optimizations; the amplitudes
+        // themselves come from the dual solver regardless).
         let mut cplx: [Option<Arc<[Complex64]>>; 6] = [None, None, None, None, None, None];
-        cplx[CurveId::Ts.index()] =
-            Some(pts.iter().map(|p| p.tfs).collect::<Vec<_>>().into());
-        cplx[CurveId::Tp.index()] =
-            Some(pts.iter().map(|p| p.tfp).collect::<Vec<_>>().into());
+        if self.spec.uses_phase() {
+            cplx[CurveId::Ts.index()] =
+                Some(pts.iter().map(|p| p.tfs).collect::<Vec<_>>().into());
+            cplx[CurveId::Tp.index()] =
+                Some(pts.iter().map(|p| p.tfp).collect::<Vec<_>>().into());
+        }
         // Stack metadata for the PD reference: ambient/substrate thickness
         // entries are zero, so the plain sum is the coating thickness D;
         // ambient index at the centre wavelength (dispersive ambients are
         // pathological — the scalar is a documented approximation).
-        let total_d: f64 = sa.thicknesses.iter().sum();
-        let n_front_re = sa.n_stack_cache[(nw / 2) * nl * 2];
-        // Substrate exit index (back-phase reference; unused front-only).
-        let n_back_re = sa.n_stack_cache[(nw / 2) * nl * 2 + (nl - 1) * 2];
+        // Gated the same way (defaults zero the reference anyway).
+        let (total_d, n_front_re, n_back_re) = if self.spec.uses_differential() {
+            let total_d: f64 = sa.thicknesses.iter().sum();
+            let n_front_re = sa.n_stack_cache[(nw / 2) * nl * 2];
+            // Substrate exit index (back-phase reference; unused front-only).
+            let n_back_re = sa.n_stack_cache[(nw / 2) * nl * 2 + (nl - 1) * 2];
+            (total_d, n_front_re, n_back_re)
+        } else {
+            (0.0, 1.0, 1.0)
+        };
 
         Ok(SimCurves {
             angles: self.sin_theta.clone().into(),
@@ -255,6 +266,34 @@ mod tests {
         }
     }
 
+    /// Context whose spec demands PDts (Ts, phase, 1 pass): `simulate()`
+    /// must then fill complex-t rows + reference metadata (gated assembly).
+    fn ar_ctx_pd() -> SmatrixContext {
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: vec![1000.0].into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Phase,
+            norm_factor: 1.0,
+            normalized_targets: vec![0.0].into(),
+            tolerances: vec![0.05].into(),
+            band: vec![].into(),
+            phase: true,
+            differential_passes: Some(1.0),
+        })
+        .unwrap();
+        SmatrixContext {
+            wavls: vec![900.0, 1000.0, 1100.0],
+            sin_theta: vec![0.0],
+            spec,
+            clamp_min_nm: 2.0,
+            clamp_max_nm: 1000.0,
+            lm: LmConfig::default(),
+        }
+    }
+
     #[test]
     fn energy_conservation_lossless_stack() {
         // R + T == 1 for a lossless coherent stack at normal incidence.
@@ -335,10 +374,27 @@ mod tests {
         let slab = DesignStack::with_films(
             ambient, substrate, vec![LayerSpec::constant("F", 1.0, 0.0, 500.0, nw)],
         ).unwrap();
+        // NOTE: empty spec → gated assembly skips complex rows, so this
+        // calibration context carries a (value-irrelevant) phase demand.
+        let mut pd_spec = MeritSpec::new();
+        let pk = pd_spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        pd_spec.add_target(MeritTarget {
+            key_idx: pk as u32,
+            wavelengths: vec![400.0].into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Phase,
+            norm_factor: 1.0,
+            normalized_targets: vec![0.0].into(),
+            tolerances: vec![0.05].into(),
+            band: vec![].into(),
+            phase: true,
+            differential_passes: None,
+        })
+        .unwrap();
         let ctx = SmatrixContext {
             wavls: vec![400.0],
             sin_theta: vec![0.0],
-            spec: MeritSpec::new(),
+            spec: pd_spec,
             clamp_min_nm: 2.0,
             clamp_max_nm: 1000.0,
             lm: LmConfig::default(),
@@ -355,10 +411,27 @@ mod tests {
     }
 
     #[test]
+    fn gated_assembly_skips_unrequested_rows() {
+        // Intensity-only spec: no complex rows, default metadata (the
+        // premise — unrequested paths stay dark in the hot LM loop).
+        let ctx = ar_ctx(1000.0);
+        assert!(!ctx.spec.uses_phase());
+        assert!(!ctx.spec.uses_differential());
+        let sim = ctx.simulate(&ar_stack(200.0)).unwrap();
+        assert!(sim.cplx.iter().all(|c| c.is_none()));
+        assert_eq!(sim.total_d, 0.0);
+        assert_eq!((sim.n_front_re, sim.n_back_re), (1.0, 1.0));
+        // Phase-demanding spec flips both gates.
+        let ctx_pd = ar_ctx_pd();
+        assert!(ctx_pd.spec.uses_phase());
+        assert!(ctx_pd.spec.uses_differential());
+    }
+
+    #[test]
     fn simulate_fills_pd_metadata_and_complex_t() {
         let n_l = 1.52_f64.sqrt();
         let d = 200.0;
-        let ctx = ar_ctx(1000.0);
+        let ctx = ar_ctx_pd();
         let stack = ar_stack(d);
         let sim = ctx.simulate(&stack).unwrap();
         // Metadata: coating thickness + media.
@@ -390,7 +463,7 @@ mod tests {
         // Δφ = arg(t_oracle) − 2π·D/λ (air, normal) demanded exactly → ~0.
         let n_l = 1.52_f64.sqrt();
         let d = 200.0;
-        let mut ctx = ar_ctx(1000.0);
+        let mut ctx = ar_ctx_pd();
         let stack = ar_stack(d);
         let sim = ctx.simulate(&stack).unwrap();
         let mut spec = MeritSpec::new();
@@ -425,7 +498,7 @@ mod tests {
         let n_l = 1.52_f64.sqrt();
         let d_qw = 1000.0 / (4.0 * n_l);
         let qw_stack = ar_stack(d_qw);
-        let probe = ar_ctx(1000.0);
+        let probe = ar_ctx_pd();
         let qw_sim = probe.simulate(&qw_stack).unwrap();
         let qw_phase = qw_sim.cplx[CurveId::Ts.index()].as_ref().unwrap()[1].arg();
         let ref_qw = 2.0 * std::f64::consts::PI * d_qw / 1000.0;

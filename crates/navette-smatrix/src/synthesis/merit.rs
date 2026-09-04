@@ -509,6 +509,20 @@ impl MeritSpec {
         Ok(())
     }
 
+    /// True if any demand samples complex amplitudes (phase or
+    /// differential-phase). The evaluator uses this to skip complex-row
+    /// assembly for intensity-only specs — virtually-free values are always
+    /// built, requested ones only on demand.
+    pub fn uses_phase(&self) -> bool {
+        self.targets.iter().any(|t| t.phase)
+    }
+
+    /// True if any demand subtracts the equivalent-medium reference.
+    /// Gates the (trivial but non-zero) stack-metadata computation.
+    pub fn uses_differential(&self) -> bool {
+        self.targets.iter().any(|t| t.differential_passes.is_some())
+    }
+
     pub fn keys(&self) -> &[MeritKey] {
         &self.keys
     }
@@ -686,8 +700,8 @@ impl MeritSpec {
             // Differential-phase reference for this key (front/back medium
             // + total thickness from the sim metadata; None = absolute).
             // `key.angle` is degrees (converter convention); the reference
-            // helper converts internally.
-            let n_inc = if key.curve.is_back() { sim.n_back_re } else { sim.n_front_re };
+            // helper converts internally. The medium lookup stays INSIDE
+            // the `if let` below so non-differential keys pay nothing.
             let diff_passes = t.differential_passes;
             for i in 0..t_wl.len() {
                 let sim_raw = match &input {
@@ -698,6 +712,11 @@ impl MeritSpec {
                     TargetInput::Phase(crow) => {
                         let mut a = sample_c(crow, i, &mut sim_idx).arg();
                         if let Some(passes) = diff_passes {
+                            let n_inc = if key.curve.is_back() {
+                                sim.n_back_re
+                            } else {
+                                sim.n_front_re
+                            };
                             a -= crate::optics_core::reference_phase(
                                 t_wl[i],
                                 n_inc,

@@ -148,8 +148,10 @@ Evaluation points (all in solver convention — see the sign note below):
 - `SimCurves` carries `total_d`/`n_front_re`/`n_back_re` (defaults 0/1/1
   zero the reference); the thickness-optimizer evaluator fills them from
   the stack (ambient index at centre λ — dispersive ambients are
-  pathological, documented approximation). `total_d = 0` reproduces
-  absolute phase bit-for-bit.
+  pathological, documented approximation) — but only when the spec asks
+  (`uses_phase()` gates complex-row assembly, `uses_differential()` the
+  metadata; intensity-only LM loops pay zero extra allocations).
+  `total_d = 0` reproduces absolute phase bit-for-bit.
 - The merit Phase arm subtracts the reference before wrapping; the fold
   passes PD demands to the `phi` buckets unchanged (same channel as the
   absolute element) and additionally accumulates the exact `dM/dD`
