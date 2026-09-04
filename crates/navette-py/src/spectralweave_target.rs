@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use numpy::PyReadonlyArray1;
+use numpy::{PyArray, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use navette::spectralweave::opticalweaver::{OpticalKey, SpectralData, wl_bits_eq};
 use navette::spectralweave::targetweaver::{ResolvedNormMode, TargetKind, TargetWeaver};
@@ -90,6 +91,43 @@ impl PyTargetWeaver {
             self.inner.register_metadata(frame.uid, key, val_data, tol_data, k, &norm_mode, band_data);
             Ok(())
         })
+    }
+
+    /// Export every ingested entry for converters (insertion order): one dict
+    /// per (frame, key) with the grid, normalized values, tolerances, band,
+    /// kind/mode codes and norm factor — everything `MeritSpec` needs.
+    fn export_entries(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        let tw = &self.inner;
+        let meta = tw.target_metadata.read();
+        let mut out = Vec::new();
+        for frame in tw.inner.inner.frames_snapshot() {
+            let wl: Vec<f64> = frame.wavelength().to_vec();
+            let entries = match meta.get(&frame.uid) {
+                Some(m) => m,
+                None => continue,
+            };
+            for key in frame.keys() {
+                let entry = match entries.entries.get(&key) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                let (angle, polarization, spectral) = key.as_tuple();
+                let d = PyDict::new(py);
+                d.set_item("uid", frame.uid)?;
+                d.set_item("angle", angle)?;
+                d.set_item("polarization", polarization)?;
+                d.set_item("spectral", spectral)?;
+                d.set_item("wavelengths", PyArray::from_vec(py, wl.clone()))?;
+                d.set_item("targets", PyArray::from_vec(py, entry.normalized_targets.to_vec()))?;
+                d.set_item("tolerances", PyArray::from_vec(py, entry.tolerances.to_vec()))?;
+                d.set_item("band", PyArray::from_vec(py, entry.band.to_vec()))?;
+                d.set_item("kind", entry.kind.as_str())?;
+                d.set_item("mode", entry.resolved_mode.as_str())?;
+                d.set_item("norm_factor", entry.norm_factor)?;
+                out.push(d.unbind());
+            }
+        }
+        Ok(out)
     }
 
     #[pyo3(signature = (wavelength, angles, values, tolerances, polarization, spectral, kind, norm_mode, band=None))]

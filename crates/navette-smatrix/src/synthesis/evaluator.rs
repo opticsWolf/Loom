@@ -112,6 +112,7 @@ impl SmatrixContext {
             angles: self.sin_theta.clone().into(),
             wavelengths: self.wavls.clone().into(),
             curves,
+            ..Default::default()
         })
     }
 }
@@ -193,6 +194,7 @@ mod tests {
             normalized_targets: vec![0.0].into(), // R = 0 demanded
             tolerances: vec![0.01].into(),
             band: vec![].into(),
+            phase: false,
         })
         .unwrap();
         spec

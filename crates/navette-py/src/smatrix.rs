@@ -1468,6 +1468,9 @@ pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nelder_mead, m)?)?;
     m.add_function(wrap_pyfunction!(field_profile, m)?)?;
     m.add_function(wrap_pyfunction!(needle_engine, m)?)?;
+    m.add_class::<crate::synthesis_merit::PySimCurves>()?;
+    m.add_class::<crate::synthesis_merit::PyMeritSpec>()?;
+    m.add_function(wrap_pyfunction!(crate::synthesis_merit::build_needle_targets, m)?)?;
     m.add("NREQ_P", NREQ_P)?;
     m.add("NREQ_P_MB", NREQ_P_MB)?;
     m.add("NREQ_P_T", NREQ_P_T)?;

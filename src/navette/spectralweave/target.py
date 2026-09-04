@@ -52,6 +52,7 @@ class SpectralTarget:
     kind:         TargetType = "e"
     normalization_mode: NormalizationMode = "auto"
     band:         Union[np.ndarray, float, None] = None
+    phase:        bool = False
 
     def __post_init__(self) -> None:
         _validate_shapes(self.wavelengths, self.values, self.tolerances, label="SpectralTarget")
@@ -79,6 +80,7 @@ class AngularTarget:
     kind:         TargetType = "e"
     normalization_mode: NormalizationMode = "auto"
     band:         Union[np.ndarray, float, None] = None
+    phase:        bool = False
 
     def __post_init__(self) -> None:
         _validate_shapes(self.angles, self.values, self.tolerances, label="AngularTarget")

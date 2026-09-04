@@ -84,19 +84,30 @@ pub fn build_scan_sites(films: &[crate::synthesis::structure::LayerSpec], scan_s
 /// angle-major layout (k = a·num_wavs + w). All-zero pairs mean "no demands
 /// of that quantity" (the engine skips zero-weight points naturally) and
 /// feed straight into `needle_gradient`'s `targets_r/weights_r` (`.r`),
-/// `targets_t/weights_t` (`.t`) and `targets_a/weights_a` (`.a`).
+/// `targets_t/weights_t` (`.t`), `targets_a/weights_a` (`.a`), the
+/// back-incidence siblings (`.rb`, `.tb`, `.ab`), and one pair per
+/// S-matrix channel for phase demands (`.phi[0..=3]` → separate `P_PHI`
+/// calls, since the engine takes a single channel per call).
 pub struct NeedleTargets {
     pub r: (Vec<f64>, Vec<f64>),
     pub t: (Vec<f64>, Vec<f64>),
     pub a: (Vec<f64>, Vec<f64>),
+    pub rb: (Vec<f64>, Vec<f64>),
+    pub tb: (Vec<f64>, Vec<f64>),
+    pub ab: (Vec<f64>, Vec<f64>),
+    pub phi: [(Vec<f64>, Vec<f64>); 4],
 }
 
 /// Fold a [`MeritSpec`] into flat per-quantity needle inputs.
 ///
-/// * Intensity demands (Rs/Rp/Ru, Ts/Tp/Tu) fold to their own quantity
-///   bucket; absorption demands (As/Ap) derive A = 1 − R − T from the
-///   companion curves and fold to the absorption bucket.
-/// * Only **linear** normalization folds; Log/Phase/Complex return Err.
+/// * Intensity demands (front and back R/T) fold to their own quantity
+///   bucket; absorption demands (front and back) derive A = 1 − R − T from
+///   the companion curves and fold to the absorption buckets.
+/// * Phase demands fold to the `.phi[channel]` pair of their element
+///   (see `CurveId::phase_channel`); emit one `P_PHI` call per used channel.
+/// * Intensity/absorption demands require **linear** normalization;
+///   phase demands accept linear or phase (wrapped residuals mirror the
+///   evaluator). Anything else returns Err.
 /// * `current_sim`, when given, activates the one-sided and banded kinds at
 ///   the current operating point: satisfied Above/Below points and in-band
 ///   Range points contribute nothing; Range/CenterBand violations fold to
@@ -118,20 +129,43 @@ pub fn build_needle_targets(
     let na = angles.len();
     let nw = wavelengths.len();
     let zero = || (vec![0.0f64; na * nw], vec![0.0f64; na * nw]);
-    let (mut tr, mut wr) = zero();
-    let (mut tt, mut wt) = zero();
-    let (mut ta, mut wa) = zero();
+    let mut buckets: [(Vec<f64>, Vec<f64>); 6] =
+        [zero(), zero(), zero(), zero(), zero(), zero()];
+    let mut phi: [(Vec<f64>, Vec<f64>); 4] = [zero(), zero(), zero(), zero()];
 
     for t in spec.targets() {
         let key = &spec.keys()[t.key_idx as usize];
         // Demand bucket: absorption derives from companions, intensities
-        // fold to their own quantity.
-        let (bt, bw_): (&mut Vec<f64>, &mut Vec<f64>) = match key.curve {
-            CurveId::Rs | CurveId::Rp | CurveId::Ru => (&mut tr, &mut wr),
-            CurveId::Ts | CurveId::Tp | CurveId::Tu => (&mut tt, &mut wt),
-            CurveId::As | CurveId::Ap | CurveId::Au => (&mut ta, &mut wa),
+        // fold to their own quantity, phase demands to their element pair.
+        // (index-based so the loop holds no &mut across iterations)
+        enum BucketKind { Pair(usize), Phi(usize) }
+        let bucket = if t.phase {
+            match key.curve.phase_channel() {
+                Some(ch) => BucketKind::Phi(ch),
+                None => return Err(format!(
+                    "phase demand on {:?}: no S-matrix element", key.curve)),
+            }
+        } else {
+            BucketKind::Pair(match key.curve {
+                CurveId::Rs | CurveId::Rp | CurveId::Ru => 0,
+                CurveId::Ts | CurveId::Tp | CurveId::Tu => 1,
+                CurveId::As | CurveId::Ap | CurveId::Au => 2,
+                CurveId::RBs | CurveId::RBp | CurveId::RBu => 3,
+                CurveId::TBs | CurveId::TBp | CurveId::TBu => 4,
+                CurveId::ABs | CurveId::ABp | CurveId::ABu => 5,
+            })
         };
-        if t.transform != crate::synthesis::merit::SimTransform::Linear {
+        if t.phase {
+            if !matches!(t.transform,
+                crate::synthesis::merit::SimTransform::Linear |
+                crate::synthesis::merit::SimTransform::Phase)
+            {
+                return Err(format!(
+                    "phase demands need linear/phase normalization; got {:?}",
+                    t.transform
+                ));
+            }
+        } else if t.transform != crate::synthesis::merit::SimTransform::Linear {
             return Err(format!(
                 "needle pass requires linear-normalized targets; got {:?}",
                 t.transform
@@ -151,11 +185,16 @@ pub fn build_needle_targets(
         }
 
         // Operating-point rows for activation (None before the first
-        // simulation, or when an absorption companion is missing — then
+        // simulation, or when a companion/complex row is missing — then
         // banded/one-sided kinds fold conservatively). Rows are sliced to
         // the demand angle (the old code sampled the whole row-major
         // array, misreading multi-angle sims).
-        let op_rows: Option<(&[f64], Option<&[f64]>)> = match current_sim {
+        enum OpRows<'a> {
+            Intensity(&'a [f64]),
+            Absorption(&'a [f64], &'a [f64]),
+            Phase(&'a [Complex64]),
+        }
+        let op: Option<OpRows> = match current_sim {
             None => None,
             Some(sim) => {
                 let ar = sim.angle_row(key.angle);
@@ -163,14 +202,26 @@ pub fn build_needle_targets(
                 if nws == 0 {
                     None
                 } else {
-                    match key.curve.absorption_companions() {
-                        Some((rc, tc)) => match (sim.curve(rc), sim.curve(tc)) {
-                            (Some(r), Some(t)) => {
-                                Some((sim_row(r, ar, nws), Some(sim_row(t, ar, nws))))
+                    let irow = |id: CurveId| -> Option<&[f64]> {
+                        let arc = if id.is_back() { sim.back_curve(id) } else { sim.curve(id) };
+                        arc.map(|c| sim_row(c, ar, nws))
+                    };
+                    if t.phase {
+                        // Registration guarantees a phaseable key.
+                        let crow = if key.curve.is_back() {
+                            sim.complex_back_curve(key.curve)
+                        } else {
+                            sim.complex_curve(key.curve)
+                        };
+                        crow.map(|c| OpRows::Phase(&c[ar * nws..(ar + 1) * nws]))
+                    } else {
+                        match key.curve.absorption_companions() {
+                            Some((rc, tc)) => match (irow(rc), irow(tc)) {
+                                (Some(r), Some(t2)) => Some(OpRows::Absorption(r, t2)),
+                                _ => None,
                             },
-                            _ => None,
-                        },
-                        None => sim.curve(key.curve).map(|c| (sim_row(c, ar, nws), None)),
+                            None => irow(key.curve).map(OpRows::Intensity),
+                        }
                     }
                 }
             },
@@ -188,15 +239,27 @@ pub fn build_needle_targets(
 
             // Operating-point residual for activation (None before the
             // first simulation). Absorption samples A = 1 − R − T from
-            // the companion rows on the sim grid.
-            let d_opt: Option<f64> = match (current_sim, &op_rows) {
-                (Some(sim), Some((r1, r2))) => {
-                    let v1 = interp_clamped(&sim.wavelengths, r1, twl_i);
-                    let v = match r2 {
-                        Some(r2) => 1.0 - v1 - interp_clamped(&sim.wavelengths, r2, twl_i),
-                        None => v1,
+            // the companion rows; phase samples arg() of the complex row,
+            // wrapped exactly when the evaluator would wrap (Phase mode).
+            let wrap_phase = t.phase
+                && t.transform == crate::synthesis::merit::SimTransform::Phase;
+            let d_opt: Option<f64> = match (current_sim, &op) {
+                (Some(sim), Some(rows)) => {
+                    let v = match rows {
+                        OpRows::Intensity(r) => interp_clamped(&sim.wavelengths, r, twl_i),
+                        OpRows::Absorption(r, t2) => {
+                            1.0 - interp_clamped(&sim.wavelengths, r, twl_i)
+                                - interp_clamped(&sim.wavelengths, t2, twl_i)
+                        },
+                        OpRows::Phase(c) => {
+                            cinterp_clamped(&sim.wavelengths, c, twl_i).arg()
+                        },
                     };
-                    Some(v * t.norm_factor - tgt_norm)
+                    let mut d = v * t.norm_factor - tgt_norm;
+                    if wrap_phase {
+                        d -= std::f64::consts::TAU * (d / std::f64::consts::TAU).round();
+                    }
+                    Some(d)
                 },
                 _ => None,
             };
@@ -248,25 +311,54 @@ pub fn build_needle_targets(
             let Some((rt, w)) = folded else { continue };
 
             let k = row * nw + solver_wav_index(wavelengths, twl_i);
-            bw_[k] += w;
-            bt[k] += w * rt;
+            match bucket {
+                BucketKind::Pair(i) => {
+                    buckets[i].1[k] += w;
+                    buckets[i].0[k] += w * rt;
+                },
+                BucketKind::Phi(ch) => {
+                    phi[ch].1[k] += w;
+                    phi[ch].0[k] += w * rt;
+                },
+            }
         }
     }
 
     // Accumulate W and W·t separately, then divide once (exact fold).
-    for (bt, bw_) in [(&mut tr, &mut wr), (&mut tt, &mut wt), (&mut ta, &mut wa)] {
+    for (bt, bw_) in buckets.iter_mut().map(|(t, w)| (t, w))
+        .chain(phi.iter_mut().map(|(t, w)| (t, w))) {
         for k in 0..bt.len() {
             if bw_[k] > 0.0 {
                 bt[k] /= bw_[k];
             }
         }
     }
-    Ok(NeedleTargets { r: (tr, wr), t: (tt, wt), a: (ta, wa) })
+    let [r, t, a, rb, tb, ab] = buckets;
+    Ok(NeedleTargets { r, t, a, rb, tb, ab, phi })
 }
 
 /// One angle row of a row-major [n_angles, n_wav] sim curve.
 fn sim_row(curve: &Arc<[f64]>, angle_row: usize, n_wav: usize) -> &[f64] {
     &curve[angle_row * n_wav..(angle_row + 1) * n_wav]
+}
+
+/// Complex twin of [`interp_clamped`] for phase operating points.
+fn cinterp_clamped(xs: &[f64], ys: &[Complex64], x: f64) -> Complex64 {
+    debug_assert_eq!(xs.len(), ys.len());
+    if xs.is_empty() {
+        return Complex64::new(0.0, 0.0);
+    }
+    if x <= xs[0] {
+        return ys[0];
+    }
+    let last = xs.len() - 1;
+    if x >= xs[last] {
+        return ys[last];
+    }
+    let hi = xs.partition_point(|&v| v < x).max(1);
+    let lo = hi - 1;
+    let t = (x - xs[lo]) / (xs[hi] - xs[lo]);
+    ys[lo] + (ys[hi] - ys[lo]) * t
 }
 
 fn solver_wav_index(wavelengths: &[f64], x: f64) -> usize {
@@ -674,6 +766,46 @@ mod tests {
         spec_banded(angle, curve, wl, norm_targets, tols, &[], nf, kind)
     }
 
+    fn spec_single_phase(
+        angle: f64,
+        curve: CurveId,
+        wl: &[f64],
+        norm_targets: &[f64],
+        tols: &[f64],
+        nf: f64,
+        kind: ConstraintKind,
+    ) -> MeritSpec {
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle, curve });
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: wl.to_vec().into(),
+            kind,
+            transform: SimTransform::Phase,
+            norm_factor: nf,
+            normalized_targets: norm_targets.to_vec().into(),
+            tolerances: tols.to_vec().into(),
+            band: vec![].into(),
+            phase: true,
+        })
+        .unwrap();
+        spec
+    }
+
+    fn entry_for_phase(key_idx: u32) -> MeritTarget {
+        MeritTarget {
+            key_idx,
+            wavelengths: vec![400.0].into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Phase,
+            norm_factor: 1.0,
+            normalized_targets: vec![1.0].into(),
+            tolerances: vec![0.1].into(),
+            band: vec![].into(),
+            phase: true,
+        }
+    }
+
     fn spec_banded(
         angle: f64,
         curve: CurveId,
@@ -695,6 +827,7 @@ mod tests {
             normalized_targets: norm_targets.to_vec().into(),
             tolerances: tols.to_vec().into(),
             band: band.to_vec().into(),
+            phase: false,
         })
         .unwrap();
         spec
@@ -705,6 +838,9 @@ mod tests {
             angles: vec![angle].into(),
             wavelengths: vec![wl].into(),
             curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
         };
         sim.curves[curve.index()] = Some(vec![val].into());
         sim
@@ -751,6 +887,7 @@ mod tests {
             normalized_targets: vec![norm_t].into(),
             tolerances: vec![tol].into(),
             band: vec![].into(),
+            phase: false,
         };
         let (nfa, nfb) = (2.0_f64, 3.0_f64);
         spec.add_target(mk(0.4 * nfa, 0.1, nfa)).unwrap();
@@ -781,6 +918,9 @@ mod tests {
             angles: vec![0.0].into(),
             wavelengths: vec![400.0].into(),
             curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
         };
         sim.curves[CurveId::Ru.index()] = Some(vec![0.7f64].into()); // above → satisfied
 
@@ -869,6 +1009,42 @@ mod tests {
     }
 
     #[test]
+    fn targets_builder_back_buckets() {
+        // RBs demand folds to the rb bucket (mirrors the R path).
+        let spec = spec_single(0.0, CurveId::RBs, &[400.0], &[0.4], &[0.1], 1.0,
+            ConstraintKind::Exact);
+        let nt = build_needle_targets(&spec, &[0.0], &[400.0], None).unwrap();
+        assert!((nt.rb.0[0] - 0.4).abs() < 1e-14);
+        assert!((nt.rb.1[0] - 100.0).abs() < 1e-9);
+        assert_eq!(nt.r.1[0], 0.0);
+    }
+
+    #[test]
+    fn targets_builder_phase_channel_pairs() {
+        // Phase demand on Rs folds to phi[0] with the outer weight;
+        // on Ts to phi[2]. No sim → conservative exact fold at centre.
+        for (curve, ch) in [(CurveId::Rs, 0), (CurveId::Ts, 2)] {
+            let spec = spec_single_phase(0.0, curve, &[400.0], &[1.0], &[0.1], 1.0,
+                ConstraintKind::Exact);
+            let nt = build_needle_targets(&spec, &[0.0], &[400.0], None).unwrap();
+            assert!((nt.phi[ch].0[0] - 1.0).abs() < 1e-14);
+            assert!((nt.phi[ch].1[0] - 100.0).abs() < 1e-9);
+            for (i, pair) in nt.phi.iter().enumerate() {
+                if i != ch {
+                    assert_eq!(pair.1[0], 0.0);
+                }
+            }
+        }
+        // Phase demand with a log transform cannot fold.
+        let mut spec_log = MeritSpec::new();
+        let k = spec_log.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        let mut tgt = entry_for_phase(k as u32);
+        tgt.transform = SimTransform::Log;
+        spec_log.add_target(tgt).unwrap();
+        assert!(build_needle_targets(&spec_log, &[0.0], &[400.0], None).is_err());
+    }
+
+    #[test]
     fn targets_builder_rejects_log() {
         // Log transform cannot fold → must be rejected.
         let mut spec_log = MeritSpec::new();
@@ -882,6 +1058,7 @@ mod tests {
             normalized_targets: vec![1.0].into(),
             tolerances: vec![0.01].into(),
             band: vec![].into(),
+            phase: false,
         })
         .unwrap();
         assert!(build_needle_targets(&spec_log, &[0.0], &[400.0], None).is_err());

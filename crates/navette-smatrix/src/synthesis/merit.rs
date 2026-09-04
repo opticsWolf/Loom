@@ -29,6 +29,8 @@
 
 use std::sync::Arc;
 
+use num_complex::Complex64;
+
 // ---------------------------------------------------------------------------
 // Vocabulary types
 // ---------------------------------------------------------------------------
@@ -48,8 +50,8 @@ pub enum Channel {
     T,
 }
 
-/// Identifies one simulated curve (mirrors `_RESULT_KEY_MAP`) or one
-/// derived absorptance demand.
+/// Identifies one simulated curve (mirrors `_RESULT_KEY_MAP`), one derived
+/// absorptance demand, or one back-incidence demand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CurveId {
     Rs,
@@ -64,10 +66,28 @@ pub enum CurveId {
     Ap,
     /// Absorptance demand (unpolarized): A = 1 − Ru − Tu, never stored.
     Au,
+    /// Back-reflectance (s): back-incidence experiment, `back` rows.
+    RBs,
+    /// Back-reflectance (p).
+    RBp,
+    /// Back-reflectance (unpolarized).
+    RBu,
+    /// Back-transmittance (s).
+    TBs,
+    /// Back-transmittance (p).
+    TBp,
+    /// Back-transmittance (unpolarized).
+    TBu,
+    /// Back-absorptance (s): A = 1 − RBs − TBs, never stored.
+    ABs,
+    /// Back-absorptance (p).
+    ABp,
+    /// Back-absorptance (unpolarized).
+    ABu,
 }
 
 impl CurveId {
-    pub const ALL: [CurveId; 9] = [
+    pub const ALL: [CurveId; 18] = [
         CurveId::Rs,
         CurveId::Rp,
         CurveId::Ru,
@@ -77,6 +97,15 @@ impl CurveId {
         CurveId::As,
         CurveId::Ap,
         CurveId::Au,
+        CurveId::RBs,
+        CurveId::RBp,
+        CurveId::RBu,
+        CurveId::TBs,
+        CurveId::TBp,
+        CurveId::TBu,
+        CurveId::ABs,
+        CurveId::ABp,
+        CurveId::ABu,
     ];
 
     pub fn new(pol: Pol, channel: Channel) -> Self {
@@ -90,9 +119,19 @@ impl CurveId {
         }
     }
 
-    /// True for the derived absorptance demands (`As`/`Ap`/`Au`).
+    /// True for the derived absorptance demands (`As`/`Ap`/`Au`/`ABs`/`ABp`/`ABu`).
     pub fn is_absorption(self) -> bool {
-        matches!(self, CurveId::As | CurveId::Ap | CurveId::Au)
+        matches!(self,
+            CurveId::As | CurveId::Ap | CurveId::Au |
+            CurveId::ABs | CurveId::ABp | CurveId::ABu)
+    }
+
+    /// True for back-incidence demands (`RB*`/`TB*`/`AB*`).
+    pub fn is_back(self) -> bool {
+        matches!(self,
+            CurveId::RBs | CurveId::RBp | CurveId::RBu |
+            CurveId::TBs | CurveId::TBp | CurveId::TBu |
+            CurveId::ABs | CurveId::ABp | CurveId::ABu)
     }
 
     /// Companion intensity curves an absorption demand derives from.
@@ -102,6 +141,9 @@ impl CurveId {
             CurveId::As => Some((CurveId::Rs, CurveId::Ts)),
             CurveId::Ap => Some((CurveId::Rp, CurveId::Tp)),
             CurveId::Au => Some((CurveId::Ru, CurveId::Tu)),
+            CurveId::ABs => Some((CurveId::RBs, CurveId::TBs)),
+            CurveId::ABp => Some((CurveId::RBp, CurveId::TBp)),
+            CurveId::ABu => Some((CurveId::RBu, CurveId::TBu)),
             _ => None,
         }
     }
@@ -119,6 +161,62 @@ impl CurveId {
             CurveId::As => 6,
             CurveId::Ap => 7,
             CurveId::Au => 8,
+            _ => panic!("back-incidence curves live in SimCurves::back (see back_index)"),
+        }
+    }
+
+    /// Index into `SimCurves::back` ([RBs, RBp, RBu, TBs, TBp, TBu]).
+    /// `None` for front demands (see `index`) and absorption demands.
+    pub fn back_index(self) -> Option<usize> {
+        match self {
+            CurveId::RBs => Some(0),
+            CurveId::RBp => Some(1),
+            CurveId::RBu => Some(2),
+            CurveId::TBs => Some(3),
+            CurveId::TBp => Some(4),
+            CurveId::TBu => Some(5),
+            _ => None,
+        }
+    }
+
+    /// S-matrix element a phase demand on this curve tracks: front R → 0,
+    /// front T → 2, back R → 3, back T → 1. `None` for absorption demands
+    /// (phase of absorption is meaningless) and unpolarized keys
+    /// (phase of averaged intensities is ill-defined).
+    pub fn phase_channel(self) -> Option<usize> {
+        match self {
+            CurveId::Rs | CurveId::Rp => Some(0),
+            CurveId::Ts | CurveId::Tp => Some(2),
+            CurveId::RBs | CurveId::RBp => Some(3),
+            CurveId::TBs | CurveId::TBp => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Parse curve codes: front `Rs/Rp/Ru/Ts/Tp/Tu`, absorption
+    /// `As/Ap/Au`, back `RBs/RBp/RBu/TBs/TBp/TBu` and `ABs/ABp/ABu`.
+    /// None for anything else.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "Rs" => Some(CurveId::Rs),
+            "Rp" => Some(CurveId::Rp),
+            "Ru" => Some(CurveId::Ru),
+            "Ts" => Some(CurveId::Ts),
+            "Tp" => Some(CurveId::Tp),
+            "Tu" => Some(CurveId::Tu),
+            "As" => Some(CurveId::As),
+            "Ap" => Some(CurveId::Ap),
+            "Au" => Some(CurveId::Au),
+            "RBs" => Some(CurveId::RBs),
+            "RBp" => Some(CurveId::RBp),
+            "RBu" => Some(CurveId::RBu),
+            "TBs" => Some(CurveId::TBs),
+            "TBp" => Some(CurveId::TBp),
+            "TBu" => Some(CurveId::TBu),
+            "ABs" => Some(CurveId::ABs),
+            "ABp" => Some(CurveId::ABp),
+            "ABu" => Some(CurveId::ABu),
+            _ => None,
         }
     }
 }
@@ -171,6 +269,19 @@ pub enum SimTransform {
     Complex,
 }
 
+impl SimTransform {
+    /// Parse `"linear"/"log"/"phase"/"complex"`; None for anything else.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "linear" => Some(SimTransform::Linear),
+            "log" => Some(SimTransform::Log),
+            "phase" => Some(SimTransform::Phase),
+            "complex" => Some(SimTransform::Complex),
+            _ => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Simulation curves
 // ---------------------------------------------------------------------------
@@ -187,11 +298,55 @@ pub struct SimCurves {
     /// Order: [Rs, Rp, Ru, Ts, Tp, Tu, As, Ap, Au]. Absorption slots stay
     /// `None`: absorptance is derived from the companion R/T curves.
     pub curves: [Option<Arc<[f64]>>; 9],
+    /// Back-incidence intensity rows: [RBs, RBp, RBu, TBs, TBp, TBu].
+    /// Back-absorptance derives from back companions; no slots of its own.
+    pub back: [Option<Arc<[f64]>>; 6],
+    /// Complex amplitudes for phase demands, front R/T curves only
+    /// (same indexing as `curves`; row-major [n_angles, n_wavs]).
+    pub cplx: [Option<Arc<[Complex64]>>; 6],
+    /// Complex back amplitudes for back-phase demands: [RBs, RBp, TBs, TBp]
+    /// (no unpolarized complex rows — back-phase needs s/p keys).
+    pub cplx_back: [Option<Arc<[Complex64]>>; 4],
 }
 
 impl SimCurves {
     pub fn curve(&self, id: CurveId) -> Option<&Arc<[f64]>> {
-        self.curves[id.index()].as_ref()
+        // Back-incidence rows live in `back` (see back_curve); absorption
+        // slots stay None (derived from companions).
+        match id.back_index() {
+            Some(_) => None,
+            None => self.curves.get(id.index()).and_then(|c| c.as_ref()),
+        }
+    }
+
+    /// Back-incidence intensity row, if supplied.
+    pub fn back_curve(&self, id: CurveId) -> Option<&Arc<[f64]>> {
+        id.back_index()
+            .and_then(|i| self.back.get(i))
+            .and_then(|c| c.as_ref())
+    }
+
+    /// Complex-amplitude row for phase demands (front R/T s/p curves).
+    pub fn complex_curve(&self, id: CurveId) -> Option<&Arc<[Complex64]>> {
+        if id.is_absorption() || id.is_back() {
+            return None;
+        }
+        match id {
+            CurveId::Ru | CurveId::Tu => None, // unpolarized phase is ill-defined
+            _ => self.cplx.get(id.index()).and_then(|c| c.as_ref()),
+        }
+    }
+
+    /// Complex back-amplitude row for back-phase demands (s/p only).
+    pub fn complex_back_curve(&self, id: CurveId) -> Option<&Arc<[Complex64]>> {
+        let i = match id {
+            CurveId::RBs => 0,
+            CurveId::RBp => 1,
+            CurveId::TBs => 2,
+            CurveId::TBp => 3,
+            _ => return None,
+        };
+        self.cplx_back.get(i).and_then(|c| c.as_ref())
     }
 
     /// Row index for an angle value: argmin(|angles − a|), first minimum
@@ -241,6 +396,10 @@ pub struct MeritTarget {
     /// Scaled band half-widths for `Range`/`CenterBand`, copied verbatim
     /// from the TargetEntry (empty means all-zero = unused).
     pub band: Arc<[f64]>,
+    /// Phase demand: sample `arg()` of the complex row for the key curve's
+    /// element (see `CurveId::phase_channel`) instead of intensities.
+    /// Absorption keys with `phase` are rejected at registration.
+    pub phase: bool,
 }
 
 /// Flat, immutable, Send+Sync target description.
@@ -287,6 +446,23 @@ impl MeritSpec {
                 "key_idx {} out of range ({} keys registered)",
                 target.key_idx,
                 self.keys.len()
+            ));
+        }
+        if target.phase && self.keys[target.key_idx as usize].curve.phase_channel().is_none() {
+            return Err(format!(
+                "phase demand on {:?}: absorption/unpolarized curves have no phase",
+                self.keys[target.key_idx as usize].curve
+            ));
+        }
+        // Mirror invariant (see spectralweave `register_metadata`): the phase
+        // arm scales nothing, so phase demands must carry raw values with
+        // norm_factor == 1 (converters: divide the resolved triple by nf).
+        if target.transform == SimTransform::Phase
+            && (target.norm_factor - 1.0).abs() > 1e-12
+        {
+            return Err(format!(
+                "phase transform needs norm_factor == 1 (got {}); pass raw values",
+                target.norm_factor
             ));
         }
         self.targets.push(target);
@@ -361,26 +537,36 @@ impl MeritSpec {
         let ang_row = sim.angle_row(key.angle);
         let sim_wl: &[f64] = &sim.wavelengths;
         let n_wav = sim_wl.len();
-        // Resolve simulated rows BEFORE pushing anything, so a missing
-        // companion leaves `out` untouched.
-        let row_r: &[f64];
-        let mut row_t: Option<&[f64]> = None;
-        match key.curve.absorption_companions() {
-            Some((rc, tc)) => {
-                let (Some(r), Some(t)) = (sim.curve(rc), sim.curve(tc)) else {
-                    return Err(key.curve);
-                };
-                row_r = &r[ang_row * n_wav..(ang_row + 1) * n_wav];
-                row_t = Some(&t[ang_row * n_wav..(ang_row + 1) * n_wav]);
-            },
-            None => {
-                let Some(curve) = sim.curve(key.curve) else {
-                    return Err(key.curve);
-                };
-                row_r = &curve[ang_row * n_wav..(ang_row + 1) * n_wav];
-            },
-        }
+        // One intensity row, either side (front `curves` or `back`).
+        let irow = |id: CurveId| -> Result<&[f64], CurveId> {
+            let arc = if id.is_back() { sim.back_curve(id) } else { sim.curve(id) };
+            arc.map(|c| &c[ang_row * n_wav..(ang_row + 1) * n_wav])
+                .ok_or(key.curve)
+        };
         for t in self.targets.iter().filter(|t| t.key_idx as usize == key_idx) {
+            // Resolve this target's simulated input BEFORE pushing anything,
+            // so missing rows leave `out` untouched. Phase demands sample
+            // arg() of the complex row for the key's element.
+            enum TargetInput<'a> {
+                Intensity(&'a [f64]),
+                Absorption(&'a [f64], &'a [f64]),
+                Phase(&'a [Complex64]),
+            }
+            let input: TargetInput = if t.phase {
+                let crow = if key.curve.is_back() {
+                    sim.complex_back_curve(key.curve)
+                } else {
+                    sim.complex_curve(key.curve)
+                };
+                match crow {
+                    Some(c) => TargetInput::Phase(&c[ang_row * n_wav..(ang_row + 1) * n_wav]),
+                    None => return Err(key.curve),
+                }
+            } else if let Some((rc, tc)) = key.curve.absorption_companions() {
+                TargetInput::Absorption(irow(rc)?, irow(tc)?)
+            } else {
+                TargetInput::Intensity(irow(key.curve)?)
+            };
             let t_wl: &[f64] = &t.wavelengths;
             if t_wl.is_empty() {
                 continue;
@@ -431,10 +617,39 @@ impl MeritSpec {
                     row[n_wav - 1]
                 }
             };
+            // Complex twin for phase demands (shared two-pointer state is
+            // safe: identical grids take identical paths).
+            let sample_c = |row: &[Complex64], i: usize, sim_idx: &mut usize| -> Complex64 {
+                if aligned {
+                    return row[offset + i];
+                }
+                let target_w = t_wl[i];
+                while *sim_idx + 1 < n_wav && sim_wl[*sim_idx + 1] < target_w {
+                    *sim_idx += 1;
+                }
+                if *sim_idx + 1 < n_wav && sim_wl[*sim_idx] <= target_w {
+                    let w0 = sim_wl[*sim_idx];
+                    let w1 = sim_wl[*sim_idx + 1];
+                    let v0 = row[*sim_idx];
+                    let v1 = row[*sim_idx + 1];
+                    if (w1 - w0).abs() < 1e-14 {
+                        v0
+                    } else {
+                        v0 + (v1 - v0) * ((target_w - w0) / (w1 - w0))
+                    }
+                } else if *sim_idx < n_wav {
+                    row[*sim_idx]
+                } else {
+                    row[n_wav - 1]
+                }
+            };
             for i in 0..t_wl.len() {
-                let sim_raw = match row_t {
-                    Some(rt) => 1.0 - sample(row_r, i, &mut sim_idx) - sample(rt, i, &mut sim_idx),
-                    None => sample(row_r, i, &mut sim_idx),
+                let sim_raw = match &input {
+                    TargetInput::Intensity(row) => sample(row, i, &mut sim_idx),
+                    TargetInput::Absorption(r, tt) => {
+                        1.0 - sample(r, i, &mut sim_idx) - sample(tt, i, &mut sim_idx)
+                    },
+                    TargetInput::Phase(crow) => sample_c(crow, i, &mut sim_idx).arg(),
                 };
 
                 let target_scaled = t.normalized_targets[i];
@@ -502,6 +717,9 @@ mod tests {
             angles: vec![0.0].into(),
             wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
             curves: [Some(Arc::from(vals.to_vec())), None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
         }
     }
 
@@ -537,6 +755,29 @@ mod tests {
             normalized_targets: targets.into(),
             tolerances: tols.into(),
             band: band.into(),
+            phase: false,
+        }
+    }
+
+    fn entry_phase(
+        key_idx: u32,
+        wl: Vec<f64>,
+        targets: Vec<f64>,
+        tols: Vec<f64>,
+        kind: ConstraintKind,
+        transform: SimTransform,
+        norm_factor: f64,
+    ) -> MeritTarget {
+        MeritTarget {
+            key_idx,
+            wavelengths: wl.into(),
+            kind,
+            transform,
+            norm_factor,
+            normalized_targets: targets.into(),
+            tolerances: tols.into(),
+            band: Vec::new().into(),
+            phase: true,
         }
     }
 
@@ -758,6 +999,9 @@ mod tests {
             angles: vec![0.0, 30.0, 60.0].into(),
             wavelengths: vec![500.0].into(),
             curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
         };
         sim.curves[CurveId::Ru.index()] = Some(Arc::from(vec![10.0, 20.0, 30.0]));
 
@@ -796,6 +1040,9 @@ mod tests {
                 .collect::<Vec<_>>()
                 .into(),
             curves: sim.curves.clone(),
+            back: sim.back.clone(),
+            cplx: sim.cplx.clone(),
+            cplx_back: sim.cplx_back.clone(),
         };
         let mut spec_u = MeritSpec::new();
         let ku = spec_u.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
@@ -892,6 +1139,9 @@ mod tests {
             angles: vec![0.0].into(),
             wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
             curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
         };
         sim.curves[CurveId::Rs.index()] = Some(Arc::from(vec![0.6, 0., 0., 0., 0.]));
         sim.curves[CurveId::Ts.index()] = Some(Arc::from(vec![0.3, 0., 0., 0., 0.]));
@@ -914,6 +1164,91 @@ mod tests {
         assert!(spec_u.merit(&sim, 1e6) < 1e-28); // A = 1−0.5−0.3 ≈ 0.2
         sim.curves[CurveId::Ru.index()] = None;
         assert!(matches!(spec_u.residuals(&sim, &mut Vec::new()), Err(CurveId::Au)));
+    }
+
+    #[test]
+    fn phase_demand_samples_argument() {
+        // Complex row 0.5·e^{i·0.3}; demand phase 0.3 (nf=1) → zero.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        spec.add_target(entry_phase(k as u32, vec![400.0], vec![0.3], vec![0.05],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        let mut sim = SimCurves {
+            angles: vec![0.0].into(),
+            wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
+            curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
+        };
+        sim.cplx[0] = Some(Arc::from(vec![
+            Complex64::from_polar(0.5, 0.3), Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)]));
+        assert!(spec.merit(&sim, 1e6) < 1e-28);
+        // Missing complex row → penalty once, Err on the demand.
+        sim.cplx[0] = None;
+        assert_eq!(spec.merit(&sim, 123.0), 123.0);
+        assert!(matches!(spec.residuals(&sim, &mut Vec::new()), Err(CurveId::Rs)));
+    }
+
+    #[test]
+    fn phase_demand_wraps_in_phase_mode() {
+        // Sim phase 0.3 + 2π − 0.01 vs target 0.3: wrapped diff −0.01.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        spec.add_target(entry_phase(k as u32, vec![400.0], vec![0.3], vec![0.05],
+            ConstraintKind::Exact, SimTransform::Phase, 1.0)).unwrap();
+        let mut sim = SimCurves {
+            angles: vec![0.0].into(),
+            wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
+            curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
+        };
+        sim.cplx[3] = Some(Arc::from(vec![
+            Complex64::from_polar(0.7, 0.3 - 0.01 + std::f64::consts::TAU),
+            Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)]));
+        // (−0.01/0.05)² = 0.04
+        assert!((spec.merit(&sim, 1e6) - 0.04).abs() < 1e-12);
+    }
+
+    #[test]
+    fn phase_on_absorption_rejected() {
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::As });
+        let mut tgt = entry_phase(k as u32, vec![400.0], vec![0.0], vec![0.1],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0);
+        tgt.key_idx = k as u32;
+        assert!(spec.add_target(tgt).is_err());
+        let k2 = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ru });
+        let tgt2 = entry_phase(k2 as u32, vec![400.0], vec![0.0], vec![0.1],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0);
+        assert!(spec.add_target(tgt2).is_err());
+    }
+
+    #[test]
+    fn back_intensity_and_absorption() {
+        // RBs row 0.4, TBs row 0.5: R demand 0.4 → 0; ABs demand 0.1 → 0.
+        let mut spec = MeritSpec::new();
+        let kr = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::RBs });
+        spec.add_target(entry(kr as u32, vec![400.0], vec![0.4], vec![0.05],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        let ka = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::ABs });
+        spec.add_target(entry(ka as u32, vec![400.0], vec![0.1], vec![0.05],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        let mut sim = SimCurves {
+            angles: vec![0.0].into(),
+            wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
+            curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
+        };
+        sim.back[0] = Some(Arc::from(vec![0.4, 0., 0., 0., 0.]));
+        sim.back[3] = Some(Arc::from(vec![0.5, 0., 0., 0., 0.]));
+        assert!(spec.merit(&sim, 1e6) < 1e-28); // 0 + (1−0.4−0.5−0.1)²
     }
 
     #[test]

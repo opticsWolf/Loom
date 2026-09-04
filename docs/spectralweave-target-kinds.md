@@ -67,15 +67,25 @@ recomputed every iteration):
 | `c` | outside | nearest band edge, $nf^2/tol^2$ |
 | `r` / `c` | no sim yet (first iteration) | centre, $nf^2/tol^2$ (conservative) |
 
-Folding is per quantity: R demands → `(targets_r, weights_r)`, T demands →
-`(targets_t, weights_t)`, absorption demands (`As`/`Ap`/`Au`, derived as
-$A = 1 − R − T$ from the s/p/u companion pairs) → `(targets_a, weights_a)` —
-the kind table above applies identically in each bucket. Missing absorption
-companions fold conservatively (exact at centre).
+Folding is per quantity: front R/T/A demands → `(targets_r, weights_r)` /
+`(targets_t, weights_t)` / `(targets_a, weights_a)`; back demands → the
+`rb`/`tb`/`ab` siblings; absorption (`As`/`Ap`/`Au`, `ABs`/`ABp`/`ABu`)
+derives $A = 1 − R − T$ from the companion pairs — the kind table above
+applies identically in every bucket. Missing companions/rows fold
+conservatively (exact at centre).
 
-Only linear-normalized R/T/A demands fold; anything else is an `Err`.
-Phase demands do not fold (phase is not stored in `SimCurves`) — drive
-`P_PHI` directly via `targets_phi`/`weights_phi`.
+Phase demands fold to one `(targets, weights)` pair per S-matrix channel
+(`phi[0..=3]` → one `P_PHI` call each). Intensity/absorption demands
+require linear normalization; phase demands accept linear or phase
+(wrapped residuals mirror the evaluator); anything else is an `Err`.
+Phase demands must carry raw values with `norm_factor == 1` (the phase
+arm scales nothing — the converter unscales the resolved triple).
+
+Spectral-label mapping for the converter (`TargetCollection` → `MeritSpec`):
+`R/T/A` × s/p/u → front demands, `RB/TB/AB` × s/p/u → back demands;
+`phase=True` targets become phase demands on the mapped curve's element
+(R → r_front, T → t_fwd, RB → r_back, TB → t_back). Anything else raises
+`ValueError`. Angular targets expand to one single-point demand per angle.
 
 ### The dropped `+1` level
 
@@ -95,6 +105,16 @@ any decision — so the fold drops it by design. If a future consumer needs
 true values from the folded path (e.g. a trust-region acceptance test),
 return the outside-count alongside `(targets, weights)`; the fold already
 knows it.
+
+### Overlap constant (same class of loss)
+
+When several demands fold onto one solver point, completing the square
+$\sum w_i(s-t_i)^2 = W(s-\bar t)^2 + [\sum w_i t_i^2 - W\bar t^2]$ keeps
+$(\bar t, W)$ and drops the bracket. Gradients stay exact; folded merit
+*values* under-read by that constant. Exact value identity holds only for
+non-overlapping demands (at most one demand per solver point per bucket).
+Like the $+1$, this never affects needle gradients, site ranking, or
+insertion decisions — only human-readable merit comparisons.
 
 ### Multiblock (incoherent) needle
 

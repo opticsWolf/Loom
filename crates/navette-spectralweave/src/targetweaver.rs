@@ -40,6 +40,17 @@ impl TargetKind {
             _ => None,
         }
     }
+
+    /// Canonical code for export (converters, round-trips).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TargetKind::Exact => "e",
+            TargetKind::Above => "a",
+            TargetKind::Below => "b",
+            TargetKind::Range => "r",
+            TargetKind::CenterBand => "c",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,6 +62,18 @@ pub enum ResolvedNormMode {
     Log,
     Phase,
     Complex,
+}
+
+impl ResolvedNormMode {
+    /// Canonical name for export (converters, round-trips).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResolvedNormMode::Linear => "linear",
+            ResolvedNormMode::Log => "log",
+            ResolvedNormMode::Phase => "phase",
+            ResolvedNormMode::Complex => "complex",
+        }
+    }
 }
 
 #[derive(Clone)]

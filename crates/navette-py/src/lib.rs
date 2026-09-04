@@ -15,6 +15,7 @@ mod color;
 mod interpolate;
 mod materials;
 mod smatrix;
+mod synthesis_merit;
 mod spectralweave;
 mod spectralweave_optical;
 mod spectralweave_target;
