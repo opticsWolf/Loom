@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use ahash::AHashMap;
 use std::sync::Arc;
 
-/// How a target activates the residual: exact match, one-sided above/below.
+/// How a target activates the residual: exact, one-sided, or banded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TargetKind {
     /// Penalise any deviation (residual = sim minus target).
@@ -19,15 +19,24 @@ pub enum TargetKind {
     Above,
     /// Penalise only excess (residual = max(0, sim minus target)).
     Below,
+    /// Hard box of half-width `band`: zero inside, quadratic exceedance
+    /// outside (equivalent to paired `a`/`b` targets at centre∓band).
+    Range,
+    /// Soft box of half-width `band`: reduced quadratic `(d/band)^2`
+    /// inside (i.e. exact penalisation scaled by `(tol/band)^2`), quadratic
+    /// exceedance plus continuity offset outside.
+    CenterBand,
 }
 
 impl TargetKind {
-    /// Parse "e"/"a"/"b" (exact/above/below); None for anything else.
+    /// Parse "e"/"a"/"b"/"r"/"c"; None for anything else.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "e" => Some(TargetKind::Exact),
             "a" => Some(TargetKind::Above),
             "b" => Some(TargetKind::Below),
+            "r" => Some(TargetKind::Range),
+            "c" => Some(TargetKind::CenterBand),
             _ => None,
         }
     }
@@ -45,14 +54,16 @@ pub enum ResolvedNormMode {
 }
 
 #[derive(Clone)]
-/// One ingested target curve: activation kind, normalisation, and the
-/// pre-normalized values plus per-point tolerances.
+/// One ingested target curve: activation kind, normalisation, the
+/// pre-normalized values plus per-point tolerances, and the scaled band
+/// half-widths for the `r`/`c` kinds (zeros when unused).
 pub struct TargetEntry {
     pub kind: TargetKind,
     pub resolved_mode: ResolvedNormMode,
     pub norm_factor: f64,
     pub normalized_targets: Arc<[f64]>,
     pub tolerances: Arc<[f64]>,
+    pub band: Arc<[f64]>,
 }
 
 #[derive(Default, Clone)]
@@ -91,7 +102,10 @@ impl TargetWeaver {
     }
 
     /// Pre-calculates normalizations and transforms targets upon ingestion.
-    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str) {
+    /// `band` holds raw-unit half-widths for the `r`/`c` kinds (empty or
+    /// all-zero when unused); it is scaled by the same `norm_factor` as the
+    /// targets (per-point exact mapping in log mode, first-order otherwise).
+    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str, band: &[f64]) {
         let mut t_min = f64::MAX;
         let mut t_max = f64::MIN;
         let mut t_sum = 0.0;
@@ -149,12 +163,30 @@ impl TargetWeaver {
             .map(|&t| t.max(self.tolerance_floor))
             .collect();
 
+        // Scale the raw band half-widths into the normalized residual space.
+        let band_scaled: Vec<f64> = match resolved_mode {
+            ResolvedNormMode::Linear | ResolvedNormMode::Phase | ResolvedNormMode::Complex => {
+                raw_targets.iter().enumerate().map(|(i, _)| {
+                    band.get(i).copied().unwrap_or(0.0).max(0.0) * norm_factor
+                }).collect()
+            },
+            ResolvedNormMode::Log => {
+                raw_targets.iter().enumerate().map(|(i, &t)| {
+                    let b = band.get(i).copied().unwrap_or(0.0).max(0.0);
+                    if b <= 0.0 { return 0.0; }
+                    let t_pos = t.max(1e-12);
+                    ((t_pos + b).max(1e-12).log10() - t_pos.log10()).abs() * norm_factor
+                }).collect()
+            },
+        };
+
         let entry = TargetEntry {
             kind,
             resolved_mode,
             norm_factor,
             normalized_targets: Arc::from(normalized_targets),
             tolerances: Arc::from(floored_tols),
+            band: Arc::from(band_scaled),
         };
 
         let mut meta_guard = self.target_metadata.write();

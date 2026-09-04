@@ -23,7 +23,7 @@ except ImportError as exc:  # pragma: no cover - native not built yet
     "Build it with: maturin develop  # from the repo root"
   ) from exc
 
-TargetType = Literal["a", "b", "e"]
+TargetType = Literal["a", "b", "e", "r", "c"]
 NormalizationMode = Literal["auto", "linear", "log", "phase", "complex"]
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,14 @@ NormalizationMode = Literal["auto", "linear", "log", "phase", "complex"]
 # ---------------------------------------------------------------------------
 @dataclass(slots=True, frozen=True)
 class SpectralTarget:
-    """One constraint curve: value vs wavelength at fixed angle."""
+    """One constraint curve: value vs wavelength at fixed angle.
+
+    Kinds ``e``/``a``/``b`` are exact/above/below; ``r`` is a hard range box
+    (zero merit inside ±``band``, quadratic exceedance outside) and ``c`` a
+    soft center box (reduced ``(d/band)^2`` inside, exceedance + 1 outside).
+    ``band`` is a per-point half-width in raw units (scalar broadcasts);
+    omit it and ``r`` falls back to ±``tolerances``, ``c`` to ``e``.
+    """
     wavelengths:  np.ndarray
     values:       np.ndarray
     tolerances:   np.ndarray
@@ -40,20 +47,25 @@ class SpectralTarget:
     spectral:     str
     kind:         TargetType = "e"
     normalization_mode: NormalizationMode = "auto"
+    band:         Union[np.ndarray, float, None] = None
 
     def __post_init__(self) -> None:
         _validate_shapes(self.wavelengths, self.values, self.tolerances, label="SpectralTarget")
-        
+        band = _normalize_band(self.band, self.values.shape, label="SpectralTarget")
         # FFI Guard: Ensure contiguous float64 memory to prevent Rust segfaults.
         # This is an O(1) no-op if the array is already correctly formatted.
         object.__setattr__(self, 'wavelengths', np.ascontiguousarray(self.wavelengths, dtype=np.float64))
         object.__setattr__(self, 'values', np.ascontiguousarray(self.values, dtype=np.float64))
         object.__setattr__(self, 'tolerances', np.ascontiguousarray(self.tolerances, dtype=np.float64))
+        object.__setattr__(self, 'band', band)
 
 
 @dataclass(slots=True, frozen=True)
 class AngularTarget:
-    """One constraint curve: value vs angle at fixed wavelength."""
+    """One constraint curve: value vs angle at fixed wavelength.
+
+    Same ``kind``/``band`` semantics as :class:`SpectralTarget`.
+    """
     wavelength:   float
     angles:       np.ndarray
     values:       np.ndarray
@@ -62,14 +74,16 @@ class AngularTarget:
     spectral:     str
     kind:         TargetType = "e"
     normalization_mode: NormalizationMode = "auto"
+    band:         Union[np.ndarray, float, None] = None
 
     def __post_init__(self) -> None:
         _validate_shapes(self.angles, self.values, self.tolerances, label="AngularTarget")
-        
+        band = _normalize_band(self.band, self.values.shape, label="AngularTarget")
         # FFI Guard
         object.__setattr__(self, 'angles', np.ascontiguousarray(self.angles, dtype=np.float64))
         object.__setattr__(self, 'values', np.ascontiguousarray(self.values, dtype=np.float64))
         object.__setattr__(self, 'tolerances', np.ascontiguousarray(self.tolerances, dtype=np.float64))
+        object.__setattr__(self, 'band', band)
 
 BaseTarget = Union[SpectralTarget, AngularTarget]
 
@@ -77,6 +91,21 @@ def _validate_shapes(*arrays: np.ndarray, label: str = "") -> None:
     shapes = [a.shape for a in arrays]
     if len(set(shapes)) != 1:
         raise ValueError(f"{label} shape mismatch: " + ", ".join(str(s) for s in shapes))
+
+def _normalize_band(band: Union[np.ndarray, float, None], shape: tuple, label: str = "") -> Union[np.ndarray, None]:
+    """Broadcast a scalar band to `shape`, validate arrays, pass None through."""
+    if band is None:
+        return None
+    if isinstance(band, (int, float)):
+        if band < 0:
+            raise ValueError(f"{label}: band must be >= 0.")
+        return np.ascontiguousarray(np.full(shape, float(band), dtype=np.float64))
+    arr = np.ascontiguousarray(np.asarray(band, dtype=np.float64))
+    if arr.shape != shape:
+        raise ValueError(f"{label} band shape mismatch: {arr.shape} != {shape}.")
+    if bool((arr < 0).any()):
+        raise ValueError(f"{label}: band must be >= 0.")
+    return arr
 
 # ---------------------------------------------------------------------------
 # 2. TargetCollection (lightweight, standalone)
@@ -129,13 +158,15 @@ class TargetCollection:
         for t in self._spectral_targets:
             weaver.add_spectral_target(
                 t.wavelengths, t.values, t.tolerances,
-                t.angle, t.polarization, t.spectral, t.kind, t.normalization_mode
+                t.angle, t.polarization, t.spectral, t.kind, t.normalization_mode,
+                t.band,
             )
             
         for t in self._angular_targets:
             weaver.add_angular_target(
                 t.wavelength, t.angles, t.values, t.tolerances,
-                t.polarization, t.spectral, t.kind, t.normalization_mode
+                t.polarization, t.spectral, t.kind, t.normalization_mode,
+                t.band,
             )
             
         return weaver

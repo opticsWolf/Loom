@@ -30,8 +30,9 @@ impl PyTargetWeaver {
         }
     }
 
-    #[pyo3(signature = (wavelengths, values, tolerances, angle, polarization, spectral, kind, norm_mode))]
-/// Ingest one target curve over wavelengths (kind e/a/b, norm mode).
+    #[pyo3(signature = (wavelengths, values, tolerances, angle, polarization, spectral, kind, norm_mode, band=None))]
+/// Ingest one target curve over wavelengths (kind e/a/b/r/c, norm mode).
+/// `band` holds optional per-point half-widths for `r`/`c` (raw units).
     fn add_spectral_target(
         &self,
         py: Python<'_>,
@@ -43,22 +44,38 @@ impl PyTargetWeaver {
         spectral: String,
         kind: String,
         norm_mode: String,
+        band: Option<PyReadonlyArray1<'_, f64>>,
     ) -> PyResult<()> {
         let k = TargetKind::from_str(&kind)
-            .ok_or_else(|| PyValueError::new_err("Invalid kind (use 'e', 'a', or 'b')"))?;
+            .ok_or_else(|| PyValueError::new_err("Invalid kind (use 'e', 'a', 'b', 'r', or 'c')"))?;
         let wl = wavelengths.as_slice()?;
         let val = values.as_slice()?;
         let tol = tolerances.as_slice()?;
+        let band_sl = band.as_ref().map(|b| b.as_slice()).transpose()?;
+        if let Some(b) = band_sl.as_ref() {
+            if b.len() != val.len() {
+                return Err(PyValueError::new_err("band length must match values length"));
+            }
+        }
         let key = OpticalKey::from((angle, polarization, spectral));
 
         let wl_ptr = wl.as_ptr() as usize; let wl_len = wl.len();
         let val_ptr = val.as_ptr() as usize; let val_len = val.len();
         let tol_ptr = tol.as_ptr() as usize; let tol_len = tol.len();
+        let (band_ptr, band_len) = match band_sl.as_ref() {
+            Some(b) => (b.as_ptr() as usize, b.len()),
+            None => (0usize, 0usize),
+        };
 
         py.detach(move || -> PyResult<()> {
             let wl_data = unsafe { std::slice::from_raw_parts(wl_ptr as *const f64, wl_len) };
             let val_data = unsafe { std::slice::from_raw_parts(val_ptr as *const f64, val_len) };
             let tol_data = unsafe { std::slice::from_raw_parts(tol_ptr as *const f64, tol_len) };
+            let band_data: &[f64] = if band_len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(band_ptr as *const f64, band_len) }
+            };
 
             let frame = self
                 .inner
@@ -70,13 +87,14 @@ impl PyTargetWeaver {
                 .map_err(PyValueError::new_err)?;
             self.inner.inner.inner.map_frame_to_key(&key, &frame);
 
-            self.inner.register_metadata(frame.uid, key, val_data, tol_data, k, &norm_mode);
+            self.inner.register_metadata(frame.uid, key, val_data, tol_data, k, &norm_mode, band_data);
             Ok(())
         })
     }
 
-    #[pyo3(signature = (wavelength, angles, values, tolerances, polarization, spectral, kind, norm_mode))]
-/// Ingest one target curve over angles (kind e/a/b, norm mode).
+    #[pyo3(signature = (wavelength, angles, values, tolerances, polarization, spectral, kind, norm_mode, band=None))]
+/// Ingest one target curve over angles (kind e/a/b/r/c, norm mode).
+/// `band` holds optional per-point half-widths for `r`/`c` (raw units).
     fn add_angular_target(
         &self,
         py: Python<'_>,
@@ -88,15 +106,27 @@ impl PyTargetWeaver {
         spectral: String,
         kind: String,
         norm_mode: String,
+        band: Option<PyReadonlyArray1<'_, f64>>,
     ) -> PyResult<()> {
-        let k = TargetKind::from_str(&kind).unwrap_or(TargetKind::Exact);
+        let k = TargetKind::from_str(&kind)
+            .ok_or_else(|| PyValueError::new_err("Invalid kind (use 'e', 'a', 'b', 'r', or 'c')"))?;
         let angs = angles.as_slice()?;
         let vals = values.as_slice()?;
         let tols = tolerances.as_slice()?;
+        let band_sl = band.as_ref().map(|b| b.as_slice()).transpose()?;
+        if let Some(b) = band_sl.as_ref() {
+            if b.len() != vals.len() {
+                return Err(PyValueError::new_err("band length must match values length"));
+            }
+        }
 
         let a_ptr = angs.as_ptr() as usize; let a_len = angs.len();
         let v_ptr = vals.as_ptr() as usize; let v_len = vals.len();
         let t_ptr = tols.as_ptr() as usize; let t_len = tols.len();
+        let (band_ptr, band_len) = match band_sl.as_ref() {
+            Some(b) => (b.as_ptr() as usize, b.len()),
+            None => (0usize, 0usize),
+        };
         let pol = polarization.clone();
         let spec = spectral.clone();
 
@@ -104,6 +134,11 @@ impl PyTargetWeaver {
             let a_data = unsafe { std::slice::from_raw_parts(a_ptr as *const f64, a_len) };
             let v_data = unsafe { std::slice::from_raw_parts(v_ptr as *const f64, v_len) };
             let t_data = unsafe { std::slice::from_raw_parts(t_ptr as *const f64, t_len) };
+            let b_data: &[f64] = if band_len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(band_ptr as *const f64, band_len) }
+            };
 
             let wl_point = vec![wavelength];
             let frame = self
@@ -115,6 +150,7 @@ impl PyTargetWeaver {
                 let key = OpticalKey::from((a_data[i], pol.clone(), spec.clone()));
                 let val_arr = vec![v_data[i]];
                 let tol_arr = vec![t_data[i]];
+                let band_arr = if b_data.is_empty() { vec![] } else { vec![b_data[i]] };
 
                 frame
                     .set_data(
@@ -125,7 +161,7 @@ impl PyTargetWeaver {
                     .map_err(PyValueError::new_err)?;
                 self.inner.inner.inner.map_frame_to_key(&key, &frame);
 
-                self.inner.register_metadata(frame.uid, key, &val_arr, &tol_arr, k, &norm_mode);
+                self.inner.register_metadata(frame.uid, key, &val_arr, &tol_arr, k, &norm_mode, &band_arr);
             }
             Ok(())
         })
@@ -244,6 +280,26 @@ pub fn calculate_merit(
                         TargetKind::Exact => (scaled_diff / tol).powi(2),
                         TargetKind::Above if scaled_diff < 0.0 => (scaled_diff / tol).powi(2),
                         TargetKind::Below if scaled_diff > 0.0 => (scaled_diff / tol).powi(2),
+                        TargetKind::Range => {
+                            // Hard box: bare `r` without a band falls back to
+                            // the tolerance as half-width (paired a/b).
+                            let bw = entry.band[i];
+                            let bw_eff = if bw <= 0.0 { tol } else { bw };
+                            let ad = scaled_diff.abs();
+                            if ad <= bw_eff { 0.0 } else { ((ad - bw_eff) / tol).powi(2) }
+                        },
+                        TargetKind::CenterBand => {
+                            // Soft box: reduced `(d/bw)^2` inside (exact scaled
+                            // by `(tol/bw)^2`), exceedance plus continuity outside.
+                            let bw = entry.band[i];
+                            if bw <= 0.0 {
+                                (scaled_diff / tol).powi(2)
+                            } else {
+                                let ad = scaled_diff.abs();
+                                if ad <= bw { (scaled_diff / bw).powi(2) }
+                                else { ((ad - bw) / tol).powi(2) + 1.0 }
+                            }
+                        },
                         _ => 0.0,
                     };
 
