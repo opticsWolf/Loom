@@ -501,7 +501,7 @@ pub fn p_coherent_from_fields(
 /// P_T(z) = 2·w·(T − T_t)·f·Re{conj(t)·∂t/∂δ} with the channel-2 slope of
 /// [`needle_slopes4_ddz`]. Back-incidence transmission (t_back) is a
 /// different experiment — drive it from channel-1 slopes directly.
-pub fn p_coherent_T_from_fields(
+pub fn p_coherent_t_from_fields(
     fields: &StackFields,
     nsin_fi: Complex64,
     lam: f64,
@@ -534,7 +534,7 @@ pub fn p_coherent_T_from_fields(
 /// Flux factors depend only on the boundary half-spaces, hence are
 /// δ-constants: ∂A/∂δ = −2·Re{conj(r)·∂r/∂δ} − 2·f·Re{conj(t)·∂t/∂δ}.
 /// Back-incidence transmission is excluded (front-incidence experiment).
-pub fn p_coherent_A_from_fields(
+pub fn p_coherent_a_from_fields(
     fields: &StackFields,
     nsin_fi: Complex64,
     lam: f64,
@@ -644,6 +644,17 @@ pub fn locate_hosts_multiblock(
 /// precomputed host map from [`locate_hosts_multiblock`]. Same half-gradient
 /// convention as [`p_coherent_from_fields`].
 #[allow(clippy::too_many_arguments)]
+/// Which cascade total a multiblock P-function differentiates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PmbQuantity {
+    /// Total front reflectance `v[0]` (front-incidence experiment).
+    R,
+    /// Total forward transmittance `v[2]` (front-incidence experiment).
+    T,
+    /// Total front-incidence absorptance `1 − v[0] − v[2]`.
+    A,
+}
+
 pub fn p_multiblock_point(
     lam: f64,
     sin_theta: f64,
@@ -653,6 +664,7 @@ pub fn p_multiblock_point(
     rough_vals: &[f64],
     rough_types: &[i32],
     needle_n: Complex64,
+    quantity: PmbQuantity,
     target: f64,
     weight: f64,
     locs: &[(usize, usize, f64)],
@@ -677,8 +689,14 @@ pub fn p_multiblock_point(
             track = cascade_step(&track, [0.0, tau, tau, 0.0], None);
         }
     }
-    let r_tot = track.v[0];
-    let resid = 2.0 * weight * (r_tot - target);
+    // Cascade total and adjoint output row for the demanded quantity:
+    // R → v[0], T → v[2], A → 1 − v[0] − v[2] (front incidence throughout).
+    let tot = match quantity {
+        PmbQuantity::R => track.v[0],
+        PmbQuantity::T => track.v[2],
+        PmbQuantity::A => 1.0 - track.v[0] - track.v[2],
+    };
+    let resid = 2.0 * weight * (tot - target);
 
     let mut out = vec![0.0; locs.len()];
     if resid == 0.0 {
@@ -695,11 +713,18 @@ pub fn p_multiblock_point(
             fac[2] * (amp.2.conj() * slopes[2]).re,
             fac[3] * (amp.3.conj() * slopes[3]).re,
         ];
+        // Adjoint weights: g[p][e] = ∂v[e]/∂param_p; absorption is the
+        // negated sum of the R and T rows.
         let wv = &track.g[bi * 4..bi * 4 + 4];
-        let dot = wv[0][0] * g_int[0]
-            + wv[1][0] * g_int[1]
-            + wv[2][0] * g_int[2]
-            + wv[3][0] * g_int[3];
+        let wrow = |c: usize| match quantity {
+            PmbQuantity::R => wv[c][0],
+            PmbQuantity::T => wv[c][2],
+            PmbQuantity::A => -(wv[c][0] + wv[c][2]),
+        };
+        let dot = wrow(0) * g_int[0]
+            + wrow(1) * g_int[1]
+            + wrow(2) * g_int[2]
+            + wrow(3) * g_int[3];
         out[zi] = resid * dot;
     }
     out
@@ -994,6 +1019,7 @@ pub fn p_function_multiblock(
     rough_types: &[i32],
     rough_vals: &[f64],
     needle_n_per_wav: &[Complex64],
+    quantity: PmbQuantity,
     target_r: &[f64],
     weights: &[f64],
     z_grid: &[f64],
@@ -1026,7 +1052,7 @@ pub fn p_function_multiblock(
             let contrib = p_multiblock_point(
                 wavls[w], sin_theta_arr[a], &ns, thicknesses, incoherent_flags,
                 rough_vals, rough_types, needle_n_per_wav[w],
-                target_r[k], weights[k], &locs, pol,
+                quantity, target_r[k], weights[k], &locs, pol,
             );
             for (zi, cv) in contrib.iter().enumerate() {
                 p_out[zi] += cv;
@@ -1311,7 +1337,7 @@ mod tests {
             let nsin = n[0] * cplx(sin_t, 0.0);
             let fields = build_stack_fields_range(0, end, &n, &d, &rv, &rt, LAM, nsin, pol);
             let z = d[1] + xi; // absolute, from top of layer 1
-            let p = p_coherent_T_from_fields(
+            let p = p_coherent_t_from_fields(
                 &fields, nsin, LAM, pol, n_prime, 0.0, 1.0, &d, 0, end, &[z]);
             let (m0, f0) = solve_all(&n, &d, &rv, &rt, LAM, sin_t, pol);
             let t0 = m0.2.norm_sqr() * f0;
@@ -1340,7 +1366,7 @@ mod tests {
             let nsin = n[0] * cplx(sin_t, 0.0);
             let fields = build_stack_fields_range(0, end, &n, &d, &rv, &rt, LAM, nsin, pol);
             let z = d[1] + xi;
-            let p = p_coherent_A_from_fields(
+            let p = p_coherent_a_from_fields(
                 &fields, nsin, LAM, pol, n_prime, 0.0, 1.0, &d, 0, end, &[z]);
             let (m0, f0) = solve_all(&n, &d, &rv, &rt, LAM, sin_t, pol);
             let a0 = 1.0 - m0.0.norm_sqr() - m0.2.norm_sqr() * f0;
@@ -1560,7 +1586,7 @@ mod tests {
         .unwrap();
         let p_mb = p_function_multiblock(
             &wavls, &angles, &cache, &d, &flags, &rt, &rv,
-            &needle_per_wav, &target, &weights, &z, None, 0,
+            &needle_per_wav, PmbQuantity::R, &target, &weights, &z, None, 0,
         )
         .unwrap();
         for (a, b) in p_ref.iter().zip(&p_mb) {
@@ -1634,7 +1660,7 @@ mod tests {
         ] {
             let p = p_function_multiblock(
                 &[lam], &[sin_t], &cache, &d, &flags, &rt, &rv,
-                &np, &target, &weights, &[z], None, 0,
+                &np, PmbQuantity::R, &target, &weights, &[z], None, 0,
             )
             .unwrap()[0];
 
@@ -1661,6 +1687,123 @@ mod tests {
         }
     }
 
+
+    /// Full cascade intensities [R, Tb, Tf, Rb] under Mode A (T/A oracles).
+    fn solve_int_mode_a(
+        n: &[Complex64], d: &[f64], rv: &[f64], rt: &[i32], flags: &[i32],
+        lam: f64, sin_t: f64, pol: i32,
+    ) -> [f64; 4] {
+        let nsin = n[0] * cplx(sin_t, 0.0);
+        let (blocks, spacers) = partition_blocks(flags);
+        let mut ig = [0.0f64, 1.0, 1.0, 0.0];
+        for (bi, &(bs, be)) in blocks.iter().enumerate() {
+            let f = build_stack_fields_range(bs, be, n, d, rv, rt, lam, nsin, pol);
+            ig = star_real(ig, block_intensities(&f, pol));
+            if let Some(sp) = spacers[bi] {
+                let tau = spacer_tau(n[sp], d[sp], lam, nsin);
+                ig = star_real(ig, [0.0, tau, tau, 0.0]);
+            }
+        }
+        ig
+    }
+
+    #[test]
+    fn pmb_transmission_matches_cascade_finite_difference() {
+        // Same two-block stack as `fd_oracle_mode_a_two_blocks`; target 0,
+        // weight 1 → P = T_tot·dT_tot/dδ (half convention).
+        let layers = [
+            (n_(1.0, 0.0), 0.0),
+            (n_(2.35, 0.0), 40.0),
+            (n_(1.45, 0.0), 60.0),
+            (n_(2.35, 0.0), 50.0),
+            (n_(1.45, 0.0), 30.0),
+            (n_(1.52, 0.0), 0.0),
+        ];
+        let n: Vec<Complex64> = layers.iter().map(|&(m, _)| m).collect();
+        let d: Vec<f64> = layers.iter().map(|&(_, t)| t).collect();
+        let rv = vec![0.0; 6];
+        let rt = vec![0; 6];
+        let flags = [0, 0, 1, 0, 0, 0];
+        let lam = 550.0f64;
+        let cache = cache_of(&n);
+        let np = [n_(2.6, 0.0)];
+        let target = [0.0f64];
+        let weights = [1.0f64];
+        for &pol in &[0i32, 1] {
+            for &(z, j, xi, sin_t) in &[
+                (15.0f64, 1usize, 15.0f64, 0.0f64),
+                (120.0, 3, 20.0, 0.0),
+            ] {
+                let p = p_function_multiblock(
+                    &[lam], &[sin_t], &cache, &d, &flags, &rt, &rv,
+                    &np, PmbQuantity::T, &target, &weights, &[z], None, pol,
+                )
+                .unwrap()[0];
+                let delta = 5e-4_f64;
+                let t0 = solve_int_mode_a(&n, &d, &rv, &rt, &flags, lam, sin_t, pol)[2];
+                let (nn, dd, rr, tt) = insert_needle(&n, &d, &rv, &rt, j, xi, np[0], delta);
+                let mut fl2 = flags.to_vec();
+                let tail = flags[j + 1..].to_vec();
+                fl2.truncate(j + 1);
+                fl2.push(0);
+                fl2.push(0);
+                fl2.extend_from_slice(&tail);
+                let t1 = solve_int_mode_a(&nn, &dd, &rr, &tt, &fl2, lam, sin_t, pol)[2];
+                let fd = (t1 * t1 - t0 * t0) / delta / 2.0;
+                let scale = fd.abs().max(p.abs()).max(1e-12);
+                let err = (fd - p).abs() / scale;
+                assert!(err < 2e-3, "PmbT pol={pol} z={z}: fd={fd:.6e} p={p:.6e} err={err:.2e}");
+            }
+        }
+    }
+
+    #[test]
+    fn pmb_absorption_matches_cascade_finite_difference() {
+        // Block-1 film absorbs so A_tot > 0; P = A_tot·dA_tot/dδ.
+        let layers = [
+            (n_(1.0, 0.0), 0.0),
+            (n_(2.35, 0.0), 40.0),
+            (n_(1.45, 0.0), 60.0),
+            (n_(1.8, 0.4), 50.0),
+            (n_(1.45, 0.0), 30.0),
+            (n_(1.52, 0.0), 0.0),
+        ];
+        let n: Vec<Complex64> = layers.iter().map(|&(m, _)| m).collect();
+        let d: Vec<f64> = layers.iter().map(|&(_, t)| t).collect();
+        let rv = vec![0.0; 6];
+        let rt = vec![0; 6];
+        let flags = [0, 0, 1, 0, 0, 0];
+        let lam = 550.0f64;
+        let cache = cache_of(&n);
+        let np = [n_(2.6, 0.0)];
+        let target = [0.0f64];
+        let weights = [1.0f64];
+        let aval = |ig: [f64; 4]| 1.0 - ig[0] - ig[2];
+        for &pol in &[0i32, 1] {
+            let a0 = aval(solve_int_mode_a(&n, &d, &rv, &rt, &flags, lam, 0.0, pol));
+            assert!(a0 > 1e-3, "pol={pol}: test stack should absorb (A={a0})");
+            for &(z, j, xi) in &[(15.0f64, 1usize, 15.0f64), (120.0, 3, 20.0)] {
+                let p = p_function_multiblock(
+                    &[lam], &[0.0], &cache, &d, &flags, &rt, &rv,
+                    &np, PmbQuantity::A, &target, &weights, &[z], None, pol,
+                )
+                .unwrap()[0];
+                let delta = 5e-4_f64;
+                let (nn, dd, rr, tt) = insert_needle(&n, &d, &rv, &rt, j, xi, np[0], delta);
+                let mut fl2 = flags.to_vec();
+                let tail = flags[j + 1..].to_vec();
+                fl2.truncate(j + 1);
+                fl2.push(0);
+                fl2.push(0);
+                fl2.extend_from_slice(&tail);
+                let a1 = aval(solve_int_mode_a(&nn, &dd, &rr, &tt, &fl2, lam, 0.0, pol));
+                let fd = (a1 * a1 - a0 * a0) / delta / 2.0;
+                let scale = fd.abs().max(p.abs()).max(1e-12);
+                let err = (fd - p).abs() / scale;
+                assert!(err < 2e-3, "PmbA pol={pol} z={z}: fd={fd:.6e} p={p:.6e} err={err:.2e}");
+            }
+        }
+    }
 
     #[test]
     fn phase_sensitivity_matches_fd_of_phase() {
@@ -1910,7 +2053,7 @@ mod tests {
 
         let pmb = p_function_multiblock(
             &wavls, &angles, &cache6, &d6, &flags, &rt6, &rv6,
-            &npw6, &t6, &w6, &z6, None, 0,
+            &npw6, PmbQuantity::R, &t6, &w6, &z6, None, 0,
         )
         .unwrap();
         let locs = locate_hosts_multiblock(&d6, &flags, &z6, None).unwrap();
@@ -1922,7 +2065,7 @@ mod tests {
                     (0..6).map(|l| cplx(cache6[base + l * 2], cache6[base + l * 2 + 1])).collect();
                 let c = p_multiblock_point(
                     wavls[w], angles[a], &ns, &d6, &flags, &rv6, &rt6,
-                    npw6[w], t6[a * num_wavs + w], w6[a * num_wavs + w], &locs, 0,
+                    npw6[w], PmbQuantity::R, t6[a * num_wavs + w], w6[a * num_wavs + w], &locs, 0,
                 );
                 for (zi, cv) in c.iter().enumerate() {
                     acc6[zi] += cv;

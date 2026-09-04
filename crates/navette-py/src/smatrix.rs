@@ -13,7 +13,7 @@ use std::f64::consts::PI;
 
 use navette::smatrix::coherent_block::*;
 use navette::smatrix::core_engine::*;
-use navette::smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_A, NREQ_P_MB, NREQ_P_PHI, NREQ_P_T};
+use navette::smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_A, NREQ_P_MB, NREQ_P_MB_A, NREQ_P_MB_T, NREQ_P_PHI, NREQ_P_T};
 use navette::smatrix::needle_operator::*;
 use navette::smatrix::optics_core::*;
 use navette::smatrix::optimizer::*;
@@ -505,6 +505,8 @@ pub fn needle_engine<'py>(
     }
     let want_p = requested & NREQ_P != 0;
     let want_pmb = requested & NREQ_P_MB != 0;
+    let want_pmb_t = requested & NREQ_P_MB_T != 0;
+    let want_pmb_a = requested & NREQ_P_MB_A != 0;
     let want_pt = requested & NREQ_P_T != 0;
     let want_pa = requested & NREQ_P_A != 0;
     let want_pphi = requested & NREQ_P_PHI != 0;
@@ -573,7 +575,8 @@ pub fn needle_engine<'py>(
     let weight_phi_of = |k: usize| wgt_phi.as_ref().map(|t| t[k]).unwrap_or(1.0);
 
     // Incoherent flags only needed for the multiblock path.
-    let inc = match (&incoherent_flags, want_pmb) {
+    let want_any_pmb = want_pmb || want_pmb_t || want_pmb_a;
+    let inc = match (&incoherent_flags, want_any_pmb) {
         (_, false) => None,
         (None, true) => {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -625,12 +628,15 @@ pub fn needle_engine<'py>(
         pt: [Option<Vec<f64>>; 2],
         pa: [Option<Vec<f64>>; 2],
         pphi: [Option<Vec<f64>>; 2],
+        pmb_t: [Option<Vec<f64>>; 2],
+        pmb_a: [Option<Vec<f64>>; 2],
     }
     impl PointOut {
         fn empty() -> Self {
             PointOut {
                 p: [None, None], pmb: [None, None], q: [None, None],
                 pt: [None, None], pa: [None, None], pphi: [None, None],
+                pmb_t: [None, None], pmb_a: [None, None],
             }
         }
     }
@@ -675,14 +681,14 @@ pub fn needle_engine<'py>(
                             ));
                         }
                         if want_pt {
-                            o.pt[pi] = Some(p_coherent_T_from_fields(
+                            o.pt[pi] = Some(p_coherent_t_from_fields(
                                 &fields, nsin_fi, lam, pol, np_c,
                                 target_t_of(k), weight_t_of(k),
                                 thick_slice, start_idx, idx_end, z_slice,
                             ));
                         }
                         if want_pa {
-                            o.pa[pi] = Some(p_coherent_A_from_fields(
+                            o.pa[pi] = Some(p_coherent_a_from_fields(
                                 &fields, nsin_fi, lam, pol, np_c,
                                 target_a_of(k), weight_a_of(k),
                                 thick_slice, start_idx, idx_end, z_slice,
@@ -719,10 +725,26 @@ pub fn needle_engine<'py>(
                         if !on {
                             continue;
                         }
-                        o.pmb[pi] = Some(p_multiblock_point(
-                            lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
-                            np_c, tgt_k, wgt_k, locs, pi as i32,
-                        ));
+                        if want_pmb {
+                            o.pmb[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
+                                np_c, PmbQuantity::R, tgt_k, wgt_k, locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_t {
+                            o.pmb_t[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
+                                np_c, PmbQuantity::T,
+                                target_t_of(k), weight_t_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_a {
+                            o.pmb_a[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
+                                np_c, PmbQuantity::A,
+                                target_a_of(k), weight_a_of(k), locs, pi as i32,
+                            ));
+                        }
                     }
                 }
 
@@ -818,6 +840,20 @@ pub fn needle_engine<'py>(
         for pi in 0..2 {
             if pol_on[pi] {
                 emit!(format!("Pmb_{}", pol_suffix(pi)), pmb, pi);
+            }
+        }
+    }
+    if want_pmb_t {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_T_{}", pol_suffix(pi)), pmb_t, pi);
+            }
+        }
+    }
+    if want_pmb_a {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_A_{}", pol_suffix(pi)), pmb_a, pi);
             }
         }
     }
@@ -1293,6 +1329,8 @@ pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NREQ_P_T", NREQ_P_T)?;
     m.add("NREQ_P_A", NREQ_P_A)?;
     m.add("NREQ_P_PHI", NREQ_P_PHI)?;
+    m.add("NREQ_P_MB_T", NREQ_P_MB_T)?;
+    m.add("NREQ_P_MB_A", NREQ_P_MB_A)?;
     m.add("NREQ_DPHI", NREQ_DPHI)?;
     m.add("NREQ_DGD", NREQ_DGD)?;
     m.add("NREQ_DGDD", NREQ_DGDD)?;

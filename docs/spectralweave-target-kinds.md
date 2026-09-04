@@ -67,8 +67,15 @@ recomputed every iteration):
 | `c` | outside | nearest band edge, $nf^2/tol^2$ |
 | `r` / `c` | no sim yet (first iteration) | centre, $nf^2/tol^2$ (conservative) |
 
-Only linear-normalized reflectance targets fold; anything else is an
-`Err`, as are transmission channels (the analytic pass is R-only).
+Folding is per quantity: R demands → `(targets_r, weights_r)`, T demands →
+`(targets_t, weights_t)`, absorption demands (`As`/`Ap`, derived as
+$A = 1 − R − T$ from the companion curves) → `(targets_a, weights_a)` —
+the kind table above applies identically in each bucket. Missing absorption
+companions fold conservatively (exact at centre).
+
+Only linear-normalized R/T/A demands fold; anything else is an `Err`.
+Phase demands do not fold (phase is not stored in `SimCurves`) — drive
+`P_PHI` directly via `targets_phi`/`weights_phi`.
 
 ### The dropped `+1` level
 
@@ -88,6 +95,14 @@ any decision — so the fold drops it by design. If a future consumer needs
 true values from the folded path (e.g. a trust-region acceptance test),
 return the outside-count alongside `(targets, weights)`; the fold already
 knows it.
+
+### Multiblock (incoherent) needle
+
+`Pmb` differentiates the cascade totals through the adjoint weights
+($g[p][e] = \partial v[e]/\partial param$): R via $v[0]$, T via $v[2]$,
+A via $1 − v[0] − v[2]$ with negated summed weights. Request with
+`P_MB`/`P_MB_T`/`P_MB_A` (reusing the R/T/A target arrays); phase has no
+multiblock path (phases only live inside coherent blocks).
 
 ### Kinks
 

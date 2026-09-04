@@ -95,9 +95,64 @@ def check_fd(quantity, req_flag, needle_req, absorbing=False, channel=2):
     return good
 
 
+def incoh_stack(needle_xi=None, absorbing=False):
+    n_sio2 = (1.8 + 0.4j) if absorbing else (1.45 + 0j)
+    if needle_xi is None:
+        idx = np.array([1.0 + 0j, 2.35 + 0j, n_sio2, 2.35 + 0j, 1.52 + 0j])
+        thick = np.array([0.0, 40.0, 60.0, 50.0, 0.0])
+        flags = [0, 0, 1, 0, 0]
+    else:
+        idx = np.array([1.0 + 0j, 2.35 + 0j, n_sio2, 2.35 + 0j,
+                        N_NEEDLE, 2.35 + 0j, 1.52 + 0j])
+        thick = np.array([0.0, 40.0, 60.0, needle_xi, DELTA,
+                          50.0 - needle_xi, 0.0])
+        flags = [0, 0, 1, 0, 0, 0, 0]
+    return ScatterMatrix(idx, thick, wavelengths=WAVLS, angles=ANGLES,
+                         incoherent_flags=flags)
+
+
+Z_MB = [120.0]  # block 1 (layer 3 spans 100..150), xi = 20
+
+
+def check_pmb():
+    print("--- Pmb_T/A: wiring + FD on incoherent stack ---")
+    ok = True
+    st = incoh_stack()
+    fwd = st.compute(Request.TS | Request.A_S)
+    nn = np.full(len(WAVLS), N_NEEDLE, dtype=np.complex128)
+    out = needle_gradient(
+        st, nn, Z_MB, NeedleRequest.P_MB_T | NeedleRequest.P_MB_A,
+        targets_t=as_point_array(fwd, "Ts"),
+        targets_a=as_point_array(fwd, "A_s"), pol="s",
+    )
+    for k in ("Pmb_T_s", "Pmb_A_s"):
+        m = abs(out[k]).max()
+        good = m < 1e-9
+        ok &= good
+        print(f"  {k}: max|P| = {m:.3e} {'OK' if good else 'FAIL'}")
+    # FD of the cascade T^2 / A^2 merits (absorbing spacer-stack for A)
+    for qty, req, key, absorbing in [("T", Request.TS, "Ts", False),
+                                      ("A", Request.A_S, "A_s", True)]:
+        s0 = incoh_stack(absorbing=absorbing)
+        s1 = incoh_stack(needle_xi=20.0, absorbing=absorbing)
+        q0 = np.asarray(s0.compute(req)[key], dtype=np.float64).ravel()
+        q1 = np.asarray(s1.compute(req)[key], dtype=np.float64).ravel()
+        fd = (q1 * q1 - q0 * q0) / DELTA
+        flag = NeedleRequest.P_MB_T if qty == "T" else NeedleRequest.P_MB_A
+        out = needle_gradient(s0, nn, Z_MB, flag, pol="s")
+        p = np.asarray(out[f"Pmb_{qty}_s"]).ravel()
+        scale = np.maximum(np.abs(fd), np.abs(p)).clip(min=1e-12)
+        err = np.abs(fd - 2.0 * p) / scale
+        good = bool((err < 1e-2).all())
+        ok &= good
+        print(f"  Pmb_{qty}_s: max rel err = {err.max():.2e} {'OK' if good else 'FAIL'}")
+    return ok
+
+
 def main():
     ok = True
     ok &= check_wiring()
+    ok &= check_pmb()
     print("--- FD: P_T vs T^2 merit (s-pol) ---")
     ok &= check_fd("Ts", Request.TS, NeedleRequest.P_T)
     print("--- FD: P_A vs A^2 merit on absorbing stack (s-pol) ---")

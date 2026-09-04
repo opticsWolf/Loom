@@ -27,8 +27,8 @@ Conventions
   ``T = |t_fwd|²·f`` and ``A = 1 − R − T`` (front incidence); the phase
   channel is the full gradient ``2·w·wrap(φ − φ_t)·Q`` (phase is not an
   intensity, so no half factor applies).
-* ``Pmb`` stays reflectance-only (intensity cascade); T/A/phase gradients
-  are coherent-path only.
+* ``Pmb`` covers R/T/A through the intensity cascade (``P_MB``/``P_MB_T``/
+  ``P_MB_A``); only phase gradients are coherent-path only.
 * Results are returned as ``(n_angles, n_wavs, n_depths)`` float64 arrays.
 """
 
@@ -48,6 +48,8 @@ try:
         NREQ_P_T as _NREQ_P_T,
         NREQ_P_A as _NREQ_P_A,
         NREQ_P_PHI as _NREQ_P_PHI,
+        NREQ_P_MB_T as _NREQ_P_MB_T,
+        NREQ_P_MB_A as _NREQ_P_MB_A,
         NREQ_DPHI as _NREQ_DPHI,
         NREQ_DGD as _NREQ_DGD,
         NREQ_DGDD as _NREQ_DGDD,
@@ -76,6 +78,8 @@ class NeedleRequest(IntFlag):
     P_T = _NREQ_P_T        # coherent transmission-merit gradient P_T(z)
     P_A = _NREQ_P_A        # coherent absorption-merit gradient P_A(z)
     P_PHI = _NREQ_P_PHI    # coherent phase-merit gradient P_PHI(z)
+    P_MB_T = _NREQ_P_MB_T  # multiblock P(z) for transmittance
+    P_MB_A = _NREQ_P_MB_A  # multiblock P(z) for absorptance
     DPHI = _NREQ_DPHI      # ∂φ/∂δ
     DGD = _NREQ_DGD        # ∂(dφ/dω)/∂δ  (group delay)
     DGDD = _NREQ_DGDD      # ∂(d²φ/dω²)/∂δ  (group-delay dispersion)
@@ -149,8 +153,9 @@ def needle_gradient(
     -------
     dict[str, ndarray]
         ``P_s``, ``P_p``, ``Pmb_s``, ``Pmb_p``, ``P_T_s``, ``P_A_p``,
-        ``P_PHI_s``, ``dphi_s``, ``dgdd_p``, ... depending on ``request``
-        and ``pol``; each shaped ``(n_angles, n_wavs, n_depths)``.
+        ``P_PHI_s``, ``Pmb_T_s``, ``Pmb_A_s``, ``dphi_s``, ``dgdd_p``, ...
+        depending on ``request`` and ``pol``; each shaped
+        ``(n_angles, n_wavs, n_depths)``.
     """
     if pol not in ("s", "p", "sp"):
         raise ValueError("pol must be 's', 'p', or 'sp'.")
@@ -207,7 +212,7 @@ def needle_gradient(
         npw,
         z,
         req,
-        stack.incoherent_flags if (req & NeedleRequest.P_MB) else None,
+        stack.incoherent_flags if (req & (NeedleRequest.P_MB | NeedleRequest.P_MB_T | NeedleRequest.P_MB_A)) else None,
         tgt,
         wgt,
         tgt_t,

@@ -48,7 +48,8 @@ pub enum Channel {
     T,
 }
 
-/// Identifies one simulated curve (mirrors `_RESULT_KEY_MAP`).
+/// Identifies one simulated curve (mirrors `_RESULT_KEY_MAP`) or one
+/// derived absorptance demand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CurveId {
     Rs,
@@ -57,16 +58,22 @@ pub enum CurveId {
     Ts,
     Tp,
     Tu,
+    /// Absorptance demand (s): derived as A = 1 − Rs − Ts, never stored.
+    As,
+    /// Absorptance demand (p): derived as A = 1 − Rp − Tp, never stored.
+    Ap,
 }
 
 impl CurveId {
-    pub const ALL: [CurveId; 6] = [
+    pub const ALL: [CurveId; 8] = [
         CurveId::Rs,
         CurveId::Rp,
         CurveId::Ru,
         CurveId::Ts,
         CurveId::Tp,
         CurveId::Tu,
+        CurveId::As,
+        CurveId::Ap,
     ];
 
     pub fn new(pol: Pol, channel: Channel) -> Self {
@@ -80,7 +87,23 @@ impl CurveId {
         }
     }
 
-    /// Index into `SimCurves::curves` ([Rs, Rp, Ru, Ts, Tp, Tu]).
+    /// True for the derived absorptance demands (`As`/`Ap`).
+    pub fn is_absorption(self) -> bool {
+        matches!(self, CurveId::As | CurveId::Ap)
+    }
+
+    /// Companion intensity curves an absorption demand derives from.
+    /// `None` for plain simulated curves.
+    pub fn absorption_companions(self) -> Option<(CurveId, CurveId)> {
+        match self {
+            CurveId::As => Some((CurveId::Rs, CurveId::Ts)),
+            CurveId::Ap => Some((CurveId::Rp, CurveId::Tp)),
+            _ => None,
+        }
+    }
+
+    /// Index into `SimCurves::curves`
+    /// ([Rs, Rp, Ru, Ts, Tp, Tu, As, Ap]; absorption slots stay `None`).
     pub fn index(self) -> usize {
         match self {
             CurveId::Rs => 0,
@@ -89,6 +112,8 @@ impl CurveId {
             CurveId::Ts => 3,
             CurveId::Tp => 4,
             CurveId::Tu => 5,
+            CurveId::As => 6,
+            CurveId::Ap => 7,
         }
     }
 }
@@ -154,8 +179,9 @@ pub enum SimTransform {
 pub struct SimCurves {
     pub angles: Arc<[f64]>,
     pub wavelengths: Arc<[f64]>,
-    /// Order: [Rs, Rp, Ru, Ts, Tp, Tu].
-    pub curves: [Option<Arc<[f64]>>; 6],
+    /// Order: [Rs, Rp, Ru, Ts, Tp, Tu, As, Ap]. Absorption slots stay
+    /// `None`: absorptance is derived from the companion R/T curves.
+    pub curves: [Option<Arc<[f64]>>; 8],
 }
 
 impl SimCurves {
@@ -287,13 +313,11 @@ impl MeritSpec {
         let mut total = 0.0;
         let mut buf: Vec<f64> = Vec::new();
         for k in 0..self.keys.len() {
-            let key = &self.keys[k];
-            let Some(curve) = sim.curve(key.curve) else {
-                total += missing_penalty;
-                continue;
-            };
-            self.residuals_into(sim, curve, k, &mut buf);
-            total += buf.iter().map(|r| r * r).sum::<f64>();
+            buf.clear();
+            match self.residuals_into(sim, k, &mut buf) {
+                Ok(()) => total += buf.iter().map(|r| r * r).sum::<f64>(),
+                Err(_) => total += missing_penalty,
+            }
         }
         total
     }
@@ -308,11 +332,7 @@ impl MeritSpec {
         out.clear();
         out.reserve(self.n_residuals());
         for k in 0..self.keys.len() {
-            let key = &self.keys[k];
-            let Some(curve) = sim.curve(key.curve) else {
-                return Err(key.curve);
-            };
-            self.residuals_into(sim, curve, k, out);
+            self.residuals_into(sim, k, out)?;
         }
         Ok(())
     }
@@ -323,18 +343,38 @@ impl MeritSpec {
     ///
     /// Inner loop is a verbatim lift of the calculate_merit body:
     /// overlap skip → aligned fast path / two-pointer interpolation →
-    /// mode transform → kind activation.
+    /// mode transform → kind activation. Absorption demands (`As`/`Ap`)
+    /// derive A = 1 − R − T from the companion curves on the shared grid;
+    /// a missing companion fails the whole key group like a missing curve.
     fn residuals_into(
         &self,
         sim: &SimCurves,
-        curve: &Arc<[f64]>,
         key_idx: usize,
         out: &mut Vec<f64>,
-    ) {
-        let ang_row = sim.angle_row(self.keys[key_idx].angle);
+    ) -> Result<(), CurveId> {
+        let key = &self.keys[key_idx];
+        let ang_row = sim.angle_row(key.angle);
         let sim_wl: &[f64] = &sim.wavelengths;
         let n_wav = sim_wl.len();
-
+        // Resolve simulated rows BEFORE pushing anything, so a missing
+        // companion leaves `out` untouched.
+        let row_r: &[f64];
+        let mut row_t: Option<&[f64]> = None;
+        match key.curve.absorption_companions() {
+            Some((rc, tc)) => {
+                let (Some(r), Some(t)) = (sim.curve(rc), sim.curve(tc)) else {
+                    return Err(key.curve);
+                };
+                row_r = &r[ang_row * n_wav..(ang_row + 1) * n_wav];
+                row_t = Some(&t[ang_row * n_wav..(ang_row + 1) * n_wav]);
+            },
+            None => {
+                let Some(curve) = sim.curve(key.curve) else {
+                    return Err(key.curve);
+                };
+                row_r = &curve[ang_row * n_wav..(ang_row + 1) * n_wav];
+            },
+        }
         for t in self.targets.iter().filter(|t| t.key_idx as usize == key_idx) {
             let t_wl: &[f64] = &t.wavelengths;
             if t_wl.is_empty() {
@@ -358,31 +398,38 @@ impl MeritSpec {
                     .all(|(&a, &b)| a.to_bits() == b.to_bits());
 
             // Two-pointer state advances monotonically across the sorted
-            // target grid (O(n + m), never reset inside this entry).
+            // target grid (O(n + m), never reset inside this entry). The
+            // sampler is shared by both companion rows (identical grids),
+            // so absorption stays consistent point-for-point.
             let mut sim_idx = 0usize;
-            for i in 0..t_wl.len() {
-                let sim_raw = if aligned {
-                    curve[ang_row * n_wav + offset + i]
-                } else {
-                    let target_w = t_wl[i];
-                    while sim_idx + 1 < n_wav && sim_wl[sim_idx + 1] < target_w {
-                        sim_idx += 1;
-                    }
-                    if sim_idx + 1 < n_wav && sim_wl[sim_idx] <= target_w {
-                        let w0 = sim_wl[sim_idx];
-                        let w1 = sim_wl[sim_idx + 1];
-                        let v0 = curve[ang_row * n_wav + sim_idx];
-                        let v1 = curve[ang_row * n_wav + sim_idx + 1];
-                        if (w1 - w0).abs() < 1e-14 {
-                            v0
-                        } else {
-                            v0 + (target_w - w0) * (v1 - v0) / (w1 - w0)
-                        }
-                    } else if sim_idx < n_wav {
-                        curve[ang_row * n_wav + sim_idx]
+            let sample = |row: &[f64], i: usize, sim_idx: &mut usize| -> f64 {
+                if aligned {
+                    return row[offset + i];
+                }
+                let target_w = t_wl[i];
+                while *sim_idx + 1 < n_wav && sim_wl[*sim_idx + 1] < target_w {
+                    *sim_idx += 1;
+                }
+                if *sim_idx + 1 < n_wav && sim_wl[*sim_idx] <= target_w {
+                    let w0 = sim_wl[*sim_idx];
+                    let w1 = sim_wl[*sim_idx + 1];
+                    let v0 = row[*sim_idx];
+                    let v1 = row[*sim_idx + 1];
+                    if (w1 - w0).abs() < 1e-14 {
+                        v0
                     } else {
-                        curve[ang_row * n_wav + n_wav - 1]
+                        v0 + (target_w - w0) * (v1 - v0) / (w1 - w0)
                     }
+                } else if *sim_idx < n_wav {
+                    row[*sim_idx]
+                } else {
+                    row[n_wav - 1]
+                }
+            };
+            for i in 0..t_wl.len() {
+                let sim_raw = match row_t {
+                    Some(rt) => 1.0 - sample(row_r, i, &mut sim_idx) - sample(rt, i, &mut sim_idx),
+                    None => sample(row_r, i, &mut sim_idx),
                 };
 
                 let target_scaled = t.normalized_targets[i];
@@ -430,6 +477,7 @@ impl MeritSpec {
                 out.push(r);
             }
         }
+        Ok(())
     }
 }
 
@@ -448,7 +496,7 @@ mod tests {
         SimCurves {
             angles: vec![0.0].into(),
             wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
-            curves: [Some(Arc::from(vals.to_vec())), None, None, None, None, None],
+            curves: [Some(Arc::from(vals.to_vec())), None, None, None, None, None, None, None],
         }
     }
 
@@ -704,7 +752,7 @@ mod tests {
         let mut sim = SimCurves {
             angles: vec![0.0, 30.0, 60.0].into(),
             wavelengths: vec![500.0].into(),
-            curves: [None, None, None, None, None, None],
+            curves: [None, None, None, None, None, None, None, None],
         };
         sim.curves[CurveId::Ru.index()] = Some(Arc::from(vec![10.0, 20.0, 30.0]));
 
@@ -809,6 +857,48 @@ mod tests {
         // Bare band degrades to exact: (0.1/0.1)² = 1.
         let bare = mk(vec![]);
         assert!((bare.merit(&sim_one_angle(&[0.6, 0., 0., 0., 0.]), 0.0) - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn merit_two_keys_no_double_count() {
+        // Regression: merit() reused its scratch buffer across keys,
+        // over-counting every key after the first.
+        let mut spec = MeritSpec::new();
+        let k0 = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+        spec.add_target(entry(k0 as u32, vec![400.0], vec![0.5], vec![0.1],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        let k1 = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rp });
+        spec.add_target(entry(k1 as u32, vec![400.0], vec![0.5], vec![0.1],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        let mut sim = sim_one_angle(&[0.6, 0., 0., 0., 0.]);
+        sim.curves[CurveId::Rp.index()] = Some(Arc::from(vec![0.6, 0., 0., 0., 0.]));
+        // Each key: ((0.6−0.5)/0.1)² = 1 → total 2 (was 3 with stale buffer).
+        assert!((spec.merit(&sim, 1e6) - 2.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn absorption_derived_from_companions() {
+        // R row 0.6, T row 0.3 → A = 0.1; demand A = 0.1, tol 0.05 → 0.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::As });
+        spec.add_target(entry(k as u32, vec![400.0], vec![0.1], vec![0.05],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        let mut sim = SimCurves {
+            angles: vec![0.0].into(),
+            wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
+            curves: [None, None, None, None, None, None, None, None],
+        };
+        sim.curves[CurveId::Rs.index()] = Some(Arc::from(vec![0.6, 0., 0., 0., 0.]));
+        sim.curves[CurveId::Ts.index()] = Some(Arc::from(vec![0.3, 0., 0., 0., 0.]));
+        assert!(spec.merit(&sim, 1e6) < 1e-28); // A = 1−0.6−0.3 ≈ 0.1
+        let mut out = Vec::new();
+        spec.residuals(&sim, &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].abs() < 1e-14);
+        // Missing companion → penalty once, residuals Err on the demand.
+        sim.curves[CurveId::Ts.index()] = None;
+        assert_eq!(spec.merit(&sim, 123.0), 123.0);
+        assert!(matches!(spec.residuals(&sim, &mut Vec::new()), Err(CurveId::As)));
     }
 
     #[test]

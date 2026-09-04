@@ -48,6 +48,10 @@ pub const NREQ_P_T: u64 = 1 << 7;
 pub const NREQ_P_A: u64 = 1 << 8;
 /// Request coherent phase-merit gradient P_PHI(z) for the selected channel.
 pub const NREQ_P_PHI: u64 = 1 << 9;
+/// Request multiblock transmission-merit gradient Pmb_T(z).
+pub const NREQ_P_MB_T: u64 = 1 << 10;
+/// Request multiblock absorption-merit gradient Pmb_A(z).
+pub const NREQ_P_MB_A: u64 = 1 << 11;
 
 /// Highest dispersion derivative order implied by the request mask.
 pub fn max_disp_order(requested: u64) -> Option<usize> {
