@@ -68,8 +68,8 @@ recomputed every iteration):
 | `r` / `c` | no sim yet (first iteration) | centre, $nf^2/tol^2$ (conservative) |
 
 Folding is per quantity: R demands → `(targets_r, weights_r)`, T demands →
-`(targets_t, weights_t)`, absorption demands (`As`/`Ap`, derived as
-$A = 1 − R − T$ from the companion curves) → `(targets_a, weights_a)` —
+`(targets_t, weights_t)`, absorption demands (`As`/`Ap`/`Au`, derived as
+$A = 1 − R − T$ from the s/p/u companion pairs) → `(targets_a, weights_a)` —
 the kind table above applies identically in each bucket. Missing absorption
 companions fold conservatively (exact at centre).
 

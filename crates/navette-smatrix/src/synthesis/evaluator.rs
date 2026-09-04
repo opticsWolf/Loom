@@ -102,7 +102,7 @@ impl SmatrixContext {
             let v: Vec<f64> = pts.iter().map(pick).collect();
             v.into()
         };
-        let mut curves = [None, None, None, None, None, None, None, None];
+        let mut curves = [None, None, None, None, None, None, None, None, None];
         curves[CurveId::Rs.index()] = Some(mk(CurveId::Rs));
         curves[CurveId::Rp.index()] = Some(mk(CurveId::Rp));
         curves[CurveId::Ts.index()] = Some(mk(CurveId::Ts));

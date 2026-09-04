@@ -62,10 +62,12 @@ pub enum CurveId {
     As,
     /// Absorptance demand (p): derived as A = 1 − Rp − Tp, never stored.
     Ap,
+    /// Absorptance demand (unpolarized): A = 1 − Ru − Tu, never stored.
+    Au,
 }
 
 impl CurveId {
-    pub const ALL: [CurveId; 8] = [
+    pub const ALL: [CurveId; 9] = [
         CurveId::Rs,
         CurveId::Rp,
         CurveId::Ru,
@@ -74,6 +76,7 @@ impl CurveId {
         CurveId::Tu,
         CurveId::As,
         CurveId::Ap,
+        CurveId::Au,
     ];
 
     pub fn new(pol: Pol, channel: Channel) -> Self {
@@ -87,9 +90,9 @@ impl CurveId {
         }
     }
 
-    /// True for the derived absorptance demands (`As`/`Ap`).
+    /// True for the derived absorptance demands (`As`/`Ap`/`Au`).
     pub fn is_absorption(self) -> bool {
-        matches!(self, CurveId::As | CurveId::Ap)
+        matches!(self, CurveId::As | CurveId::Ap | CurveId::Au)
     }
 
     /// Companion intensity curves an absorption demand derives from.
@@ -98,12 +101,13 @@ impl CurveId {
         match self {
             CurveId::As => Some((CurveId::Rs, CurveId::Ts)),
             CurveId::Ap => Some((CurveId::Rp, CurveId::Tp)),
+            CurveId::Au => Some((CurveId::Ru, CurveId::Tu)),
             _ => None,
         }
     }
 
     /// Index into `SimCurves::curves`
-    /// ([Rs, Rp, Ru, Ts, Tp, Tu, As, Ap]; absorption slots stay `None`).
+    /// ([Rs, Rp, Ru, Ts, Tp, Tu, As, Ap, Au]; absorption slots stay `None`).
     pub fn index(self) -> usize {
         match self {
             CurveId::Rs => 0,
@@ -114,6 +118,7 @@ impl CurveId {
             CurveId::Tu => 5,
             CurveId::As => 6,
             CurveId::Ap => 7,
+            CurveId::Au => 8,
         }
     }
 }
@@ -179,9 +184,9 @@ pub enum SimTransform {
 pub struct SimCurves {
     pub angles: Arc<[f64]>,
     pub wavelengths: Arc<[f64]>,
-    /// Order: [Rs, Rp, Ru, Ts, Tp, Tu, As, Ap]. Absorption slots stay
+    /// Order: [Rs, Rp, Ru, Ts, Tp, Tu, As, Ap, Au]. Absorption slots stay
     /// `None`: absorptance is derived from the companion R/T curves.
-    pub curves: [Option<Arc<[f64]>>; 8],
+    pub curves: [Option<Arc<[f64]>>; 9],
 }
 
 impl SimCurves {
@@ -496,7 +501,7 @@ mod tests {
         SimCurves {
             angles: vec![0.0].into(),
             wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
-            curves: [Some(Arc::from(vals.to_vec())), None, None, None, None, None, None, None],
+            curves: [Some(Arc::from(vals.to_vec())), None, None, None, None, None, None, None, None],
         }
     }
 
@@ -752,7 +757,7 @@ mod tests {
         let mut sim = SimCurves {
             angles: vec![0.0, 30.0, 60.0].into(),
             wavelengths: vec![500.0].into(),
-            curves: [None, None, None, None, None, None, None, None],
+            curves: [None, None, None, None, None, None, None, None, None],
         };
         sim.curves[CurveId::Ru.index()] = Some(Arc::from(vec![10.0, 20.0, 30.0]));
 
@@ -886,7 +891,7 @@ mod tests {
         let mut sim = SimCurves {
             angles: vec![0.0].into(),
             wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
-            curves: [None, None, None, None, None, None, None, None],
+            curves: [None, None, None, None, None, None, None, None, None],
         };
         sim.curves[CurveId::Rs.index()] = Some(Arc::from(vec![0.6, 0., 0., 0., 0.]));
         sim.curves[CurveId::Ts.index()] = Some(Arc::from(vec![0.3, 0., 0., 0., 0.]));
@@ -899,6 +904,16 @@ mod tests {
         sim.curves[CurveId::Ts.index()] = None;
         assert_eq!(spec.merit(&sim, 123.0), 123.0);
         assert!(matches!(spec.residuals(&sim, &mut Vec::new()), Err(CurveId::As)));
+        // Unpolarized demand derives from the Ru/Tu companions the same way.
+        let mut spec_u = MeritSpec::new();
+        let ku = spec_u.add_key(MeritKey { angle: 0.0, curve: CurveId::Au });
+        spec_u.add_target(entry(ku as u32, vec![400.0], vec![0.2], vec![0.1],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0)).unwrap();
+        sim.curves[CurveId::Ru.index()] = Some(Arc::from(vec![0.5, 0., 0., 0., 0.]));
+        sim.curves[CurveId::Tu.index()] = Some(Arc::from(vec![0.3, 0., 0., 0., 0.]));
+        assert!(spec_u.merit(&sim, 1e6) < 1e-28); // A = 1−0.5−0.3 ≈ 0.2
+        sim.curves[CurveId::Ru.index()] = None;
+        assert!(matches!(spec_u.residuals(&sim, &mut Vec::new()), Err(CurveId::Au)));
     }
 
     #[test]

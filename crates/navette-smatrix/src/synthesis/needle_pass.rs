@@ -129,7 +129,7 @@ pub fn build_needle_targets(
         let (bt, bw_): (&mut Vec<f64>, &mut Vec<f64>) = match key.curve {
             CurveId::Rs | CurveId::Rp | CurveId::Ru => (&mut tr, &mut wr),
             CurveId::Ts | CurveId::Tp | CurveId::Tu => (&mut tt, &mut wt),
-            CurveId::As | CurveId::Ap => (&mut ta, &mut wa),
+            CurveId::As | CurveId::Ap | CurveId::Au => (&mut ta, &mut wa),
         };
         if t.transform != crate::synthesis::merit::SimTransform::Linear {
             return Err(format!(
@@ -704,7 +704,7 @@ mod tests {
         let mut sim = SimCurves {
             angles: vec![angle].into(),
             wavelengths: vec![wl].into(),
-            curves: [None, None, None, None, None, None, None, None],
+            curves: [None, None, None, None, None, None, None, None, None],
         };
         sim.curves[curve.index()] = Some(vec![val].into());
         sim
@@ -780,7 +780,7 @@ mod tests {
         let mut sim = SimCurves {
             angles: vec![0.0].into(),
             wavelengths: vec![400.0].into(),
-            curves: [None, None, None, None, None, None, None, None],
+            curves: [None, None, None, None, None, None, None, None, None],
         };
         sim.curves[CurveId::Ru.index()] = Some(vec![0.7f64].into()); // above → satisfied
 
