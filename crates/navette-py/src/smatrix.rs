@@ -259,11 +259,19 @@ pub fn core_engine(
     f64buf!(b_phi_rp, want_phi_rp);
     f64buf!(b_phi_ts, want_phi_ts);
     f64buf!(b_phi_tp, want_phi_tp);
+    f64buf!(b_phi_rbs, requested & REQ_PHI_RBS != 0);
+    f64buf!(b_phi_rbp, requested & REQ_PHI_RBP != 0);
+    f64buf!(b_phi_tbs, requested & REQ_PHI_TBS != 0);
+    f64buf!(b_phi_tbp, requested & REQ_PHI_TBP != 0);
 
     cbuf!(b_rs_c, REQ_RS_C);
     cbuf!(b_rp_c, REQ_RP_C);
     cbuf!(b_ts_c, REQ_TS_C);
     cbuf!(b_tp_c, REQ_TP_C);
+    cbuf!(b_rbs_c, REQ_RBS_C);
+    cbuf!(b_rbp_c, REQ_RBP_C);
+    cbuf!(b_tbs_c, REQ_TBS_C);
+    cbuf!(b_tbp_c, REQ_TBP_C);
     cbuf!(b_cross_r, REQ_CROSS_R);
     cbuf!(b_cross_t, REQ_CROSS_T);
 
@@ -326,11 +334,19 @@ pub fn core_engine(
         put!(b_phi_rp, k, s.rp_c.arg());
         put!(b_phi_ts, k, s.ts_c.arg());
         put!(b_phi_tp, k, s.tp_c.arg());
+        put!(b_phi_rbs, k, s.rbs_c.arg());
+        put!(b_phi_rbp, k, s.rbp_c.arg());
+        put!(b_phi_tbs, k, s.tbs_c.arg());
+        put!(b_phi_tbp, k, s.tbp_c.arg());
 
         if let Some(b) = b_rs_c.as_mut() { b[k] = s.rs_c; }
         if let Some(b) = b_rp_c.as_mut() { b[k] = s.rp_c; }
         if let Some(b) = b_ts_c.as_mut() { b[k] = s.ts_c; }
         if let Some(b) = b_tp_c.as_mut() { b[k] = s.tp_c; }
+        if let Some(b) = b_rbs_c.as_mut() { b[k] = s.rbs_c; }
+        if let Some(b) = b_rbp_c.as_mut() { b[k] = s.rbp_c; }
+        if let Some(b) = b_tbs_c.as_mut() { b[k] = s.tbs_c; }
+        if let Some(b) = b_tbp_c.as_mut() { b[k] = s.tbp_c; }
         if let Some(b) = b_cross_r.as_mut() { b[k] = s.cross_r; }
         if let Some(b) = b_cross_t.as_mut() { b[k] = s.cross_t; }
     }
@@ -397,11 +413,19 @@ pub fn core_engine(
     if requested & REQ_PHI_RP != 0 { emit_f64!("phi_rp", b_phi_rp); }
     if requested & REQ_PHI_TS != 0 { emit_f64!("phi_ts", b_phi_ts); }
     if requested & REQ_PHI_TP != 0 { emit_f64!("phi_tp", b_phi_tp); }
+    if requested & REQ_PHI_RBS != 0 { emit_f64!("phi_rbs", b_phi_rbs); }
+    if requested & REQ_PHI_RBP != 0 { emit_f64!("phi_rbp", b_phi_rbp); }
+    if requested & REQ_PHI_TBS != 0 { emit_f64!("phi_tbs", b_phi_tbs); }
+    if requested & REQ_PHI_TBP != 0 { emit_f64!("phi_tbp", b_phi_tbp); }
 
     emit_c!("rs_c", b_rs_c);
     emit_c!("rp_c", b_rp_c);
     emit_c!("ts_c", b_ts_c);
     emit_c!("tp_c", b_tp_c);
+    emit_c!("rbs_c", b_rbs_c);
+    emit_c!("rbp_c", b_rbp_c);
+    emit_c!("tbs_c", b_tbs_c);
+    emit_c!("tbp_c", b_tbp_c);
     emit_c!("cross_R", b_cross_r);
     emit_c!("cross_T", b_cross_t);
 
