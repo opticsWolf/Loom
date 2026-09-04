@@ -5,8 +5,8 @@
 //   coherent_block   — s/p/dual coherent-block solvers
 //   core_engine      — request-driven unified engine (resolve_plan/solve_point)
 //   needle_operator  — analytic needle-operator sensitivities (pure Rust)
-//   needle_engine    — request bits + dispersion-order helper (thin; the
-//                      rayon/Python API lives in navette-smatrix-py)
+//   needle_engine    — needle request bits + dispersion-order helper
+//                      (the rayon/Python API lives in the navette-py crate)
 //   optimizer        — landscape/minimize helpers (char_func et al.)
 //   synthesis        — automated design synthesis (pure Rust core)
 

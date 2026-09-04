@@ -25,8 +25,10 @@
 //! - [`func_15`]     shape handling & broadcasting
 //! - [`func_16`]     CIEDE2000
 //!
-//! Python bindings (numpy-based) live behind the `python` feature; build them
-//! with maturin (see `[tool.maturin] features = ["python"]`).
+//! The Python bindings live in the `navette-py` aggregator crate and expose
+//! these kernels as the `navette._color` extension submodule (one of five in
+//! the single `navette._navette` module built with `maturin develop` from the
+//! workspace root). This crate itself is pure Rust: no pyo3, no I/O.
 
 pub mod common;
 pub mod matrices;

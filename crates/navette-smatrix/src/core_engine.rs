@@ -1,16 +1,16 @@
-// core_engine.rs
-//
-// Unified, request-driven engine. One Rust entry point solves the optical
-// problem once per (wavelength, angle) point into an `OpticalState`, then
-// derives only the observables the caller asked for and returns them as a
-// dict { name -> ndarray }.
-//
-// What runs is decided entirely by the request bitmask:
-//   * which polarization branches solve (s, p, or both),
-//   * whether the complex p-s coherency channel runs (Mode B),
-//   * which derived observables are computed,
-//   * whether the cross-wavelength dispersion post-pass runs.
-// `calc_s` / `calc_p` are NOT inputs; they are resolved from the request.
+//! core_engine.rs
+//!
+//! Unified, request-driven engine. One Rust entry point solves the optical
+//! problem once per (wavelength, angle) point into an `OpticalState`, then
+//! derives only the observables the caller asked for and returns them as a
+//! dict { name -> ndarray }.
+//!
+//! What runs is decided entirely by the request bitmask:
+//!   * which polarization branches solve (s, p, or both),
+//!   * whether the complex p-s coherency channel runs (Mode B),
+//!   * which derived observables are computed,
+//!   * whether the cross-wavelength dispersion post-pass runs.
+//! `calc_s` / `calc_p` are NOT inputs; they are resolved from the request.
 
 use num_complex::Complex64;
 use num_complex::ComplexFloat;
@@ -21,12 +21,17 @@ use crate::optics_core::{
     grad_nonuniform as gradient, redheffer_product_cross_inner, redheffer_product_real_inner,
 };
 
+/// s-polarization branch selector.
 pub const POL_S: i32 = 0;
+/// p-polarization branch selector.
 pub const POL_P: i32 = 1;
 
-pub const MODE_A: i32 = 0; // front_block
-pub const MODE_B: i32 = 1; // coherency_matrix
-pub const MODE_C: i32 = 2; // fully_coherent
+/// Mode A: first coherent block only (front block).
+pub const MODE_A: i32 = 0;
+/// Mode B: coherency-matrix cascade over incoherent echoes.
+pub const MODE_B: i32 = 1;
+/// Mode C: fully coherent whole-stack solve.
+pub const MODE_C: i32 = 2;
 
 // Speed of light in nm/fs, so that with wavelength in nm: GD -> fs, GDD -> fs^2.
 
@@ -34,46 +39,85 @@ pub const MODE_C: i32 = 2; // fully_coherent
 // the p/s ratio is treated as degenerate and (Psi, Delta) = (PI/2, 0). The
 // transmission floor is far smaller because T can be vanishingly small deep in
 // an absorbing stack. (Matches the original ellipsometry engine.)
+/// Reflectance floor guarding Ψ/Δ extraction at near-zero signal.
 pub const RS_FLOOR: f64 = 1e-12;
+/// Transmittance floor guarding Ψ/Δ extraction at near-zero signal.
 pub const TS_FLOOR: f64 = 1e-20;
 
 // ─── Request bits (mirror these in the Python `Request(IntFlag)`) ────────────
+/// Request s-polarized reflectance Rs.
 pub const REQ_RS: u64 = 1 << 0;
+/// Request p-polarized reflectance Rp.
 pub const REQ_RP: u64 = 1 << 1;
+/// Request s-polarized transmittance Ts.
 pub const REQ_TS: u64 = 1 << 2;
+/// Request p-polarized transmittance Tp.
 pub const REQ_TP: u64 = 1 << 3;
+/// Request unpolarized reflectance (Rs + Rp) / 2.
 pub const REQ_R_AVG: u64 = 1 << 4;
+/// Request unpolarized transmittance (Ts + Tp) / 2.
 pub const REQ_T_AVG: u64 = 1 << 5;
+/// Request s-polarized absorptance As = 1 − Rs − Ts.
 pub const REQ_A_S: u64 = 1 << 6;
+/// Request p-polarized absorptance Ap = 1 − Rp − Tp.
 pub const REQ_A_P: u64 = 1 << 7;
+/// Request unpolarized absorptance.
 pub const REQ_A_AVG: u64 = 1 << 8;
+/// Request reflection ellipsometric Ψ (tan Ψ = |rp/rs|).
 pub const REQ_PSI_R: u64 = 1 << 9;
+/// Request transmission ellipsometric Ψ.
 pub const REQ_PSI_T: u64 = 1 << 10;
+/// Request reflection ellipsometric Δ (needs the p-s coherency channel).
 pub const REQ_DELTA_R: u64 = 1 << 11;
+/// Request transmission ellipsometric Δ (needs the coherency channel).
 pub const REQ_DELTA_T: u64 = 1 << 12;
+/// Request reflected degree of polarization.
 pub const REQ_DOP_R: u64 = 1 << 13;
+/// Request transmitted degree of polarization.
 pub const REQ_DOP_T: u64 = 1 << 14;
+/// Request reflection diattenuation.
 pub const REQ_DIATT_R: u64 = 1 << 15;
+/// Request transmission diattenuation.
 pub const REQ_DIATT_T: u64 = 1 << 16;
+/// Request reflected Stokes S0 (total intensity).
 pub const REQ_S0_R: u64 = 1 << 17;
+/// Request reflected Stokes S1.
 pub const REQ_S1_R: u64 = 1 << 18;
+/// Request reflected Stokes S2 (needs the coherency channel).
 pub const REQ_S2_R: u64 = 1 << 19;
+/// Request reflected Stokes S3 (needs the coherency channel).
 pub const REQ_S3_R: u64 = 1 << 20;
+/// Request transmitted Stokes S0.
 pub const REQ_S0_T: u64 = 1 << 21;
+/// Request transmitted Stokes S1.
 pub const REQ_S1_T: u64 = 1 << 22;
+/// Request transmitted Stokes S2 (needs the coherency channel).
 pub const REQ_S2_T: u64 = 1 << 23;
+/// Request transmitted Stokes S3 (needs the coherency channel).
 pub const REQ_S3_T: u64 = 1 << 24;
+/// Request absolute phase of reflected s amplitude (needs complex amps).
 pub const REQ_PHI_RS: u64 = 1 << 25;
+/// Request absolute phase of reflected p amplitude.
 pub const REQ_PHI_RP: u64 = 1 << 26;
+/// Request absolute phase of transmitted s amplitude.
 pub const REQ_PHI_TS: u64 = 1 << 27;
+/// Request absolute phase of transmitted p amplitude.
 pub const REQ_PHI_TP: u64 = 1 << 28;
+/// Request complex reflected s amplitude (first coherent block).
 pub const REQ_RS_C: u64 = 1 << 29;
+/// Request complex reflected p amplitude.
 pub const REQ_RP_C: u64 = 1 << 30;
+/// Request complex transmitted s amplitude.
 pub const REQ_TS_C: u64 = 1 << 31;
+/// Request complex transmitted p amplitude.
 pub const REQ_TP_C: u64 = 1 << 32;
+/// Request reflected p-s cross-coherency (forces the cross channel).
 pub const REQ_CROSS_R: u64 = 1 << 33;
+/// Request transmitted p-s cross-coherency.
 pub const REQ_CROSS_T: u64 = 1 << 34;
+/// Request reflection retardance.
 pub const REQ_RETARD_R: u64 = 1 << 35;
+/// Request transmission retardance.
 pub const REQ_RETARD_T: u64 = 1 << 36;
 pub const REQ_DISP_R_S: u64 = 1 << 37; // emits GD/GDD/TOD/FOD_R_s
 pub const REQ_DISP_R_P: u64 = 1 << 38;
@@ -118,16 +162,23 @@ pub const NEEDS_CROSS: u64 = REQ_DELTA_R | REQ_DELTA_T | REQ_DOP_R | REQ_DOP_T
 /// over all requested observables.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Level {
+    /// Real |r|^2/|t|^2 accumulators only (cheapest).
     Intensities,
+    /// Plus first-block complex amplitudes (phases, dispersion).
     ComplexAmps,
+    /// Plus the p-s coherency channel (Delta, DOP, S2/S3, retardance).
     Cross,
 }
 
 /// Everything `core_engine` needs to steer the solve, derived once from the mask.
 pub struct Plan {
+    /// Solve the s branch.
     pub need_s: bool,
+    /// Solve the p branch.
     pub need_p: bool,
+    /// Track the p-s coherency channel (forces both branches).
     pub need_cross: bool,
+    /// Maximum compute level over all requested observables.
     pub level: Level,
 }
 
@@ -153,15 +204,25 @@ pub fn resolve_plan(requested: u64) -> Plan {
 /// mode-resolved p-s coherency. Fields for unsolved pols are NaN.
 #[derive(Clone, Copy)]
 pub struct OpticalState {
+    /// Total s reflectance (all incoherent echoes).
     pub rs: f64,
+    /// Total p reflectance.
     pub rp: f64,
+    /// Total s transmittance.
     pub ts: f64,
+    /// Total p transmittance.
     pub tp: f64,
+    /// Complex reflected s amplitude (first block / whole stack in Mode C).
     pub rs_c: Complex64,
+    /// Complex reflected p amplitude.
     pub rp_c: Complex64,
+    /// Complex transmitted s amplitude.
     pub ts_c: Complex64,
+    /// Complex transmitted p amplitude.
     pub tp_c: Complex64,
+    /// Mode-resolved reflected p-s coherency.
     pub cross_r: Complex64,
+    /// Mode-resolved transmitted p-s coherency.
     pub cross_t: Complex64,
 }
 

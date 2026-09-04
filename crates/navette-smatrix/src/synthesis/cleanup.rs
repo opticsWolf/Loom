@@ -1,18 +1,18 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::cleanup — post-synthesis design cleanup.
-//
-// Verbatim port of needle_synthesis.py: `remove_thin_layers` and
-// `cleanup_design`. Decision logic (candidate ranking, re-optimization
-// points, merge passes) is kept exactly comparable to the Python so
-// trajectories can be cross-validated; only the evaluation/optimize calls
-// are abstracted behind [`DesignContext`].
-//
-// Sequence (cleanup_design):
-//   1. merge adjacent same-material films
-//   2. iterative impact-ranked removal of thin layers (re-opt after each)
-//   3. merge again (pruning exposes new same-material neighbours)
-//   4. optional final re-optimization on the simplified topology
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::cleanup — post-synthesis design cleanup.
+//!
+//! Verbatim port of needle_synthesis.py: `remove_thin_layers` and
+//! `cleanup_design`. Decision logic (candidate ranking, re-optimization
+//! points, merge passes) is kept exactly comparable to the Python so
+//! trajectories can be cross-validated; only the evaluation/optimize calls
+//! are abstracted behind [`DesignContext`].
+//!
+//! Sequence (cleanup_design):
+//!   1. merge adjacent same-material films
+//!   2. iterative impact-ranked removal of thin layers (re-opt after each)
+//!   3. merge again (pruning exposes new same-material neighbours)
+//!   4. optional final re-optimization on the simplified topology
 
 use crate::synthesis::context::DesignContext;
 use crate::synthesis::structure::DesignStack;

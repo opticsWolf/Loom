@@ -34,6 +34,7 @@ use crate::spectralweave::_spectralweave;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Aggregate all five engine submodules into `navette._navette`.
 #[pymodule]
 fn _navette(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pymodule!(_color))?;

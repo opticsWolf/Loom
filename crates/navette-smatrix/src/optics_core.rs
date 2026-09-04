@@ -1,20 +1,19 @@
-// optics_core.rs
-//
-// Pure-Rust shared primitives for the whole crate: constants, fast complex
-// kernels, the roughness form factor, the three Redheffer star products, and
-// the non-uniform spectral differentiation operator.
-//
-// This module is the SINGLE SOURCE OF TRUTH for everything that used to be
-// duplicated across func_0/func_1/func_2/func_4 and the needle operator.
-// It deliberately carries no pyo3 / numpy dependencies so it can be compiled
-// standalone (e.g. into the needle verification crate via `#[path]`).
-//
-// Numerical behaviour is byte-identical to the code that was moved here;
-// nothing was re-derived or "cleaned up".
+//! Pure-Rust shared primitives for the whole crate: constants, fast complex
+//! kernels, the roughness form factor, the three Redheffer star products, and
+//! the non-uniform spectral differentiation operator.
+//!
+//! This module is the SINGLE SOURCE OF TRUTH for everything that used to be
+//! duplicated across func_0/func_1/func_2/func_4 and the needle operator.
+//! It deliberately carries no pyo3 / numpy dependencies so it can be compiled
+//! standalone (e.g. into the needle verification crate via `#[path]`).
+//!
+//! Numerical behaviour is byte-identical to the code that was moved here;
+//! nothing was re-derived or "cleaned up".
 
 use num_complex::Complex64;
 use num_complex::ComplexFloat;
 
+/// √3 (roughness/field-profile closed forms).
 pub const SQRT3: f64 = 1.73205080757;
 /// Denominator regularization floor shared by the field-amplitude star product.
 pub const LOG_MIN: f64 = 1e-100;
@@ -26,6 +25,7 @@ pub const DBL_EPS: f64 = 2.22e-16;
 pub const C_NM_PER_FS: f64 = 299.792458;
 
 #[inline(always)]
+/// Construct a complex value without importing the trait soup at call sites.
 pub fn cplx(re: f64, im: f64) -> Complex64 {
     Complex64::new(re, im)
 }

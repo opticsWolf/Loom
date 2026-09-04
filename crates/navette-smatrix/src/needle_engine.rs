@@ -1,39 +1,47 @@
-// func_needle_engine.rs
-//
-// Request-driven, rayon-parallel Python API for the analytic needle operator.
-// Mirrors the conventions of func_4's `core_engine`: one Rust entry point
-// evaluates every requested observable per (wavelength, angle) point — with
-// the coherent-block partial matrices built ONCE per point and shared across
-// observables (the "single-sweep" property) — then returns a dict of ndarrays.
-//
-// What runs is decided entirely by the request bitmask (mirror these in a
-// Python `NeedleRequest(IntFlag)`):
-//   * NREQ_P     — coherent merit gradient P(z)      (sub-block confined)
-//   * NREQ_P_MB  — incoherent-aware P(z)             (Modes A/B, needs flags)
-//   * NREQ_DPHI / NREQ_DGD / NREQ_DGDD / NREQ_DTOD / NREQ_DFOD
-//                — phase-dispersion sensitivities    (∂φ/∂δ … ∂FOD/∂δ)
-//
-// Polarization branches are NOT inputs; they are resolved from `calc_s` /
-// `calc_p` flags so both polarizations can ride one parallel sweep.
-//
-// Merit convention: P uses targets/weights per spectral point,
-// P_point = 2·w·(R − R_target)·Re{conj(r)·∂r/∂δ} accumulated over points into
-// each z. Dispersion channels are emitted RAW (per point, per z); aggregate
-// merit gradients at the call site:
-//   ∂F/∂δ(z) = Σ_k 2·w_k·(GDD_k − GDD_t_k)·dGDD[k][z]
+//! Request-driven needle sensitivities over the analytic needle operator.
+//!
+//! Pure-Rust core (no Python): mirrors the conventions of `core_engine` —
+//! one entry point evaluates every requested observable per (wavelength,
+//! angle) point, with the coherent-block partial matrices built ONCE per
+//! point and shared across observables (the "single-sweep" property).
+//! The rayon/Python API lives in the `navette-py` aggregator crate.
+//!
+//! What runs is decided entirely by the request bitmask (mirror these in a
+//! Python `NeedleRequest(IntFlag)`):
+//!   * NREQ_P     — coherent merit gradient P(z)      (sub-block confined)
+//!   * NREQ_P_MB  — incoherent-aware P(z)             (Modes A/B, needs flags)
+//!   * NREQ_DPHI / NREQ_DGD / NREQ_DGDD / NREQ_DTOD / NREQ_DFOD
+//!                — phase-dispersion sensitivities    (∂φ/∂δ … ∂FOD/∂δ)
+//!
+//! Polarization branches are NOT inputs; they are resolved from `calc_s` /
+//! `calc_p` flags so both polarizations can ride one parallel sweep.
+//!
+//! Merit convention: P uses targets/weights per spectral point,
+//! P_point = 2·w·(R − R_target)·Re{conj(r)·∂r/∂δ} accumulated over points into
+//! each z. Dispersion channels are emitted RAW (per point, per z); aggregate
+//! merit gradients at the call site:
+//!   ∂F/∂δ(z) = Σ_k 2·w_k·(GDD_k − GDD_t_k)·dGDD[k][z]
 
 
+/// Speed of light in nm/fs (group-delay conversions).
 pub const C_NM_PER_FS: f64 = 299.792458;
 
 
 // ─── Request bits ────────────────────────────────────────────────────────────
-pub const NREQ_P: u64 = 1 << 0; // coherent P(z)
-pub const NREQ_P_MB: u64 = 1 << 1; // multiblock P(z) through intensity cascade
-pub const NREQ_DPHI: u64 = 1 << 2; // ∂φ/∂δ
-pub const NREQ_DGD: u64 = 1 << 3; // ∂GD/∂δ
-pub const NREQ_DGDD: u64 = 1 << 4; // ∂GDD/∂δ
-pub const NREQ_DTOD: u64 = 1 << 5; // ∂TOD/∂δ
-pub const NREQ_DFOD: u64 = 1 << 6; // ∂FOD/∂δ
+/// Request coherent absorptance profile P(z).
+pub const NREQ_P: u64 = 1 << 0;
+/// Request multiblock absorptance profile through the intensity cascade.
+pub const NREQ_P_MB: u64 = 1 << 1;
+/// Request phase sensitivity to optical-path perturbation (dispersion-order needle channel).
+pub const NREQ_DPHI: u64 = 1 << 2;
+/// Request group-delay sensitivity (dispersion-order needle channel).
+pub const NREQ_DGD: u64 = 1 << 3;
+/// Request GDD sensitivity (dispersion-order needle channel).
+pub const NREQ_DGDD: u64 = 1 << 4;
+/// Request TOD sensitivity (dispersion-order needle channel).
+pub const NREQ_DTOD: u64 = 1 << 5;
+/// Request FOD sensitivity (dispersion-order needle channel).
+pub const NREQ_DFOD: u64 = 1 << 6;
 
 /// Highest dispersion derivative order implied by the request mask.
 pub fn max_disp_order(requested: u64) -> Option<usize> {

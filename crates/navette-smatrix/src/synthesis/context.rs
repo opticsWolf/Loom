@@ -1,14 +1,14 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::context — abstraction seam between the synthesis algorithms
-// (cleanup / inflate / pipeline) and the numeric machinery (TMM solve +
-// MeritSpec residuals + bounded LM).
-//
-// The algorithms in cleanup.rs / inflate.rs / pipeline.rs are written
-// against this trait so they are unit-testable with analytic mock
-// evaluators today, and wired to core_engine + thick_opt in the pyo3 shell
-// tomorrow without touching their decision logic (which must stay
-// byte-comparable to needle_synthesis.py).
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::context — abstraction seam between the synthesis algorithms
+//! (cleanup / inflate / pipeline) and the numeric machinery (TMM solve +
+//! MeritSpec residuals + bounded LM).
+//!
+//! The algorithms in cleanup.rs / inflate.rs / pipeline.rs are written
+//! against this trait so they are unit-testable with analytic mock
+//! evaluators today, and wired to core_engine + thick_opt in the pyo3 shell
+//! tomorrow without touching their decision logic (which must stay
+//! byte-comparable to needle_synthesis.py).
 
 use crate::synthesis::structure::DesignStack;
 

@@ -1,22 +1,22 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::structure — DesignStack / LayerSpec.
-//
-// Port of the Loom_Structure / Layer subset used by needle synthesis
-// (loom_structure.py) plus the mutation primitives used by
-// needle_synthesis.py (`_insert_needle`, `merge_adjacent_layers`) and
-// needle_pipeline.py (`clamp_all_layers`).
-//
-// Stack model (matches Python exactly):
-//     layer_list = [ambient, film_0, …, film_{N-1}, substrate]
-// Ambient and substrate are fixed: never optimized, never removed,
-// never hosts. Only `films` is mutable.
-//
-// Solver-array layout (inherited from navette/smatrix.py):
-//   n_stack_cache — flat f64, wav-major with re/im interleaved per layer:
-//                   base = w * n_layers * 2 → [Re0, Im0, Re1, Im1, …]
-//   thicknesses   — [n_layers] nm
-//   incoherent_flags / rough_types / rough_vals — [n_layers]
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::structure — DesignStack / LayerSpec.
+//!
+//! Port of the Loom_Structure / Layer subset used by needle synthesis
+//! (loom_structure.py) plus the mutation primitives used by
+//! needle_synthesis.py (`_insert_needle`, `merge_adjacent_layers`) and
+//! needle_pipeline.py (`clamp_all_layers`).
+//!
+//! Stack model (matches Python exactly):
+//!     layer_list = [ambient, film_0, …, film_{N-1}, substrate]
+//! Ambient and substrate are fixed: never optimized, never removed,
+//! never hosts. Only `films` is mutable.
+//!
+//! Solver-array layout (inherited from navette/smatrix.py):
+//!   n_stack_cache — flat f64, wav-major with re/im interleaved per layer:
+//!                   base = w * n_layers * 2 → [Re0, Im0, Re1, Im1, …]
+//!   thicknesses   — [n_layers] nm
+//!   incoherent_flags / rough_types / rough_vals — [n_layers]
 
 use std::sync::Arc;
 

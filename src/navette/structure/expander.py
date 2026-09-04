@@ -16,6 +16,15 @@ def _looyenga_fallback(
   return cbrt ** 3.0
 
 
+"""Flatten layers/groups/materials into engine :class:`SolverArrays`.
+
+The single (:class:`_LayerExpander`) traversal applies group scaling,
+error draws, roughness/interface handling and index interpolation, so
+``get_solver_inputs`` stays a one-liner. The Looyenga interface mix uses
+the native kernel when built, else a NumPy fallback.
+"""
+
+
 def looyenga_eps(
   n_i: np.ndarray, n_h: np.ndarray, f: float
 ) -> np.ndarray:
@@ -40,6 +49,7 @@ _DEFAULT_GROUP = Group("_default_")
 _NO_ROUGHNESS = int(RoughnessType.NONE)
 
 class _LayerExpander:
+    """Internal stack flattener (see module docstring)."""
     @staticmethod
     def expand(
         layers: Iterator[Tuple[Layer, bool]],

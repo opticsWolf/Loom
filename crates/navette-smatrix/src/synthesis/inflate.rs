@@ -1,18 +1,18 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::inflate — QWOT-based thickness inflation & rounding.
-//
-// Verbatim port of needle_synthesis.py: `_qwot_nm`, `thickness_to_qwot`,
-// `qwot_to_thickness`, `_evaluate_inflate_impact`, `inflate_design`,
-// `round_to_qwot`.
-//
-// QWOT convention: λ₀ / (4·n(λ₀)) with the REAL part of the complex index
-// at the wavelength-grid point closest to the reference wavelength.
-//
-// Python-parity note: `round_to_qwot` uses Python's round() semantics —
-// banker's rounding (half to even). Rust's f64::round is half-away-from-
-// zero, so a parity helper `round_half_even` is used here. At exact .5
-// fractions the two conventions differ; this keeps trajectories comparable.
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::inflate — QWOT-based thickness inflation & rounding.
+//!
+//! Verbatim port of needle_synthesis.py: `_qwot_nm`, `thickness_to_qwot`,
+//! `qwot_to_thickness`, `_evaluate_inflate_impact`, `inflate_design`,
+//! `round_to_qwot`.
+//!
+//! QWOT convention: λ₀ / (4·n(λ₀)) with the REAL part of the complex index
+//! at the wavelength-grid point closest to the reference wavelength.
+//!
+//! Python-parity note: `round_to_qwot` uses Python's round() semantics —
+//! banker's rounding (half to even). Rust's f64::round is half-away-from-
+//! zero, so a parity helper `round_half_even` is used here. At exact .5
+//! fractions the two conventions differ; this keeps trajectories comparable.
 
 use crate::synthesis::context::DesignContext;
 use crate::synthesis::structure::{DesignStack, LayerSpec};

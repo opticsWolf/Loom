@@ -1,15 +1,15 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::cycle — one needle pass: repeated analytic insertions.
-//
-// Port of NeedleSynthesizer.run() with compute_p_function replaced by the
-// analytic sweep (needle_pass). The Python convergence test measured the
-// MF drop from inserting a 1 nm TEST needle:
-//     improvement_py = MF_now − MF(test needle, 1 nm) ≈ −P(z*)·1 nm
-// (first-order, since P = dF/dδ). We generalize to the seed thickness:
-//     predicted_improvement = −P_best · δ_seed
-// and stop when it falls below `convergence_threshold`. Thresholds are in
-// merit-units-per-nm-of-seed — recalibrate when porting configs.
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::cycle — one needle pass: repeated analytic insertions.
+//!
+//! Port of NeedleSynthesizer.run() with compute_p_function replaced by the
+//! analytic sweep (needle_pass). The Python convergence test measured the
+//! MF drop from inserting a 1 nm TEST needle:
+//!     improvement_py = MF_now − MF(test needle, 1 nm) ≈ −P(z*)·1 nm
+//! (first-order, since P = dF/dδ). We generalize to the seed thickness:
+//!     predicted_improvement = −P_best · δ_seed
+//! and stop when it falls below `convergence_threshold`. Thresholds are in
+//! merit-units-per-nm-of-seed — recalibrate when porting configs.
 
 use std::collections::HashMap;
 use std::sync::Arc;

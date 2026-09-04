@@ -1,23 +1,23 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::thick_opt — bounded Levenberg–Marquardt for film thicknesses.
-//
-// Replaces scipy `least_squares(method="trf")` from needle_synthesis.py /
-// ClampedNeedleSynthesizer.optimize_thicknesses. The residual system is
-// injected as a closure, so this module is solver-agnostic and unit-testable
-// standalone; the synthesis wiring supplies residuals via core_engine +
-// MeritSpec (Phase 4+).
-//
-// Algorithm notes:
-//   * Classic Marquardt scaling: solve (JᵀJ + λ·diag(JᵀJ)) δ = −Jᵀr, with
-//     diag floored so flat directions do not stall the step.
-//   * Central-difference Jacobian, per-column step h_j = ∛ε·max(|x_j|, 1),
-//     evaluated RAYON-PARALLEL across columns (the film-synthesis system
-//     costs one full TMM solve per evaluation — columns dominate runtime).
-//   * Bounds: steps are vetoed component-wise when they push away from an
-//     active bound, then the trial point is clamped into [lb, ub] (mirrors
-//     ClampedNeedleSynthesizer's optimizer-bounds + post-clamp contract;
-//     removal of sub-min layers stays the CALLER's job, as in Python).
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::thick_opt — bounded Levenberg–Marquardt for film thicknesses.
+//!
+//! Replaces scipy `least_squares(method="trf")` from needle_synthesis.py /
+//! ClampedNeedleSynthesizer.optimize_thicknesses. The residual system is
+//! injected as a closure, so this module is solver-agnostic and unit-testable
+//! standalone; the synthesis wiring supplies residuals via core_engine +
+//! MeritSpec (Phase 4+).
+//!
+//! Algorithm notes:
+//!   * Classic Marquardt scaling: solve (JᵀJ + λ·diag(JᵀJ)) δ = −Jᵀr, with
+//!     diag floored so flat directions do not stall the step.
+//!   * Central-difference Jacobian, per-column step h_j = ∛ε·max(|x_j|, 1),
+//!     evaluated RAYON-PARALLEL across columns (the film-synthesis system
+//!     costs one full TMM solve per evaluation — columns dominate runtime).
+//!   * Bounds: steps are vetoed component-wise when they push away from an
+//!     active bound, then the trial point is clamped into [lb, ub] (mirrors
+//!     ClampedNeedleSynthesizer's optimizer-bounds + post-clamp contract;
+//!     removal of sub-min layers stays the CALLER's job, as in Python).
 
 use rayon::prelude::*;
 

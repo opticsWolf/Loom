@@ -1,26 +1,26 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::merit — MeritSpec: flat optimization targets + residual kernel.
-//
-// Bridge between navette_spectralweave's TargetWeaver and the synthesis
-// loop. The residual math below is lifted VERBATIM from
-// `calculate_merit` (navette_spectralweave/src/targetweaver.rs):
-//   * Exact/Above/Below activation (`kind`)
-//   * Linear/Log/Phase/Complex sim-side transforms (`transform`)
-//   * bit-exact aligned-grid fast path + two-pointer monotone interpolation
-//   * overlap-skip and missing-key penalty semantics
-// Normalization itself is NOT re-implemented: it happened at ingestion in
-// TargetWeaver::register_metadata, and the Python converter copies the
-// finished (normalized_targets, norm_factor, floored tolerances) over.
-//
-// Differences from calculate_merit (by design):
-//   * No OpticalWeaver: simulation curves arrive as SimCurves — plain
-//     [n_angles, n_wav] row-major slices indexed by (pol, channel).
-//   * Entries are pre-flattened into (key-group, target) lists; the
-//     missing-curve penalty is applied ONCE PER KEY GROUP, matching the
-//     per-key `continue` in calculate_merit.
-//   * Angle rows resolved with argmin(|angles − key_angle|), identical to
-//     `_collect_target_angles` + row selection in needle_synthesis.py.
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::merit — MeritSpec: flat optimization targets + residual kernel.
+//!
+//! Bridge between navette_spectralweave's TargetWeaver and the synthesis
+//! loop. The residual math below is lifted VERBATIM from
+//! `calculate_merit` (navette_spectralweave/src/targetweaver.rs):
+//!   * Exact/Above/Below activation (`kind`)
+//!   * Linear/Log/Phase/Complex sim-side transforms (`transform`)
+//!   * bit-exact aligned-grid fast path + two-pointer monotone interpolation
+//!   * overlap-skip and missing-key penalty semantics
+//! Normalization itself is NOT re-implemented: it happened at ingestion in
+//! TargetWeaver::register_metadata, and the Python converter copies the
+//! finished (normalized_targets, norm_factor, floored tolerances) over.
+//!
+//! Differences from calculate_merit (by design):
+//!   * No OpticalWeaver: simulation curves arrive as SimCurves — plain
+//!     [n_angles, n_wav] row-major slices indexed by (pol, channel).
+//!   * Entries are pre-flattened into (key-group, target) lists; the
+//!     missing-curve penalty is applied ONCE PER KEY GROUP, matching the
+//!     per-key `continue` in calculate_merit.
+//!   * Angle rows resolved with argmin(|angles − key_angle|), identical to
+//!     `_collect_target_angles` + row selection in needle_synthesis.py.
 
 use std::sync::Arc;
 

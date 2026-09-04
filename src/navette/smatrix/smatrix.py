@@ -129,17 +129,31 @@ class Request(IntFlag):
 
 
 class CoherenceMode(IntEnum):
+    """How coherence is handled across the stack.
+
+    FRONT_BLOCK: thin-film interference only inside the front coherent
+        block; incoherent intensity cascade elsewhere (substrates).
+    COHERENCY_MATRIX: additionally tracks the complex p-s coherency
+        channel (needed for Delta, DOP, S2/S3).
+    FULLY_COHERENT: the whole stack is one coherent block.
+    """
     FRONT_BLOCK = 0       # incoherent gaps applied at flagged boundaries
     COHERENCY_MATRIX = 1  # tracks the complex p-s coherency channel (Mode B)
     FULLY_COHERENT = 2     # whole stack treated as one coherent block
 
 
 class Pol(IntEnum):
+    """Polarization branch selector (s = perpendicular, p = parallel)."""
     S = 0
     P = 1
 
 
 class RoughnessType(IntEnum):
+    """Interface roughness form factor W(q) (see native ``w_function``).
+
+    NONE: ideal interface. LINEAR/STEP/EXPONENTIAL/GAUSSIAN: analytic
+    graded-index profiles. NEVOT_CROCE: Névot-Croce X-ray form factor.
+    """
     NONE = 0
     LINEAR = 1
     STEP = 2

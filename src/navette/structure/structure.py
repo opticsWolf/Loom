@@ -1,4 +1,11 @@
 # -*- coding: utf-8 -*-
+"""Ordered thin-film stack: layers, groups and the material provider.
+
+A :class:`Navette_Structure` validates the stack, flattens it into
+:class:`SolverArrays` for the native engine, and serializes via
+``get_state``/``from_state``. Behaves like a read sequence of layers
+(``len()``, indexing, iteration, ``+`` concatenation).
+"""
 from typing import Any, Dict, Iterator, List, Optional, Union
 import numpy as np
 
@@ -8,6 +15,7 @@ from .models import Group, Layer
 from .expander import _DEFAULT_GROUP, _LayerExpander
 
 class Navette_Structure:
+    """Ordered stack of :class:`Layer` with groups and a material provider."""
     def __init__(
         self,
         layer_list: Optional[List[Layer]] = None,
@@ -28,17 +36,21 @@ class Navette_Structure:
 
     @property
     def materials(self) -> Optional[MaterialProvider]:
+        """Material provider (dicts are auto-wrapped on assignment)."""
         return self._materials
     @materials.setter
     def materials(self, value: Any) -> None:
         self._materials = DictMaterialProvider(value) if isinstance(value, dict) else value
 
     @property
-    def active_material_dict(self) -> Optional[MaterialProvider]: return self.materials
+    def active_material_dict(self) -> Optional[MaterialProvider]:
+        """Alias of :attr:`materials` (legacy name)."""
+        return self.materials
     @active_material_dict.setter
     def active_material_dict(self, value: Any) -> None: self.materials = value
 
     def validate(self) -> List[str]:
+        """Check thicknesses, roughness and material coverage; returns error strings."""
         errors: List[str] = []
         if not self.layer_list:
             errors.append("Structure contains no layers.")
@@ -56,16 +68,19 @@ class Navette_Structure:
         return errors
 
     def get_solver_inputs(self) -> SolverArrays:
+        """Flatten the stack to engine arrays (nominal values, no errors)."""
         if not self.layer_list: raise ValueError("Structure is empty.")
         if self._materials is None: raise ValueError("No material provider set.")
         return _LayerExpander.expand(((layer, False) for layer in self.layer_list), self._materials, self.group_dict, apply_errors=False)
 
     def get_error_solver_inputs(self, rng: Optional[np.random.Generator] = None) -> SolverArrays:
+        """Flatten the stack with group fabrication errors drawn (see Group)."""
         if not self.layer_list: raise ValueError("Structure is empty.")
         if self._materials is None: raise ValueError("No material provider set.")
         return _LayerExpander.expand(((layer, False) for layer in self.layer_list), self._materials, self.group_dict, apply_errors=True, rng=rng)
 
     def generate_simple_layer_list(self) -> List[List[Any]]:
+        """Legacy [thickness, index, coherent, roughness, rough_type] rows."""
         sa = self.get_solver_inputs()
         self.simple_layer_list = [
             [sa.thicknesses[i], sa.indices[i], not sa.incoherent_flags[i], sa.rough_vals[i], sa.rough_types[i]]
@@ -74,6 +89,7 @@ class Navette_Structure:
         return self.simple_layer_list
 
     def get_state(self) -> Dict[str, Any]:
+        """Serialize layers, groups and materials to a plain dict."""
         return {
             "layers": [layer.get_state() for layer in self.layer_list],
             "groups": {name: group.get_state() for name, group in self.group_dict.items()},
@@ -81,11 +97,13 @@ class Navette_Structure:
 
     @classmethod
     def from_state(cls, state: Dict[str, Any], materials: Optional[Union[MaterialProvider, Dict[str, Any]]] = None) -> "Navette_Structure":
+        """Rebuild a structure from :meth:`get_state` output."""
         layers = [Layer.from_state(ls) for ls in state.get("layers", [])]
         groups = {name: Group.from_state(gs) for name, gs in state.get("groups", {}).items()}
         return cls(layer_list=layers, group_dict=groups, materials=materials)
 
     def clone(self) -> "Navette_Structure":
+        """Deep copy (layers, groups and provider state)."""
         return Navette_Structure(
             layer_list=[layer.clone() for layer in self.layer_list],
             group_dict={name: group.clone() for name, group in self.group_dict.items()},

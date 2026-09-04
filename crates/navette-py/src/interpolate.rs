@@ -22,6 +22,10 @@ pub struct UniInterpolator {
 
 #[pymethods]
 impl UniInterpolator {
+    /// Build an interpolator on strictly-increasing knots `x` with values `y`
+    /// (1-D for one signal, 2-D rows for a batch). `method` is pchip/makima/
+    /// sprague/floater_hormann (fh)/linear; `d` is the FH degree; `extrap` is
+    /// linear/clamp/error. Raises ValueError on invalid grids or methods.
     #[new]
     #[pyo3(signature = (x, y, method="pchip", robust=false, d=3, extrap="linear"))]
     fn new<'py>(
@@ -182,6 +186,7 @@ impl UniInterpolator {
     }
 }
 
+/// Register the interpolation submodule (`navette._navette._interpolate`).
 #[pymodule]
 pub fn _interpolate<'py>(_py: Python<'py>, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<UniInterpolator>()?;

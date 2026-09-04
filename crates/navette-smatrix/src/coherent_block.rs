@@ -1,3 +1,13 @@
+//! Coherent-block field solvers: s, p, and dual-polarization propagation
+//! through a contiguous coherent slice of the stack.
+//!
+//! Each solver walks interfaces front-to-back accumulating the Redheffer
+//! star product, tracks the first-interface reflection for the complex
+//! amplitudes, and folds roughness in via [`crate::optics_core::w_function_inner`].
+//! [`solve_coherent_block_fields_inner`] is the single-polarization workhorse;
+//! [`solve_coherent_block_fields_dual`] solves both polarizations in one pass
+//! for the cross-coherency channel.
+
 use num_complex::{Complex64, ComplexFloat};
 use std::f64::consts::PI;
 

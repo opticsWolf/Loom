@@ -17,6 +17,7 @@ use navette::spectralweave::opticalweaver::{
 // =============================================================================
 
 #[pyclass(name = "SpectralDataFrame", frozen)]
+/// One wavelength grid plus the curves sampled on it (see core `SpectralDataFrame`).
 pub struct PySpectralDataFrame {
     inner: Arc<SpectralDataFrame>,
 }
@@ -24,6 +25,7 @@ pub struct PySpectralDataFrame {
 #[pymethods]
 impl PySpectralDataFrame {
     #[getter]
+/// Process-unique frame id.
     fn uid(&self) -> usize {
         self.inner.uid
     }
@@ -32,6 +34,7 @@ impl PySpectralDataFrame {
         self.inner.wavelength().to_pyarray(py)
     }
     #[getter]
+/// `(min, max)` grid endpoints.
     fn wl_bounds(&self) -> (f64, f64) {
         self.inner.wl_bounds()
     }
@@ -45,15 +48,19 @@ impl PySpectralDataFrame {
             .map(|v| v.to_vec().into_pyarray(py))
             .ok_or_else(|| PyKeyError::new_err("Key not found"))
     }
+/// True when a curve is stored under `key` (angle, type, polarisation).
     fn __contains__(&self, key: (f64, String, String)) -> bool {
         self.inner.get_data(&OpticalKey::from(key)).is_some()
     }
+/// Number of stored curves (frames) or keys (collections/weavers).
     fn __len__(&self) -> usize {
         self.inner.len()
     }
+/// All stored keys as `(angle, type, polarisation)` triples.
     fn keys(&self) -> Vec<(f64, String, String)> {
         self.inner.keys().iter().map(|k| k.as_tuple()).collect()
     }
+/// Ingest one curve under `key`; returns whether the key is new.
     fn set_data(
         &self,
         key: (f64, String, String),
@@ -75,6 +82,7 @@ impl PySpectralDataFrame {
                 .map_err(PyValueError::new_err),
         }
     }
+/// Drop the curve under `key`; raises KeyError when absent.
     fn remove(&self, key: (f64, String, String)) -> PyResult<()> {
         self.inner
             .remove(&OpticalKey::from(key))
@@ -94,6 +102,7 @@ impl PySpectralDataFrame {
 }
 
 #[pyclass(name = "OpticalCollection", frozen)]
+/// A set of frames indexed by grid, with display-unit settings.
 pub struct PyOpticalCollection {
     inner: Arc<OpticalCollection>,
 }
@@ -101,16 +110,19 @@ pub struct PyOpticalCollection {
 #[pymethods]
 impl PyOpticalCollection {
     #[new]
+/// Empty collection with nm/raw display units.
     fn new() -> Self {
         PyOpticalCollection {
             inner: Arc::new(OpticalCollection::new()),
         }
     }
     #[getter]
+/// Wavelength display unit (`"NM"`).
     fn display_spectral(&self) -> String {
         unit_to_str(self.inner.display_spectral()).to_string()
     }
     #[setter]
+/// Set the wavelength display unit; raises on unknown labels.
     fn set_display_spectral(&self, unit_str: String) -> PyResult<()> {
         match unit_str.as_str() {
             "NM" => {
@@ -121,10 +133,12 @@ impl PyOpticalCollection {
         }
     }
     #[getter]
+/// Data display unit (`"RAW"`).
     fn display_intensity(&self) -> String {
         unit_to_str(self.inner.display_intensity()).to_string()
     }
     #[setter]
+/// Set the data display unit; raises on unknown labels.
     fn set_display_intensity(&self, unit_str: String) -> PyResult<()> {
         match unit_str.as_str() {
             "RAW" => {
@@ -135,18 +149,23 @@ impl PyOpticalCollection {
         }
     }
     #[getter]
+/// Number of frames (distinct grids) held.
     fn frame_count(&self) -> usize {
         self.inner.frame_count()
     }
+/// Number of stored curves (frames) or keys (collections/weavers).
     fn __len__(&self) -> usize {
         self.inner.len_keys()
     }
+/// All stored keys as `(angle, type, polarisation)` triples.
     fn keys(&self) -> Vec<(f64, String, String)> {
         self.inner.keys().iter().map(|k| k.as_tuple()).collect()
     }
+/// True when a curve is stored under `key` (angle, type, polarisation).
     fn __contains__(&self, key: (f64, String, String)) -> bool {
         self.inner.contains_key(&OpticalKey::from(key))
     }
+/// Frame by insertion index; raises on out-of-range.
     fn frame(&self, index: usize) -> PyResult<PySpectralDataFrame> {
         let frm = self
             .inner
@@ -155,6 +174,7 @@ impl PyOpticalCollection {
         Ok(PySpectralDataFrame { inner: frm })
     }
     #[getter]
+/// Snapshot list of all frames.
     fn frames(&self) -> Vec<PySpectralDataFrame> {
         self.inner
             .frames_snapshot()
@@ -162,6 +182,7 @@ impl PyOpticalCollection {
             .map(|inner| PySpectralDataFrame { inner })
             .collect()
     }
+/// Frames holding fragments of `key`; raises KeyError when unknown.
     fn frames_for_key(&self, key: (f64, String, String)) -> PyResult<Vec<PySpectralDataFrame>> {
         let frames = self
             .inner
@@ -187,6 +208,7 @@ impl PyOpticalCollection {
         ))
     }
     #[pyo3(signature = (key, value, wavelength, input_spectral=None, input_intensity=None))]
+/// Ingest one curve under `key`; returns whether the key is new.
     fn set_data(
         &self,
         py: Python<'_>,
@@ -217,6 +239,7 @@ impl PyOpticalCollection {
 }
 
 #[pyclass(name = "OpticalWeaver", frozen)]
+/// Top-level weaving store: ingest curves, re-assemble continuous spectra.
 pub struct PyOpticalWeaver {
     pub(crate) inner: Arc<OpticalWeaver>,
 }
@@ -225,16 +248,19 @@ pub struct PyOpticalWeaver {
 impl PyOpticalWeaver {
     #[new]
     #[pyo3(signature = (cache_size=128))]
+/// Weaver with an LRU distribution-plan cache of `cache_size` grids.
     fn new(cache_size: usize) -> Self {
         PyOpticalWeaver {
             inner: Arc::new(OpticalWeaver::new(cache_size)),
         }
     }
     #[getter]
+/// Wavelength display unit (`"NM"`).
     fn display_spectral(&self) -> String {
         unit_to_str(self.inner.inner.display_spectral()).to_string()
     }
     #[setter]
+/// Set the wavelength display unit; raises on unknown labels.
     fn set_display_spectral(&self, unit_str: String) -> PyResult<()> {
         match unit_str.as_str() {
             "NM" => {
@@ -245,10 +271,12 @@ impl PyOpticalWeaver {
         }
     }
     #[getter]
+/// Data display unit (`"RAW"`).
     fn display_intensity(&self) -> String {
         unit_to_str(self.inner.inner.display_intensity()).to_string()
     }
     #[setter]
+/// Set the data display unit; raises on unknown labels.
     fn set_display_intensity(&self, unit_str: String) -> PyResult<()> {
         match unit_str.as_str() {
             "RAW" => {
@@ -259,22 +287,28 @@ impl PyOpticalWeaver {
         }
     }
     #[getter]
+/// Number of frames (distinct grids) held.
     fn frame_count(&self) -> usize {
         self.inner.inner.frame_count()
     }
     #[getter]
+/// Structural-change counter for staleness checks.
     fn generation(&self) -> usize {
         self.inner.generation()
     }
+/// Number of stored curves (frames) or keys (collections/weavers).
     fn __len__(&self) -> usize {
         self.inner.inner.len_keys()
     }
+/// All stored keys as `(angle, type, polarisation)` triples.
     fn keys(&self) -> Vec<(f64, String, String)> {
         self.inner.inner.keys().iter().map(|k| k.as_tuple()).collect()
     }
+/// True when a curve is stored under `key` (angle, type, polarisation).
     fn __contains__(&self, key: (f64, String, String)) -> bool {
         self.inner.inner.contains_key(&OpticalKey::from(key))
     }
+/// Frame by insertion index; raises on out-of-range.
     fn frame(&self, index: usize) -> PyResult<PySpectralDataFrame> {
         let frm = self
             .inner
@@ -284,6 +318,7 @@ impl PyOpticalWeaver {
         Ok(PySpectralDataFrame { inner: frm })
     }
     #[getter]
+/// Snapshot list of all frames.
     fn frames(&self) -> Vec<PySpectralDataFrame> {
         self.inner
             .inner
@@ -292,6 +327,7 @@ impl PyOpticalWeaver {
             .map(|inner| PySpectralDataFrame { inner })
             .collect()
     }
+/// Frames holding fragments of `key`; raises KeyError when unknown.
     fn frames_for_key(&self, key: (f64, String, String)) -> PyResult<Vec<PySpectralDataFrame>> {
         let frames = self
             .inner
@@ -318,6 +354,7 @@ impl PyOpticalWeaver {
         ))
     }
     #[pyo3(signature = (key, value, wavelength, input_spectral=None, input_intensity=None))]
+/// Ingest one curve under `key`; returns whether the key is new.
     fn set_data(
         &self,
         py: Python<'_>,
@@ -371,6 +408,7 @@ impl PyOpticalWeaver {
         }
         Ok(out)
     }
+/// Distribute one long curve across frames; returns fragments written.
     fn unweave(
         &self,
         py: Python<'_>,
@@ -393,6 +431,7 @@ impl PyOpticalWeaver {
                 .map_err(PyValueError::new_err)
         })
     }
+/// Distribute many curves sharing one grid; returns fragments written.
     fn unweave_collection(
         &self,
         py: Python<'_>,
@@ -423,6 +462,7 @@ impl PyOpticalWeaver {
                 .map_err(PyValueError::new_err)
         })
     }
+/// Drop cached distribution plans.
     fn invalidate_cache(&self) {
         self.inner.invalidate_cache();
     }

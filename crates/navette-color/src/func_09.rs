@@ -1,6 +1,9 @@
 // src/func_09.rs
 //! Delta E 76 – Euclidean distance in CIELAB.
 
+/// Single-pair CIE 1976 colour difference: Euclidean distance in CIELAB.
+///
+/// Symmetric in its arguments; the batch [`delta_e_76`] maps this over pairs.
 #[inline(always)]
 pub fn delta_e_76_single(lab1: &[f64; 3], lab2: &[f64; 3]) -> f64 {
     let dl = lab1[0] - lab2[0];

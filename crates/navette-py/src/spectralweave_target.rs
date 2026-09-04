@@ -14,6 +14,7 @@ use super::spectralweave_optical::PyOpticalWeaver;
 // Python bindings
 // ---------------------------------------------------------------------------
 #[pyclass(name = "TargetWeaver", frozen)]
+/// Optimization target store plus merit evaluation.
 pub struct PyTargetWeaver {
     pub(crate) inner: Arc<TargetWeaver>,
 }
@@ -22,6 +23,7 @@ pub struct PyTargetWeaver {
 impl PyTargetWeaver {
     #[new]
     #[pyo3(signature = (cache_size=128, tolerance_floor=1e-12))]
+/// Target store with plan cache and merit-denominator floor.
     fn new(cache_size: usize, tolerance_floor: f64) -> Self {
         PyTargetWeaver {
             inner: Arc::new(TargetWeaver::new(cache_size, tolerance_floor)),
@@ -29,6 +31,7 @@ impl PyTargetWeaver {
     }
 
     #[pyo3(signature = (wavelengths, values, tolerances, angle, polarization, spectral, kind, norm_mode))]
+/// Ingest one target curve over wavelengths (kind e/a/b, norm mode).
     fn add_spectral_target(
         &self,
         py: Python<'_>,
@@ -73,6 +76,7 @@ impl PyTargetWeaver {
     }
 
     #[pyo3(signature = (wavelength, angles, values, tolerances, polarization, spectral, kind, norm_mode))]
+/// Ingest one target curve over angles (kind e/a/b, norm mode).
     fn add_angular_target(
         &self,
         py: Python<'_>,
@@ -133,6 +137,7 @@ impl PyTargetWeaver {
 // ---------------------------------------------------------------------------
 #[pyfunction]
 #[pyo3(signature = (sim_weaver, target_weaver, missing_penalty=1e6))]
+/// Merit of simulated weaves vs targets (exact/above/below residuals).
 pub fn calculate_merit(
     py: Python<'_>,
     sim_weaver: &PyOpticalWeaver,

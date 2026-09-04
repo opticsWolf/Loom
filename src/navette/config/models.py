@@ -14,15 +14,18 @@ import numpy as np
 # Material parameter models
 # -------------------------------------------------------------------------
 class KonstantParams(BaseModel):
+    """Wavelength-independent n/k parameters."""
     n: float = Field(gt=0)
     k: float = Field(default=0.0, ge=0)
 
 class CauchyParams(BaseModel):
+    """Cauchy A/B/C parameters (lambda in um)."""
     A: float
     B: float
     C: float
 
 class CauchyUrbachParams(BaseModel):
+    """Cauchy parameters plus Urbach tail (alpha0, Eu, lambda_g)."""
     A: float
     B: float
     C: float
@@ -31,6 +34,7 @@ class CauchyUrbachParams(BaseModel):
     lambda_g: float = Field(gt=0)
 
 class SellmeierParams(BaseModel):
+    """Up-to-three-term Sellmeier B/C coefficients."""
     B1: float = Field(gt=0)
     C1: float = Field(gt=0)
     B2: float = Field(gt=0)
@@ -39,12 +43,14 @@ class SellmeierParams(BaseModel):
     C3: float = Field(default=0.0, ge=0)
 
 class SellmeierUrbachParams(SellmeierParams):
+    """Sellmeier coefficients plus Urbach tail parameters."""
     alpha0: float = Field(gt=0)
     Eu: float = Field(gt=0)
     lambda_g: float = Field(gt=0)
 
 # Tabulated data (JSON-friendly lists)
 class TabulatedData(BaseModel):
+    """Measured wavelength/n/k grid for table materials."""
     wavelengths: List[float]
     values: List[float]
 
@@ -56,6 +62,7 @@ class TabulatedData(BaseModel):
         return v
 
 class TableMaterialParams(BaseModel):
+    """Table material: grid data plus optional n/k scale factors."""
     n_factor: float = Field(default=1.0, ge=0)
     k_factor: float = Field(default=1.0, ge=0)
     interpolation_type_n: Literal["linear", "cubicspline", "pchip", "akima"] = "linear"
@@ -63,6 +70,7 @@ class TableMaterialParams(BaseModel):
 
 # Discriminated union for all material definitions
 class MaterialDefinition(BaseModel):
+    """One named material in a library: model selector plus params."""
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -116,6 +124,7 @@ class MaterialDefinition(BaseModel):
 # Layer model
 # -------------------------------------------------------------------------
 class LayerConfig(BaseModel):
+    """One stack layer: material code, thickness and solver flags."""
     material_code: str
     thickness_nm: float = Field(gt=0)
     coherent: bool = True
@@ -133,6 +142,7 @@ class LayerConfig(BaseModel):
 # Group model (error parameters)
 # -------------------------------------------------------------------------
 class ErrorParams(BaseModel):
+    """Fabrication-error law and parameters for one channel."""
     abs_mean_delta_g: float = 0.0
     abs_std_dev: float = 0.01
     rel_mean_delta_g: float = 0.0
@@ -143,6 +153,7 @@ class ErrorParams(BaseModel):
     rel_variance: float = 1.0
 
 class GroupConfig(BaseModel):
+    """Group scaling factors plus per-channel error configs."""
     name: str
     thick_factor: float = 1.0
     thick_summand: float = 0.0
@@ -170,9 +181,11 @@ class GroupConfig(BaseModel):
 # Structure and Architect states (for serialisation)
 # -------------------------------------------------------------------------
 class StructureState(BaseModel):
+    """Serializable stack: layers, groups and material references."""
     layers: List[Dict[str, Any]]   # from Layer.get_state()
     groups: Dict[str, Dict[str, Any]]  # from Group.get_state()
 
 class ArchitectState(BaseModel):
+    """Serializable multi-structure chain for node-graph persistence."""
     structures: List[StructureState]
     blocks: List[Dict[str, Any]]   # structure_ref, inverted, repeat_count, label

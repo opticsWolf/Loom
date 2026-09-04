@@ -1,3 +1,12 @@
+//! Fragment-weaving store: many overlapping spectral curves over shared grids.
+//!
+//! A [`SpectralDataFrame`] owns one wavelength grid plus the curves sampled on
+//! it. An [`OpticalCollection`] groups frames by grid fingerprint so curves on
+//! identical grids share storage, and an [`OpticalWeaver`] distributes long
+//! input curves across frames (with an LRU-cached distribution plan) and
+//! re-assembles continuous curves on demand. All state is `Arc` + interior
+//! mutability, so weavers are cheap to clone and share across threads.
+
 use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
@@ -9,15 +18,21 @@ use lru::LruCache;
 use smallvec::SmallVec;
 use parking_lot::RwLock;
 
+
 // ---------------------------------------------------------------------------
 // Unit system
 // ---------------------------------------------------------------------------
+/// Unit tag for spectral (wavelength) and intensity axes.
+/// Conversions are currently identity (grids are stored in nm, data raw);
+/// the tag exists so callers can be explicit and future units can convert.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Unit {
     NM,
     RAW,
 }
 
+/// Convert `value` from one unit to another, borrowing when no-op.
+/// Returns a borrowed view when `from == to`, otherwise an owned copy.
 #[inline]
 pub fn convert_unit<'a>(value: &'a [f64], from: Unit, to: Unit) -> Cow<'a, [f64]> {
     if from == to {
@@ -27,19 +42,25 @@ pub fn convert_unit<'a>(value: &'a [f64], from: Unit, to: Unit) -> Cow<'a, [f64]
     }
 }
 
+/// 128-bit fingerprint of a wavelength grid (xxh3 over the raw bits).
+/// Used as the LRU/cache key so identical grids share frames and plans.
 pub type WlSig = u128;
 
 #[inline]
+/// Fingerprint `wl` for frame/plan lookup.
 pub fn wl_signature(wl: &[f64]) -> WlSig {
     xxhash_rust::xxh3::xxh3_128(bytemuck::cast_slice::<f64, u8>(wl))
 }
 
 #[inline]
+/// Bit-exact grid equality (length + raw f64 bits, no tolerance).
+/// Guards against xxh3 collisions before frames are shared.
 pub fn wl_bits_eq(a: &[f64], b: &[f64]) -> bool {
     a.len() == b.len() && bytemuck::cast_slice::<f64, u8>(a) == bytemuck::cast_slice::<f64, u8>(b)
 }
 
 #[inline]
+/// Canonical display name of a unit (`"NM"` / `"RAW"`).
 pub fn unit_to_str(u: Unit) -> &'static str {
     match u {
         Unit::NM => "NM",
@@ -48,6 +69,7 @@ pub fn unit_to_str(u: Unit) -> &'static str {
 }
 
 #[inline]
+/// Parse a spectral-unit label (defaults to nm).
 pub fn parse_spectral(s: Option<&str>) -> Unit {
     match s {
         Some("NM") | None => Unit::NM,
@@ -56,6 +78,7 @@ pub fn parse_spectral(s: Option<&str>) -> Unit {
 }
 
 #[inline]
+/// Parse an intensity-unit label (defaults to raw).
 pub fn parse_intensity(s: Option<&str>) -> Unit {
     match s {
         Some("RAW") | None => Unit::RAW,
@@ -66,6 +89,8 @@ pub fn parse_intensity(s: Option<&str>) -> Unit {
 // ---------------------------------------------------------------------------
 // Optical key
 // ---------------------------------------------------------------------------
+/// Identity of one curve: base wavelength plus data-type and polarisation labels.
+/// Equality and hashing use the exact f64 bits of `wavelength`.
 #[derive(Debug, Clone)]
 pub struct OpticalKey {
     pub wavelength: f64,
@@ -102,6 +127,7 @@ impl From<(f64, String, String)> for OpticalKey {
 
 impl OpticalKey {
     #[inline]
+    /// `(wavelength, data_type, polarisation)` triple for the Python boundary.
     pub fn as_tuple(&self) -> (f64, String, String) {
         (
             self.wavelength,
@@ -114,6 +140,9 @@ impl OpticalKey {
 // ---------------------------------------------------------------------------
 // SpectralData & SpectralDataFrame
 // ---------------------------------------------------------------------------
+/// A (possibly strided) view onto a shared data buffer: `buf[start..start+len]`.
+/// Contiguous slices can alias the source `Arc` (zero-copy); strided gathers copy.
+/// Derefs to `[f64]` so callers treat it as a plain slice.
 #[derive(Clone)]
 pub struct SpectralData {
     buf: Arc<[f64]>,
@@ -123,6 +152,7 @@ pub struct SpectralData {
 
 impl SpectralData {
     #[inline]
+    /// Wrap a whole owned buffer as one contiguous fragment.
     pub fn from_arc(buf: Arc<[f64]>) -> Self {
         let len = buf.len();
         SpectralData { buf, start: 0, len }
@@ -137,6 +167,8 @@ impl std::ops::Deref for SpectralData {
     }
 }
 
+/// One wavelength grid plus every curve sampled on it.
+/// `uid` is process-unique; `set_data` rejects grids that differ bit-for-bit.
 pub struct SpectralDataFrame {
     pub uid: usize,
     data: RwLock<AHashMap<OpticalKey, SpectralData>>,
@@ -146,6 +178,8 @@ pub struct SpectralDataFrame {
 }
 
 impl SpectralDataFrame {
+    /// Create a frame on a strictly-increasing grid. Errors on empty or
+    /// non-monotonic grids.
     pub fn new(wavelength: &[f64]) -> Result<Self, String> {
         static UID_GEN: AtomicUsize = AtomicUsize::new(0);
         let uid = UID_GEN.fetch_add(1, Ordering::SeqCst);
@@ -171,6 +205,9 @@ impl SpectralDataFrame {
         })
     }
 
+    /// Store `value` under `key`. Returns whether the key is new.
+    /// Errors when `value` misaligns with the grid (or the optional grid
+    /// conflicts with it).
     pub fn set_data(
         &self,
         key: OpticalKey,
@@ -195,26 +232,32 @@ impl SpectralDataFrame {
         Ok(is_new)
     }
 
+    /// Cloned view of the curve under `key`, if present.
     pub fn get_data(&self, key: &OpticalKey) -> Option<SpectralData> {
         self.data.read().get(key).cloned()
     }
 
+    /// All keys stored in this frame.
     pub fn keys(&self) -> Vec<OpticalKey> {
         self.data.read().keys().cloned().collect()
     }
 
+    /// Number of curves stored in this frame.
     pub fn len(&self) -> usize {
         self.data.read().len()
     }
 
+    /// Borrowed grid shared by all curves in this frame.
     pub fn wavelength(&self) -> &[f64] {
         &self.wavelength
     }
 
+    /// `(min, max)` grid endpoints (cached at construction).
     pub fn wl_bounds(&self) -> (f64, f64) {
         (self.wl_min, self.wl_max)
     }
 
+    /// Drop the curve under `key`. Errors when the key is absent.
     pub fn remove(&self, key: &OpticalKey) -> Result<(), String> {
         if self.data.write().remove(key).is_none() {
             return Err("Key not found".to_string());
@@ -226,6 +269,9 @@ impl SpectralDataFrame {
 // ---------------------------------------------------------------------------
 // OpticalCollection
 // ---------------------------------------------------------------------------
+/// A set of frames indexed by grid fingerprint plus a key→frames map.
+/// Curves on identical grids share one frame (fingerprints + bit-equality
+/// guard); `key_map` tracks which frames hold fragments of each key.
 pub struct OpticalCollection {
     pub frames: RwLock<Vec<Arc<SpectralDataFrame>>>,
     wl_fingerprints: RwLock<AHashMap<WlSig, Arc<SpectralDataFrame>>>,
@@ -241,6 +287,7 @@ impl Default for OpticalCollection {
 }
 
 impl OpticalCollection {
+    /// Empty collection with nm/raw display units.
     pub fn new() -> Self {
         OpticalCollection {
             frames: RwLock::new(Vec::new()),
@@ -251,40 +298,53 @@ impl OpticalCollection {
         }
     }
 
+    /// Display unit for wavelength axes returned to callers.
     pub fn set_display_spectral(&self, unit: Unit) {
         *self.display_spectral.write() = unit;
     }
+    /// Current wavelength display unit.
     pub fn display_spectral(&self) -> Unit {
         *self.display_spectral.read()
     }
+    /// Display unit for data values returned to callers.
     pub fn set_display_intensity(&self, unit: Unit) {
         *self.display_intensity.write() = unit;
     }
+    /// Current data display unit.
     pub fn display_intensity(&self) -> Unit {
         *self.display_intensity.read()
     }
+    /// Number of frames (distinct grids) held.
     pub fn frame_count(&self) -> usize {
         self.frames.read().len()
     }
+    /// Number of distinct keys across all frames.
     pub fn len_keys(&self) -> usize {
         self.key_map.read().len()
     }
+    /// All distinct keys across all frames.
     pub fn keys(&self) -> Vec<OpticalKey> {
         self.key_map.read().keys().cloned().collect()
     }
+    /// True when any frame holds fragments of `key`.
     pub fn contains_key(&self, key: &OpticalKey) -> bool {
         self.key_map.read().contains_key(key)
     }
+    /// Frame by insertion index, if in range.
     pub fn frame_at(&self, index: usize) -> Option<Arc<SpectralDataFrame>> {
         self.frames.read().get(index).cloned()
     }
+    /// Cloned list of all frames (lock-free iteration for callers).
     pub fn frames_snapshot(&self) -> Vec<Arc<SpectralDataFrame>> {
         self.frames.read().clone()
     }
+    /// Frames holding fragments of `key` (inline for the common ≤ 2 case).
     pub fn frames_for_key(&self, key: &OpticalKey) -> Option<SmallVec<[Arc<SpectralDataFrame>; 2]>> {
         self.key_map.read().get(key).cloned()
     }
 
+    /// Per-fragment `(data, wavelength)` pairs under `key`, converted to the
+    /// display units. Returns `None` when the key is unknown.
     pub fn get_converted(&self, key: &OpticalKey) -> Option<(Vec<Vec<f64>>, Vec<Vec<f64>>)> {
         let frames = self.key_map.read().get(key)?.clone();
         let int_unit = *self.display_intensity.read();
@@ -302,6 +362,8 @@ impl OpticalCollection {
         Some((data_list, wl_list))
     }
 
+    /// Record that `frame` holds fragments of `key`. Returns false when the
+    /// mapping already existed.
     pub fn map_frame_to_key(&self, key: &OpticalKey, frame: &Arc<SpectralDataFrame>) -> bool {
         let mut key_map = self.key_map.write();
         let frames = key_map.entry(key.clone()).or_default();
@@ -334,6 +396,8 @@ impl OpticalCollection {
         Ok(frame_created)
     }
 
+    /// Fetch the frame for `wl_arr` (bit-exact grid match) or create it.
+    /// Returns the frame plus whether it is newly created.
     fn get_or_create_frame(&self, wl_arr: &[f64]) -> Result<(Arc<SpectralDataFrame>, bool), String> {
         let sig = wl_signature(wl_arr);
         if let Some(frm) = self.wl_fingerprints.read().get(&sig) {
@@ -392,6 +456,9 @@ impl SliceOrIndices {
 
 type DistributionPlan = Vec<(Arc<SpectralDataFrame>, SliceOrIndices)>;
 
+/// Top-level weaving store: fragment distribution plus re-assembly.
+/// `generation` bumps on every structural change so caches and Python-side
+/// snapshots can detect staleness; `invalidate_cache` clears the LRU plan cache.
 pub struct OpticalWeaver {
     pub inner: OpticalCollection,
     distribution_cache: RwLock<LruCache<WlSig, (usize, Arc<[f64]>, DistributionPlan)>>,
@@ -399,6 +466,7 @@ pub struct OpticalWeaver {
 }
 
 impl OpticalWeaver {
+    /// Create a weaver with an LRU distribution-plan cache of `cache_size` grids.
     pub fn new(cache_size: usize) -> Self {
         OpticalWeaver {
             inner: OpticalCollection::new(),
@@ -409,13 +477,18 @@ impl OpticalWeaver {
         }
     }
 
+    /// Record a structural change (new frame or new key mapping).
     pub fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
+    /// Monotonic structural-change counter for staleness checks.
     pub fn generation(&self) -> usize {
         self.generation.load(Ordering::SeqCst)
     }
 
+    /// Ingest one curve: convert units, route to the matching frame
+    /// (creating it when the grid is new), and bump the generation on
+    /// structural change.
     pub fn set_data(
         &self,
         key: OpticalKey,
@@ -433,6 +506,8 @@ impl OpticalWeaver {
         Ok(())
     }
 
+    /// Re-assemble the continuous `(wavelength, data)` curve for `key` by
+    /// concatenating its fragments in grid order. Errors on unknown keys.
     pub fn get_weaved(&self, key: &OpticalKey) -> Result<(Vec<f64>, Vec<f64>), String> {
         let frames = self
             .inner
@@ -459,6 +534,8 @@ impl OpticalWeaver {
         Ok((all_wl, all_data))
     }
 
+    /// All keys re-assembled, grouped by woven grid: one entry per distinct
+    /// grid with the curves sampled on it.
     pub fn get_weaved_collections(&self) -> Vec<(Vec<f64>, AHashMap<OpticalKey, Vec<f64>>)> {
         let mut groups: AHashMap<WlSig, (Vec<f64>, AHashMap<OpticalKey, Vec<f64>>)> = AHashMap::new();
         for key in self.inner.keys() {
@@ -474,6 +551,8 @@ impl OpticalWeaver {
         groups.into_values().collect()
     }
 
+    /// Distribute one long curve across frames per the cached plan.
+    /// Returns the number of fragments written.
     pub fn unweave(
         &self,
         key: OpticalKey,
@@ -498,6 +577,8 @@ impl OpticalWeaver {
         Ok(updated)
     }
 
+    /// Distribute many curves sharing one grid, reusing a single plan.
+    /// Returns the total fragments written.
     pub fn unweave_collection(
         &self,
         common_wavelength: &[f64],
@@ -526,10 +607,12 @@ impl OpticalWeaver {
         Ok(total)
     }
 
+    /// Drop all cached distribution plans (grids re-resolve on next use).
     pub fn invalidate_cache(&self) {
         self.distribution_cache.write().clear();
     }
 
+    /// LRU-cached distribution plan for `full_wavelength` (hit or rebuild).
     fn resolve_plan(&self, full_wavelength: &[f64]) -> Result<DistributionPlan, String> {
         let sig = wl_signature(full_wavelength);
         let current_gen = self.generation.load(Ordering::SeqCst);
@@ -550,6 +633,8 @@ impl OpticalWeaver {
         Ok(plan)
     }
 
+    /// Fragment `full_wavelength` across existing frames (contiguous slices
+    /// where grids overlap, strided gathers elsewhere).
     fn build_distribution_plan(&self, full_wavelength: &[f64]) -> Result<DistributionPlan, String> {
         let mut plan = Vec::new();
         if full_wavelength.is_empty() {

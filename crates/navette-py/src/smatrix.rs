@@ -1185,6 +1185,7 @@ pub fn field_profile(
 
     Ok((z_pos, e_mag, layer_start, layer_end, layer_n))
 }
+/// Register the S-matrix engine submodule (`navette._navette._smatrix`).
 #[pymodule]
 pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(w_function, m)?)?;

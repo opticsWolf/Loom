@@ -1,8 +1,8 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::config — PipelineConfig / TerminationReason / cycle knobs.
-//
-// Verbatim port of needle_pipeline.py section 1–2 (defaults included).
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::config — PipelineConfig / TerminationReason / cycle knobs.
+//!
+//! Verbatim port of needle_pipeline.py section 1–2 (defaults included).
 
 // ---------------------------------------------------------------------------
 // TerminationReason

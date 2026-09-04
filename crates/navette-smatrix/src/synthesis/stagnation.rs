@@ -1,13 +1,13 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::stagnation — StagnationDetector.
-//
-// Verbatim port of needle_pipeline.py section 4. Three independent failure
-// modes over a sliding window of MF samples:
-//   1. Plateau      — |normalized regression gradient| < tol  OR  grad > 0
-//   2. Oscillation  — sign-alternation fraction of consecutive deltas ≥ ratio
-//   3. Divergence   — ≥ N consecutive MF increases (>= comparisons)
-// Check order: divergence → oscillation → plateau (most urgent first).
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::stagnation — StagnationDetector.
+//!
+//! Verbatim port of needle_pipeline.py section 4. Three independent failure
+//! modes over a sliding window of MF samples:
+//!   1. Plateau      — |normalized regression gradient| < tol  OR  grad > 0
+//!   2. Oscillation  — sign-alternation fraction of consecutive deltas ≥ ratio
+//!   3. Divergence   — ≥ N consecutive MF increases (>= comparisons)
+//! Check order: divergence → oscillation → plateau (most urgent first).
 
 /// Why the trajectory is stuck — reuses `TerminationReason` stagnation
 /// variants via [`StagnationDetector::check`].

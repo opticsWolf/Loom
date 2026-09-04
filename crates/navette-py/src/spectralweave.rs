@@ -10,6 +10,7 @@ pub(crate) use super::spectralweave_optical::{
 };
 pub(crate) use super::spectralweave_target::{calculate_merit, PyTargetWeaver};
 
+/// Register the spectral-weaving submodule (`navette._navette._spectralweave`).
 #[pymodule]
 pub fn _spectralweave(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Optical Data Structures

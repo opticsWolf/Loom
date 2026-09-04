@@ -5,7 +5,20 @@ import numpy as np
 
 from .types import INT_TYPE, ErrorType, RoughnessType, ErrorMask, LayerMask
 
+"""Layer and Group: the Python-side thin-film stack model.
+
+A :class:`Layer` is one physical film (material name, thickness, coherence
+and roughness flags); a :class:`Group` scales/couples layers for optimization
+and error analysis. Both serialize via ``get_state``/``from_state`` for
+config files, and the expander flattens them into solver arrays.
+"""
+
 class Layer:
+    """One physical film: material, thickness [nm], coherence/roughness flags.
+
+    ``thickness``/``inhomogen``/``inh_delta`` setters keep the solver
+    sub-layer count in sync. Call the layer to get ``(material, thickness)``.
+    """
     __slots__ = (
         "material", "coherent", "_inhomogen", "rough_type", "_inh_delta",
         "roughness", "interface", "interface_thickness", "_thickness",
@@ -45,21 +58,27 @@ class Layer:
         return (self.material, self._thickness)
 
     @property
-    def thickness(self) -> float: return self._thickness
+    def thickness(self) -> float:
+        """Film thickness [nm]; setting it re-refines the sub-layer count."""
+        return self._thickness
     @thickness.setter
     def thickness(self, value: float) -> None:
         self._thickness = float(value)
         if self._inhomogen: self._refine_layer_count()
 
     @property
-    def inhomogen(self) -> bool: return self._inhomogen
+    def inhomogen(self) -> bool:
+        """Whether the film is graded (split into sub-layers for the solver)."""
+        return self._inhomogen
     @inhomogen.setter
     def inhomogen(self, value: bool) -> None:
         self._inhomogen = bool(value)
         if self._inhomogen: self._refine_layer_count()
 
     @property
-    def inh_delta(self) -> float: return self._inh_delta
+    def inh_delta(self) -> float:
+        """Grading strength driving the sub-layer refinement."""
+        return self._inh_delta
     @inh_delta.setter
     def inh_delta(self, value: float) -> None:
         self._inh_delta = float(value)
@@ -67,6 +86,7 @@ class Layer:
 
     @property
     def mask(self) -> np.ndarray:
+        """Per-layer status vector indexed by :class:`LayerMask`."""
         m = np.zeros(len(LayerMask), dtype=INT_TYPE)
         m[LayerMask.ACTIVE] = 1
         m[LayerMask.COHERENT] = int(self.coherent)
@@ -82,6 +102,7 @@ class Layer:
             self.sub_layer_count = 1
 
     def get_state(self) -> Dict[str, Any]:
+        """Serialize all layer properties to a plain dict (config files)."""
         return {
             "thickness": self._thickness,
             "material": self.material,
@@ -99,11 +120,13 @@ class Layer:
 
     @classmethod
     def from_state(cls, state: Dict[str, Any]) -> "Layer":
+        """Rebuild a layer from :meth:`get_state` output (unknown keys ignored)."""
         return cls(**{k: v for k, v in state.items() if k in cls.__init__.__code__.co_varnames})
         
     get_properties = get_state
 
     def set_properties(self, properties: Dict[str, Any]) -> None:
+        """Bulk-set known properties; warns (not raises) on unknown/read-only keys."""
         for key, value in properties.items():
             if not hasattr(self, key):
                 warnings.warn(f"Layer.set_properties: ignoring unknown attribute '{key}'.", stacklevel=2)
@@ -116,6 +139,7 @@ class Layer:
             self._refine_layer_count()
 
     def clone(self) -> "Layer":
+        """Independent copy sharing no mutable state."""
         obj = Layer.__new__(Layer)
         for attr in self.__slots__:
             setattr(obj, attr, getattr(self, attr))
@@ -126,6 +150,12 @@ class Layer:
 
 
 class Group:
+    """Scaling/error policy shared by a set of layers.
+
+    Holds thickness/index multipliers plus per-channel fabrication-error
+    models (:class:`ErrorType` + params). Error helpers (``*_error``)
+    draw perturbed values; ``get_state``/``from_state`` serialize.
+    """
     __slots__ = (
         "group_name", "thick_factor", "thick_summand", "n_factor", "k_factor",
         "inh_delta_summand", "roughness_summand", "interface_summand",
@@ -184,30 +214,38 @@ class Group:
         return value
 
     def thickness_error(self, value: float, rng: Optional[np.random.Generator] = None) -> float:
+        """Perturbed thickness (floored at 0)."""
         return max(0.0, self._apply_error(value, self.thickness_error_type, self.thickness_error_params, rng=rng))
     def inh_delta_error(self, value: float, rng: Optional[np.random.Generator] = None) -> float:
+        """Perturbed grading strength."""
         return self._apply_error(value, self.inh_delta_error_type, self.inh_delta_error_params, rng=rng)
     def sr_roughness_error(self, value: float, thickness: float, rng: Optional[np.random.Generator] = None) -> float:
+        """Perturbed surface roughness (floored at 0)."""
         return max(0.0, self._apply_error(value, self.roughness_error_type, self.roughness_error_params, rng=rng))
     def interface_error(self, value: float, thickness: float, rng: Optional[np.random.Generator] = None) -> float:
+        """Perturbed interface width (floored at 0)."""
         return max(0.0, self._apply_error(value, self.interface_error_type, self.interface_error_params, rng=rng))
     def nk_error(self, nk_value: complex, rng: Optional[np.random.Generator] = None) -> complex:
+        """Perturbed index with n floored at 0 (k untouched by the floor)."""
         n_val = self._apply_error(nk_value.real, self.n_error_type, self.n_error_params, rng=rng)
         k_val = self._apply_error(nk_value.imag, self.k_error_type, self.k_error_params, rng=rng)
         return complex(max(0.0, n_val), k_val)
 
     def get_state(self) -> Dict[str, Any]:
+        """Serialize all slots to a plain dict (config files)."""
         return {attr: getattr(self, attr) for attr in self.__slots__}
     get_properties = get_state
 
     @classmethod
     def from_state(cls, state: Dict[str, Any]) -> "Group":
+        """Rebuild a group from :meth:`get_state` output."""
         obj = cls(state.get("group_name", "default"))
         for key, value in state.items():
             if hasattr(obj, key): setattr(obj, key, value)
         return obj
 
     def set_properties(self, properties: Dict[str, Any]) -> None:
+        """Bulk-set known properties (same warn-on-unknown policy as Layer)."""
         for key, value in properties.items():
             if not hasattr(self, key):
                 warnings.warn(f"Group.set_properties: ignoring unknown attribute '{key}'.", stacklevel=2)

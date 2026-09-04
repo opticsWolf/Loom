@@ -19,12 +19,17 @@ except ImportError:  # pragma: no cover - native not built; only needed for tabl
 
 @runtime_checkable
 class MaterialProvider(Protocol):
+  """Material index source: ``get_nk`` returns n+ik arrays, ``contains`` tests names."""
   def get_nk(self, material_name: str) -> np.ndarray: ...
   def contains(self, material_name: str) -> bool: ...
 
 
 class DictMaterialProvider:
-  """Wraps a dict of precomputed nk arrays (or specs)."""
+  """Wraps a dict of precomputed nk arrays (or specs).
+
+  Values may be arrays, :class:`MaterialSpec` (evaluated when a wavelength
+  grid was given), or objects exposing ``.nk``.
+  """
 
   __slots__ = ("_dict", "_wavelength")
 
@@ -41,6 +46,7 @@ class DictMaterialProvider:
     )
 
   def get_nk(self, material_name: str) -> np.ndarray:
+    """Resolve one material to an n+ik array (KeyError when unknown)."""
     mat = self._dict[material_name]
     if isinstance(mat, np.ndarray):
       return mat
@@ -60,6 +66,7 @@ class DictMaterialProvider:
     )
 
   def contains(self, material_name: str) -> bool:
+    """True when the dict holds ``material_name``."""
     return material_name in self._dict
 
 
@@ -78,6 +85,7 @@ class MaterialObjectProvider:
 
   @property
   def wavelength(self) -> np.ndarray:
+    """Shared evaluation grid; reassigning it clears the nk cache."""
     return self._wavelength
 
   @wavelength.setter
@@ -90,6 +98,7 @@ class MaterialObjectProvider:
       self._cache.clear()
 
   def get_nk(self, material_name: str) -> np.ndarray:
+    """Cached spec evaluation on the shared grid."""
     cached = self._cache.get(material_name)
     if cached is not None:
       return cached
@@ -98,9 +107,11 @@ class MaterialObjectProvider:
     return nk
 
   def contains(self, material_name: str) -> bool:
+    """True when the dict holds ``material_name``."""
     return material_name in self._dict
 
   def invalidate(self, material_name: Optional[str] = None) -> None:
+    """Drop cached evaluations (one material, or all when omitted)."""
     if material_name is None:
       self._cache.clear()
     else:
@@ -108,6 +119,11 @@ class MaterialObjectProvider:
 
 
 class WeaverMaterialProvider:
+  """Serves n/k curves woven from an :class:`OpticalWeaver` backend.
+
+  Looks up ``(angle, n/k-label, polarisation)`` fragments on a target grid
+  and interpolates them to the solver wavelengths.
+  """
   __slots__ = (
     "_weaver", "_target_wl", "_cache",
     "_key_prefix", "_n_label", "_k_label",
@@ -132,6 +148,7 @@ class WeaverMaterialProvider:
     self._interp_settings = interp
 
   def get_nk(self, material_name: str) -> np.ndarray:
+    """Cached n/k weave interpolated to the target grid (k defaults to 0)."""
     cached = self._cache.get(material_name)
     if cached is not None:
       return cached
@@ -148,16 +165,19 @@ class WeaverMaterialProvider:
     return nk
 
   def contains(self, material_name: str) -> bool:
+    """True when an n-fragment exists for ``material_name``."""
     n_key = (self._key_prefix, self._n_label, material_name)
     return n_key in self._weaver
 
   def invalidate_cache(self, material_name: Optional[str] = None) -> None:
+    """Drop interpolated caches (one material, or all when omitted)."""
     if material_name is None:
       self._cache.clear()
     else:
       self._cache.pop(material_name, None)
 
   def _fetch_and_interpolate(self, key: tuple) -> Optional[np.ndarray]:
+    """Woven fragment resampled to the target grid (None when key unknown)."""
     if key not in self._weaver:
       return None
     src_wl, src_data = self._weaver.get_weaved(key)
@@ -180,6 +200,10 @@ class WeaverMaterialProvider:
 
 
 def wrap_material_source(source: Any, **kwargs: Any) -> MaterialProvider:
+  """Coerce dicts, spec maps and weavers into a :class:`MaterialProvider`.
+
+  Pass ``wavelength=`` for spec dicts, ``target_wavelength=`` for weavers.
+  """
   if isinstance(source, MaterialProvider):
     return source
   if isinstance(source, dict):

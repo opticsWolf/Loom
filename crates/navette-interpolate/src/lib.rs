@@ -1,7 +1,16 @@
 //! Pure-Rust univariate interpolation core (no Python, no I/O).
 //!
-//! Batch-aware kernels with rayon-parallel evaluation.
-//! PyO3 bindings live in `navette-interpolate-py`.
+//! Batch-aware kernels with rayon-parallel evaluation. The Python bindings
+//! live in the `navette-py` aggregator crate and expose [`UniInterpolator`]
+//! as `navette._interpolate.UniInterpolator`.
+//!
+//! # Methods
+//!
+//! `"pchip"` (shape-preserving cubic Hermite), `"makima"` (modified
+//! Akima), `"sprague"` (5th-order, needs ≥ 6 points), `"floater_hormann"`
+//!/`"fh"` (barycentric rational, degree `d`), and `"linear"`.
+//! `deriv` selects value (0) or first-derivative output where the method
+//! supports it. Out-of-range queries follow [`ExtrapMode`].
 
 use ndarray::{Array1, Array2};
 use rayon::prelude::*;
@@ -24,6 +33,7 @@ enum AuxData {
 // -------------------------------------------------------------------------
 // Extrapolation modes
 // -------------------------------------------------------------------------
+/// Behaviour for query points outside the knot range.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExtrapMode {
     Linear,
@@ -32,6 +42,7 @@ enum ExtrapMode {
 }
 
 impl ExtrapMode {
+    /// Parse `"linear"`, `"clamp"` or `"error"` (case-insensitive).
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
             "linear" => Ok(ExtrapMode::Linear),
@@ -40,6 +51,7 @@ impl ExtrapMode {
             _ => Err("extrap must be 'linear', 'clamp', or 'error'".to_string()),
         }
     }
+    /// Canonical lowercase name, used by the bindings for round-tripping.
     pub fn as_str(self) -> &'static str {
         match self {
             ExtrapMode::Linear => "linear",
@@ -53,7 +65,12 @@ impl ExtrapMode {
 // Main spline struct
 // -------------------------------------------------------------------------
 
-// Core interpolator (plain Rust; no Python types)
+/// Core interpolator (plain Rust; no Python types).
+///
+/// Owns strictly-increasing knots `x` and one row of values per signal in
+/// `y`. Method-specific setup (Hermite slopes, Floater–Hormann weights) is
+/// precomputed once in [`UniInterpolator::new`]; [`UniInterpolator::evaluate`]
+/// then answers any number of query batches, rayon-parallelised.
 #[derive(Clone)]
 pub struct UniInterpolator {
     x: Array1<f64>,
@@ -67,6 +84,16 @@ pub struct UniInterpolator {
 }
 
 impl UniInterpolator {
+    /// Build and validate an interpolator.
+    ///
+    /// `x` must be strictly increasing with ≥ 2 points; every row of `y`
+    /// must match `x` in length. `method` is one of `"pchip"`, `"makima"`,
+    /// `"sprague"` (needs ≥ 6 points), `"floater_hormann"`/`"fh"`, or
+    /// `"linear"`. `d` is the Floater–Hormann degree (clamped to `n − 1` and
+    /// ignored by other methods); `robust` selects guarded evaluation where
+    /// available; `extrap` is `"linear"`, `"clamp"` or `"error"`.
+    ///
+    /// Returns `Err` describing the first violated contract.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         x: Array1<f64>,
@@ -112,6 +139,13 @@ impl UniInterpolator {
         Ok(Self { x, y, method, robust, d, is_batch, aux_data, extrap: extrap_mode })
     }
 
+    /// Evaluate all signals at `tgt_x`, returning `(n_signals, n_tgt)` values.
+    ///
+    /// `deriv` selects values (0) or first derivatives (1) where supported.
+    /// `sorted_hint` skips the sortedness check (`None` auto-detects, letting
+    /// the kernel take the faster sorted path). Single-signal grids above
+    /// `PAR_TARGET_THRESHOLD` points split across threads; multi-signal
+    /// batches parallelise over rows.
     pub fn evaluate(&self, tgt_x: &[f64], deriv: usize, sorted_hint: Option<bool>) -> Array2<f64> {
         let n_tgt = tgt_x.len();
         let n_signals = self.y.nrows();
@@ -152,11 +186,14 @@ impl UniInterpolator {
         out
     }
 
+    /// Cloned knot vector (binding accessor).
     pub fn x_clone(&self) -> Array1<f64> { self.x.clone() }
+    /// Cloned value rows (binding accessor).
     pub fn y_clone(&self) -> Array2<f64> { self.y.clone() }
     pub fn slopes_clone(&self) -> Option<Array2<f64>> {
         match &self.aux_data { AuxData::Slopes(s) => Some(s.clone()), _ => None }
     }
+    /// Canonical method name chosen at construction.
     pub fn method(&self) -> &str { &self.method }
     pub fn robust(&self) -> bool { self.robust }
     pub fn fh_d(&self) -> usize { self.d }
@@ -167,6 +204,7 @@ impl UniInterpolator {
 // Single-signal dispatcher (operates purely on slices, no Python state)
 // -------------------------------------------------------------------------
 #[allow(clippy::too_many_arguments)]
+/// Dispatch one signal to the active method kernel (values or 1st derivatives).
 fn run_kernel(
     method: &str,
     robust: bool,
@@ -221,6 +259,7 @@ fn run_kernel(
 
 /// Central-difference fallback for methods without an analytic derivative.
 #[allow(clippy::too_many_arguments)]
+/// Central/one-sided finite difference used for endpoint Hermite slopes.
 fn finite_diff(
     method: &str,
     robust: bool,
@@ -251,6 +290,7 @@ fn finite_diff(
     }
 }
 
+/// True when `data` is non-decreasing (selects the fast sorted kernels).
 fn is_sorted_slice(data: &[f64]) -> bool {
     data.windows(2).all(|w| w[0] <= w[1])
 }
@@ -260,6 +300,7 @@ fn is_sorted_slice(data: &[f64]) -> bool {
 // =============================================================================
 
 #[inline]
+/// Out-of-range value under `extrap`: linear extension, clamp, or NaN+flag for `Error`.
 fn extrap_value(
     xi: f64,
     x: &[f64],
@@ -285,6 +326,7 @@ fn extrap_value(
     }
 }
 
+/// Piecewise-linear interpolation; `tgt_x` ascending.
 fn eval_linear_sorted(tgt_x: &[f64], x: &[f64], y: &[f64], out: &mut [f64], extrap: ExtrapMode) {
     let n = x.len();
     let mut j = 0;
@@ -306,6 +348,7 @@ fn eval_linear_sorted(tgt_x: &[f64], x: &[f64], y: &[f64], out: &mut [f64], extr
     }
 }
 
+/// Piecewise-linear interpolation; `tgt_x` in any order.
 fn eval_linear_general(
     tgt_x: &[f64],
     x: &[f64],
@@ -347,6 +390,7 @@ fn eval_linear_general(
     }
 }
 
+/// Cubic Hermite interpolation with precomputed slopes; `tgt_x` ascending.
 fn eval_hermite_sorted(
     tgt_x: &[f64],
     x: &[f64],
@@ -393,6 +437,7 @@ fn eval_hermite_sorted(
     }
 }
 
+/// Cubic Hermite interpolation with precomputed slopes; `tgt_x` in any order.
 fn eval_hermite_general(
     tgt_x: &[f64],
     x: &[f64],
@@ -598,6 +643,7 @@ fn eval_sprague_general(
     }
 }
 
+/// Floater–Hormann barycentric rational interpolation with weights `w`.
 fn eval_fh(tgt_x: &[f64], x: &[f64], y: &[f64], w: &[f64], out: &mut [f64], extrap: ExtrapMode) {
     let n = x.len();
     for (i, &xi) in tgt_x.iter().enumerate() {
@@ -631,6 +677,7 @@ fn eval_fh(tgt_x: &[f64], x: &[f64], y: &[f64], w: &[f64], out: &mut [f64], extr
 
 /// Returns `lo` such that `x[lo] <= xi < x[lo+1]`, assuming `x[0] < xi < x[n-1]`.
 #[inline]
+/// First index `i` with `x[i] >= xi` (binary search over ascending knots).
 fn lower_bound(x: &[f64], xi: f64) -> usize {
     let mut lo = 0usize;
     let mut hi = x.len() - 1;
@@ -648,6 +695,7 @@ fn lower_bound(x: &[f64], xi: f64) -> usize {
 // -------------------------------------------------------------------------
 // Precomputation kernels
 // -------------------------------------------------------------------------
+/// Fritsch–Carlson shape-preserving slopes, one row per signal.
 fn calc_pchip_slopes(x: &Array1<f64>, y_batch: &Array2<f64>) -> Array2<f64> {
     let n = x.len();
     let mut slopes = Array2::<f64>::zeros(y_batch.raw_dim());
@@ -711,6 +759,7 @@ fn calc_pchip_slopes(x: &Array1<f64>, y_batch: &Array2<f64>) -> Array2<f64> {
     slopes
 }
 
+/// Modified Akima slopes (less overshoot than classic Akima), one row per signal.
 fn calc_makima_slopes(x: &Array1<f64>, y_batch: &Array2<f64>) -> Array2<f64> {
     let n = x.len();
     let mut slopes = Array2::<f64>::zeros(y_batch.raw_dim());
@@ -770,6 +819,7 @@ fn calc_makima_slopes(x: &Array1<f64>, y_batch: &Array2<f64>) -> Array2<f64> {
     slopes
 }
 
+/// Floater–Hormann barycentric weights of degree `d` on knots `x`.
 fn calc_fh_weights(x: &Array1<f64>, d: usize) -> Array1<f64> {
     let n = x.len();
     let mut w = Array1::<f64>::zeros(n);

@@ -1,7 +1,10 @@
-// optimizer.rs
-//
-// Landscape scanning, local minimization (Nelder-Mead) and field-profile
-// extraction on top of the coherent-block solver.
+//! Landscape scanning, local minimization (Nelder–Mead) and field-profile
+//! extraction on top of the coherent-block solver.
+//!
+//! The landscape maps trial effective index `n_eff` to |1/r|²; its minima
+//! locate guided eigenmodes. [`char_func`] is the complex objective,
+//! [`char_func_xy`] the real-valued adapter for the minimizer, and
+//! [`reflection_coefficient_helper`] the shared forward solve.
 use num_complex::Complex64;
 
 // Reuse the shared low-level primitives from the crate
@@ -10,6 +13,11 @@ use crate::coherent_block::solve_coherent_block_fields_inner;
 // -----------------------------------------------------------------------------
 // Helper: compute the complex reflection coefficient for a given n_eff
 // -----------------------------------------------------------------------------
+/// Complex reflection coefficient of the stack for trial index `n_eff` at
+/// wavelength `lam` [nm] and polarization `pol` (0 = s, 1 = p).
+///
+/// Thin forward solve shared by the landscape scanner and the minimizer;
+/// `inv_n` is the precomputed reciprocal-index stack (shared read-only).
 #[inline]
 pub fn reflection_coefficient_helper(
     n_stack: &[Complex64],
@@ -41,6 +49,9 @@ pub fn reflection_coefficient_helper(
 // -----------------------------------------------------------------------------
 // Characteristic function: |1 / r(n_eff)|²
 // -----------------------------------------------------------------------------
+/// Characteristic function |1/r(n_eff)|² whose minima are the guided modes.
+///
+/// Returns 1e30 at exact zeros of |r| instead of dividing by zero.
 #[inline]
 pub fn char_func(
     n_stack: &[Complex64],

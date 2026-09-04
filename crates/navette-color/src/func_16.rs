@@ -5,6 +5,12 @@ use crate::common::DEG2RAD;
 
 const C25_7: f64 = 6103515625.0; // 25.0^7
 
+/// Single-pair CIEDE2000 colour difference with parametric weights
+/// `k_l` (lightness), `k_c` (chroma), `k_h` (hue); use 1.0/1.0/1.0 for
+/// reference conditions. Includes the rotation term for the blue region.
+///
+/// See the module docs for the full formula; the batch [`delta_e_2000`]
+/// maps this over pairs with NumPy-style broadcasting.
 #[inline(always)]
 pub fn delta_e_2000_single(lab1: &[f64; 3], lab2: &[f64; 3], k_l: f64, k_c: f64, k_h: f64) -> f64 {
     let l1 = lab1[0]; let a1 = lab1[1]; let b1 = lab1[2];
@@ -71,6 +77,11 @@ pub fn delta_e_2000_single(lab1: &[f64; 3], lab2: &[f64; 3], k_l: f64, k_c: f64,
     (val_l.powi(2) + val_c.powi(2) + val_h.powi(2) + rt * val_c * val_h).sqrt()
 }
 
+/// Batch CIEDE2000 over two CIELAB batches with NumPy-style broadcasting
+/// (lengths must match or one side must have length 1).
+///
+/// # Panics
+/// Panics if the two batches have different lengths and neither length is 1.
 pub fn delta_e_2000(lab1: &[[f64; 3]], lab2: &[[f64; 3]], k_l: f64, k_c: f64, k_h: f64) -> Vec<f64> {
     crate::metrics::map_pairs(lab1, lab2, |a, b| delta_e_2000_single(a, b, k_l, k_c, k_h))
 }

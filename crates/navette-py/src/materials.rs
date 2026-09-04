@@ -44,6 +44,7 @@ fn to_py<'py>(py: Python<'py>, out: Array1<Complex64>) -> Bound<'py, PyArray1<Co
     PyArray1::from_slice(py, out.as_slice().expect("core output contiguous"))
 }
 
+/// Cauchy n(lam) = A + B/lam_um^2 + C/lam_um^4, k = 0.
 #[pyfunction]
 fn cauchy_nk<'py>(
     py: Python<'py>,
@@ -57,6 +58,7 @@ fn cauchy_nk<'py>(
     to_py(py, out)
 }
 
+/// Cauchy n plus Urbach absorption tail k (alpha0, Eu, lambda_g).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn cauchy_urbach_nk<'py>(
@@ -74,6 +76,7 @@ fn cauchy_urbach_nk<'py>(
     to_py(py, out)
 }
 
+/// Up-to-three-term Sellmeier n (B3 = 0 drops the third term), k = 0.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn sellmeier_nk<'py>(
@@ -91,6 +94,7 @@ fn sellmeier_nk<'py>(
     to_py(py, out)
 }
 
+/// Sellmeier n plus Urbach absorption tail k.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 fn sellmeier_urbach_nk<'py>(
@@ -113,6 +117,7 @@ fn sellmeier_urbach_nk<'py>(
     to_py(py, out)
 }
 
+/// Lorentz oscillators: osc rows are (E0, Gamma, f) in eV; returns sqrt(eps).
 #[pyfunction]
 fn lorentz_nk<'py>(
     py: Python<'py>,
@@ -126,6 +131,7 @@ fn lorentz_nk<'py>(
     to_py(py, out)
 }
 
+/// Drude free-carrier model (omega_p, gamma, eps_inf).
 #[pyfunction]
 fn drude_nk<'py>(
     py: Python<'py>,
@@ -139,6 +145,7 @@ fn drude_nk<'py>(
     to_py(py, out)
 }
 
+/// Combined Drude term plus Lorentz oscillators.
 #[pyfunction]
 fn drude_lorentz_nk<'py>(
     py: Python<'py>,
@@ -154,6 +161,7 @@ fn drude_lorentz_nk<'py>(
     to_py(py, out)
 }
 
+/// Cody-Lorentz model with FFT Kramers-Kronig eps1 (may raise on bad params).
 #[pyfunction]
 fn cody_lorentz_nk<'py>(
     py: Python<'py>,
@@ -173,6 +181,7 @@ fn cody_lorentz_nk<'py>(
     }
 }
 
+/// Forouhi-Bloomer interband terms over n_inf.
 #[pyfunction]
 fn fb_interband_nk<'py>(
     py: Python<'py>,
@@ -186,6 +195,7 @@ fn fb_interband_nk<'py>(
     to_py(py, out)
 }
 
+/// Forouhi-Bloomer metal: free-electron term plus interband terms.
 #[pyfunction]
 fn fb_metal_nk<'py>(
     py: Python<'py>,
@@ -203,6 +213,9 @@ fn fb_metal_nk<'py>(
 
 // --- EMA mixers (take inclusion/host refractive indices, return permittivity) ---
 
+/// Generate the analytic EMA mixers (`ema_lichtenecker`, `ema_looyenga`,
+/// `ema_maxwell_garnett`): each takes inclusion/host refractive indices plus
+/// volume fraction `f` and returns effective permittivity.
 macro_rules! ema_simple {
     ($name:ident, $core:path) => {
         #[pyfunction]
@@ -224,6 +237,7 @@ ema_simple!(ema_lichtenecker, core::ema::lichtenecker);
 ema_simple!(ema_looyenga, core::ema::looyenga);
 ema_simple!(ema_maxwell_garnett, core::ema::maxwell_garnett);
 
+/// Bruggeman symmetric-medium permittivity (Newton-Raphson per point).
 #[pyfunction]
 #[pyo3(signature = (n_i, n_h, f, max_iter=100, tol=1e-9))]
 fn ema_bruggeman<'py>(
@@ -240,6 +254,7 @@ fn ema_bruggeman<'py>(
     to_py(py, out)
 }
 
+/// Mori-Tanaka permittivity for ellipsoidal inclusions (depolarisation l).
 #[pyfunction]
 #[pyo3(signature = (n_i, n_h, f, l=0.3333333333333333))]
 fn ema_mori_tanaka<'py>(
@@ -255,6 +270,7 @@ fn ema_mori_tanaka<'py>(
     to_py(py, out)
 }
 
+/// Birchak general power-law permittivity with exponent alpha.
 #[pyfunction]
 #[pyo3(signature = (n_i, n_h, f, alpha=0.5))]
 fn ema_power_law<'py>(
@@ -270,6 +286,7 @@ fn ema_power_law<'py>(
     to_py(py, out)
 }
 
+/// 50:50 roughness interface (Looyenga at f = 0.5).
 #[pyfunction]
 fn ema_roughness<'py>(
     py: Python<'py>,
@@ -290,6 +307,7 @@ fn eps_to_nk<'py>(py: Python<'py>, eps: PyReadonlyArray1<'py, Complex64>) -> Bou
     to_py(py, out)
 }
 
+/// Tauc-Lorentz model with FFT-KK eps1 (may raise on bad params).
 #[pyfunction]
 fn tauc_lorentz_nk<'py>(
     py: Python<'py>,
@@ -307,6 +325,7 @@ fn tauc_lorentz_nk<'py>(
     }
 }
 
+/// UBF monolog-Lorentz model with FFT-KK eps1 (may raise on bad params).
 #[pyfunction]
 fn ubf_nk<'py>(
     py: Python<'py>,
@@ -323,6 +342,7 @@ fn ubf_nk<'py>(
     }
 }
 
+/// Wavelength-independent n + ik.
 #[pyfunction]
 fn konstant_nk<'py>(
     py: Python<'py>,
@@ -335,6 +355,7 @@ fn konstant_nk<'py>(
     to_py(py, out)
 }
 
+/// Linear table lookup of (n, k) over a wavelength grid, clamped ends, optional scale factors.
 #[pyfunction]
 #[pyo3(signature = (wavelength_nm, grid_wl, n_vals, k_vals=None, n_factor=1.0, k_factor=1.0))]
 #[allow(clippy::too_many_arguments)]
@@ -364,6 +385,7 @@ fn table_nk<'py>(
     to_py(py, out)
 }
 
+/// Register the dispersion-models submodule (`navette._navette._materials`).
 #[pymodule]
 pub fn _materials(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cauchy_nk, m)?)?;

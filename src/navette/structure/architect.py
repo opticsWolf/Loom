@@ -184,11 +184,13 @@ class Navette_Architect:
 
     @property
     def is_empty(self) -> bool:
+        """True when the chain holds no structure blocks."""
         return len(self._blocks) == 0
 
     # -- material provider -------------------------------------------------
     @property
     def materials(self) -> Optional[MaterialProvider]:
+        """Shared provider, propagated to every block on assignment."""
         return self._materials
 
     @materials.setter
@@ -204,6 +206,7 @@ class Navette_Architect:
     # Backward compat
     @property
     def active_material_dict(self) -> Optional[MaterialProvider]:
+        """Alias of :attr:`materials` (legacy name)."""
         return self._materials
 
     @active_material_dict.setter
@@ -222,6 +225,7 @@ class Navette_Architect:
     # -- block management --------------------------------------------------
     @property
     def blocks(self) -> List[StructureBlock]:
+        """The structure blocks in chain order."""
         return self._blocks
 
     @property
@@ -230,9 +234,11 @@ class Navette_Architect:
         return len(self._blocks)
 
     def index(self, block: StructureBlock) -> int:
+        """Position of `block` in the chain (ValueError when absent)."""
         return self._blocks.index(block)
 
     def get_block_index_by_label(self, label: str) -> List[int]:
+        """Chain positions of all blocks carrying `label`."""
         return [i for i, blk in enumerate(self._blocks) if blk.label == label]
 
     def add_structure(
@@ -270,6 +276,7 @@ class Navette_Architect:
         repeat: int = 1,
         label: str = "",
     ) -> None:
+        """Insert a structure block (optionally inverted/repeated/labelled)."""
         if repeat < 1:
             raise ValueError("repeat_count must be >= 1")
         if self._materials is not None:
@@ -479,6 +486,7 @@ class Navette_Architect:
 
     # -- layer manipulation at global indices ------------------------------
     def get_layer_at_global(self, global_idx: int) -> Layer:
+        """Layer at a chain-wide index (spans block boundaries)."""
         struct, local = self.map_global_index_to_layer(global_idx)
         return struct.layer_list[local]
 
@@ -567,6 +575,7 @@ class Navette_Architect:
         return total
 
     def get_total_physical_thickness(self) -> float:
+        """Sum of all film thicknesses [nm] across the chain."""
         return sum(layer.thickness for layer, _ in self._iter_layers())
 
     # -- serialisation (node-graph persistence) ----------------------------

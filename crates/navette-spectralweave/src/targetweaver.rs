@@ -1,20 +1,28 @@
+//! Optimization targets and merit evaluation over woven simulation curves.
+//!
+//! A [`TargetWeaver`] owns dedicated frames holding target curves plus
+//! precomputed normalization metadata ([`TargetMetadata`]); the merit
+//! function compares simulated weaves against them with Exact/Above/Below
+//! activation and linear/log/phase/complex normalisation modes.
+
 use crate::opticalweaver::{OpticalKey, OpticalWeaver, SpectralDataFrame};
 use parking_lot::RwLock;
 use ahash::AHashMap;
 use std::sync::Arc;
 
-// =============================================================================
-// TARGETS ENGINE (Zero-allocation optimization targets & Merit Function)
-// =============================================================================
-
+/// How a target activates the residual: exact match, one-sided above/below.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TargetKind {
+    /// Penalise any deviation (residual = sim minus target).
     Exact,
+    /// Penalise only shortfall (residual = max(0, target minus sim)).
     Above,
+    /// Penalise only excess (residual = max(0, sim minus target)).
     Below,
 }
 
 impl TargetKind {
+    /// Parse "e"/"a"/"b" (exact/above/below); None for anything else.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "e" => Some(TargetKind::Exact),
@@ -26,6 +34,9 @@ impl TargetKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Normalisation applied before the residual: raw linear values, log10
+/// magnitudes (wide-dynamic-range spectra), unwrapped phase, or complex
+/// (real/imag jointly).
 pub enum ResolvedNormMode {
     Linear,
     Log,
@@ -34,6 +45,8 @@ pub enum ResolvedNormMode {
 }
 
 #[derive(Clone)]
+/// One ingested target curve: activation kind, normalisation, and the
+/// pre-normalized values plus per-point tolerances.
 pub struct TargetEntry {
     pub kind: TargetKind,
     pub resolved_mode: ResolvedNormMode,
@@ -43,10 +56,14 @@ pub struct TargetEntry {
 }
 
 #[derive(Default, Clone)]
+/// All target entries keyed by [`OpticalKey`], stored per frame UID.
 pub struct TargetMetadata {
     pub entries: AHashMap<OpticalKey, TargetEntry>,
 }
 
+/// Target store for optimization: dedicated frames plus ingestion-time
+/// normalization metadata. `tolerance_floor` clamps near-zero tolerances so
+/// the merit can never divide by zero.
 pub struct TargetWeaver {
     pub inner: Arc<OpticalWeaver>,
     pub target_metadata: RwLock<AHashMap<usize, TargetMetadata>>, // Keyed by Frame UID
@@ -54,6 +71,8 @@ pub struct TargetWeaver {
 }
 
 impl TargetWeaver {
+    /// Create a weaver with an LRU plan cache of `cache_size` grids and a
+    /// tolerance floor for merit denominators.
     pub fn new(cache_size: usize, tolerance_floor: f64) -> Self {
         TargetWeaver {
             inner: Arc::new(OpticalWeaver::new(cache_size)),
@@ -62,6 +81,8 @@ impl TargetWeaver {
         }
     }
 
+    /// Allocate a fresh frame for one target curve (targets never share
+    /// frames with simulation data) and bump the generation.
     pub fn create_dedicated_frame(&self, wl: &[f64]) -> Result<Arc<SpectralDataFrame>, String> {
         let new_frame = Arc::new(SpectralDataFrame::new(wl)?);
         self.inner.inner.frames.write().push(new_frame.clone());

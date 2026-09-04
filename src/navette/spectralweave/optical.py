@@ -67,10 +67,12 @@ class SimulationWeaver:
     
     @property
     def display_spectral_unit(self) -> str:
+        """Wavelength display unit for returned axes ("NM")."""
         return self._backend.display_spectral
 
     @display_spectral_unit.setter
     def display_spectral_unit(self, unit: SpectralUnit) -> None:
+        """Set the wavelength display unit."""
         self._backend.display_spectral = unit
 
     # --- Core Operations ---
@@ -124,7 +126,9 @@ class SimulationWeaver:
     
     @property
     def frame_count(self) -> int:
+        """Number of frames (distinct wavelength grids) currently held."""
         return self._backend.frame_count
         
     def invalidate_cache(self) -> None:
+        """Drop cached distribution plans; grids re-resolve on next use."""
         self._backend.invalidate_cache()

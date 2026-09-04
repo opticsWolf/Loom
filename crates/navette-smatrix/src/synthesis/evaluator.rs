@@ -1,16 +1,16 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::evaluator — SmatrixContext: the REAL DesignContext.
-//
-// Wires together, all in-process (no Python round trip):
-//   * coherent_block::solve_coherent_block_fields_dual  — one dual-pol
-//     interface sweep per spectral point (rayon over angle×λ grid)
-//   * MeritSpec::merit / ::residuals                    — targets engine
-//   * thick_opt::levenberg_marquardt                    — bounded LM
-//
-// optimize_thicknesses mirrors ClampedNeedleSynthesizer.optimize_thicknesses:
-// LM over optimize-flagged films with bounds [0, clamp_max], then a
-// clamp_all(clamp_min, clamp_max) sweep that REMOVES sub-min layers.
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::evaluator — SmatrixContext: the REAL DesignContext.
+//!
+//! Wires together, all in-process (no Python round trip):
+//!   * coherent_block::solve_coherent_block_fields_dual  — one dual-pol
+//!     interface sweep per spectral point (rayon over angle×λ grid)
+//!   * MeritSpec::merit / ::residuals                    — targets engine
+//!   * thick_opt::levenberg_marquardt                    — bounded LM
+//!
+//! optimize_thicknesses mirrors ClampedNeedleSynthesizer.optimize_thicknesses:
+//! LM over optimize-flagged films with bounds [0, clamp_max], then a
+//! clamp_all(clamp_min, clamp_max) sweep that REMOVES sub-min layers.
 
 use std::sync::Arc;
 

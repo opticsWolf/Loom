@@ -1,51 +1,51 @@
-// needle_operator.rs
-//
-// Analytic needle-operator sensitivities (Tikhonravov's method) for
-// multilayer stacks solved with scalar Redheffer S-matrices.
-//
-// Pure Rust core (no pyo3 / numpy); the Python entry point lives in
-// `needle_engine.rs`. Shared primitives (star products, roughness form
-// factor, fast complex kernels, spectral differentiation) come from
-// `optics_core` so this operator can never drift numerically from the main
-// solvers. Conventions match them verbatim: element ordering
-// (r_front, t_back, t_fwd, r_back), Im(beta) >= 0 branch, LOG_MIN
-// regularization, roughness types 0..=5.
-//
-// Theory
-// ------
-// Split the stack at a plane at depth z inside host layer j:
-//
-//     S_total(z) = U(z) ⊗ N ⊗ L(z)
-//
-// where U = everything above the plane (ambient side), L = everything below,
-// and N is the "needle": an infinitesimal slab of candidate material n'
-// embedded in the host medium n_j. To first order in its thickness δ the
-// needle's S-matrix entries are
-//
-//     rho(δ) = δ·rho_hat,   tau(δ) = 1 + δ·tau_hat
-//     rho_hat = -2i·beta'·r12        / (1 - r12²)
-//     tau_hat =  i·beta'·(1 + r12²)  / (1 - r12²)
-//
-// with r12 = (y_j − y')/(y_j + y'), beta' = k0·n'·cosθ', y the wave
-// admittance (s: n·cosθ, p: n/cosθ). The exact-to-first-order sensitivity of
-// the stack amplitude reflection coefficient is obtained by composing U, the
-// dual-number needle, and L through the SAME Redheffer star product used by
-// the forward solver, using complex dual numbers (value, d/dδ):
-//
-//     ∂r_k/∂δ (z) = slope of [ U ⊗ N_dual ⊗ L ]_r_front
-//
-// This captures every first-order multiple-reflection path automatically —
-// no hand-expanded algebra to get wrong. The Tikhonravov merit P-function is
-// then the residual-weighted accumulation over spectral points:
-//
-//     P(z) = Σ_k 2·w_k·(R_k − R_target,k)·Re{ conj(r_k) · ∂r_k/∂δ (z) }
-//
-// which equals ∂f₁/∂δ for f₁ = Σ_k w_k·(R_k − R_target,k)². Negative minima
-// of P(z) mark the most profitable needle insertion points.
-//
-// Scope: fully coherent stacks only (the coherent-block solver path).
-// Roughness factors on real interfaces are honoured; the two virtual
-// needle/host interfaces are abrupt (rtype 0), as physically appropriate.
+//! needle_operator.rs
+//!
+//! Analytic needle-operator sensitivities (Tikhonravov's method) for
+//! multilayer stacks solved with scalar Redheffer S-matrices.
+//!
+//! Pure Rust core (no pyo3 / numpy); the Python entry point lives in
+//! `needle_engine.rs`. Shared primitives (star products, roughness form
+//! factor, fast complex kernels, spectral differentiation) come from
+//! `optics_core` so this operator can never drift numerically from the main
+//! solvers. Conventions match them verbatim: element ordering
+//! (r_front, t_back, t_fwd, r_back), Im(beta) >= 0 branch, LOG_MIN
+//! regularization, roughness types 0..=5.
+//!
+//! Theory
+//! ------
+//! Split the stack at a plane at depth z inside host layer j:
+//!
+//!     S_total(z) = U(z) ⊗ N ⊗ L(z)
+//!
+//! where U = everything above the plane (ambient side), L = everything below,
+//! and N is the "needle": an infinitesimal slab of candidate material n'
+//! embedded in the host medium n_j. To first order in its thickness δ the
+//! needle's S-matrix entries are
+//!
+//!     rho(δ) = δ·rho_hat,   tau(δ) = 1 + δ·tau_hat
+//!     rho_hat = -2i·beta'·r12        / (1 - r12²)
+//!     tau_hat =  i·beta'·(1 + r12²)  / (1 - r12²)
+//!
+//! with r12 = (y_j − y')/(y_j + y'), beta' = k0·n'·cosθ', y the wave
+//! admittance (s: n·cosθ, p: n/cosθ). The exact-to-first-order sensitivity of
+//! the stack amplitude reflection coefficient is obtained by composing U, the
+//! dual-number needle, and L through the SAME Redheffer star product used by
+//! the forward solver, using complex dual numbers (value, d/dδ):
+//!
+//!     ∂r_k/∂δ (z) = slope of [ U ⊗ N_dual ⊗ L ]_r_front
+//!
+//! This captures every first-order multiple-reflection path automatically —
+//! no hand-expanded algebra to get wrong. The Tikhonravov merit P-function is
+//! then the residual-weighted accumulation over spectral points:
+//!
+//!     P(z) = Σ_k 2·w_k·(R_k − R_target,k)·Re{ conj(r_k) · ∂r_k/∂δ (z) }
+//!
+//! which equals ∂f₁/∂δ for f₁ = Σ_k w_k·(R_k − R_target,k)². Negative minima
+//! of P(z) mark the most profitable needle insertion points.
+//!
+//! Scope: fully coherent stacks only (the coherent-block solver path).
+//! Roughness factors on real interfaces are honoured; the two virtual
+//! needle/host interfaces are abrupt (rtype 0), as physically appropriate.
 
 use num_complex::{Complex64, ComplexFloat};
 use std::f64::consts::PI;

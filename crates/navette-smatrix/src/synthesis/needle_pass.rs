@@ -1,30 +1,30 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::needle_pass — analytic needle insertion pass.
-//
-// Replaces the brute-force `compute_p_function` from needle_synthesis.py
-// (which inserted a 1 nm test needle and re-solved the FULL stack at every
-// scan position). Here one sweep of the analytic operator yields P(z)
-// everywhere at once:
-//
-//   P(z) = Σ_k 2·w_k·(R_k − Rt_k)·Re{conj(r_k)·∂r_k/∂δ}      (half-gradient)
-//
-// summed over spectral points (angle-major k = a·num_wavs + w) and over the
-// enabled polarization branches. The most-negative-P site is exactly the
-// argmin-MF-after-insertion site in the δ→0 limit — without the 1 nm
-// test-thickness bias.
-//
-// Scan-grid contract (mirrors compute_p_function verbatim):
-//   * per admissible film: interior positions k·step, k = 1 .. int(d/step)−1
-//   * non-admissible films advance the cumulative depth only
-//
-// Merit coupling: `build_needle_targets` folds a MeritSpec into flat
-// per-solver-point (raw target, folded weight) arrays. Multiple entries
-// overlapping one solver point fold EXACTLY (not approximately): since
-// every merit term is quadratic in R with positive weight,
-//   Σ_e w_e·(R − t_e) = W·(R − t_eff),  W = Σw_e, t_eff = Σ(w_e t_e)/W.
-// Weights carry the normalization/tolerance folding w = nf²/tol² so the
-// descent direction matches dF/dδ of the spectralweave merit function.
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::needle_pass — analytic needle insertion pass.
+//!
+//! Replaces the brute-force `compute_p_function` from needle_synthesis.py
+//! (which inserted a 1 nm test needle and re-solved the FULL stack at every
+//! scan position). Here one sweep of the analytic operator yields P(z)
+//! everywhere at once:
+//!
+//!   P(z) = Σ_k 2·w_k·(R_k − Rt_k)·Re{conj(r_k)·∂r_k/∂δ}      (half-gradient)
+//!
+//! summed over spectral points (angle-major k = a·num_wavs + w) and over the
+//! enabled polarization branches. The most-negative-P site is exactly the
+//! argmin-MF-after-insertion site in the δ→0 limit — without the 1 nm
+//! test-thickness bias.
+//!
+//! Scan-grid contract (mirrors compute_p_function verbatim):
+//!   * per admissible film: interior positions k·step, k = 1 .. int(d/step)−1
+//!   * non-admissible films advance the cumulative depth only
+//!
+//! Merit coupling: `build_needle_targets` folds a MeritSpec into flat
+//! per-solver-point (raw target, folded weight) arrays. Multiple entries
+//! overlapping one solver point fold EXACTLY (not approximately): since
+//! every merit term is quadratic in R with positive weight,
+//!   Σ_e w_e·(R − t_e) = W·(R − t_eff),  W = Σw_e, t_eff = Σ(w_e t_e)/W.
+//! Weights carry the normalization/tolerance folding w = nf²/tol² so the
+//! descent direction matches dF/dδ of the spectralweave merit function.
 
 use std::sync::Arc;
 

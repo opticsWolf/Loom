@@ -1,18 +1,18 @@
-// Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
-//
-// synthesis::pipeline — NeedlePipeline macro-loop.
-//
-// Verbatim port of needle_pipeline.py section 6. Each macro-cycle:
-//   1. Needle pass   (cycle.rs: analytic insertions + optimize)
-//   2. Cleanup       (optional; threshold defaults to clamp_min;
-//                     post-cleanup clamp sweep)
-//   3. Inflate       (optional; clamps BEFORE and after re-optimize —
-//                     the ClampedNeedleSynthesizer overrides)
-//   4. Stagnation    record mf_end → check (divergence → oscillation → plateau)
-//
-// Budget checks run pre-flight, after the needle phase, and post-cycle.
-// The loop ends with a final optimize + clamp sweep + evaluation.
-// User abort = callback returning Err (the KeyboardInterrupt analog).
+//! Navette -- Rust Rewrite of Numba-optimized thin-film optical solver
+//!
+//! synthesis::pipeline — NeedlePipeline macro-loop.
+//!
+//! Verbatim port of needle_pipeline.py section 6. Each macro-cycle:
+//!   1. Needle pass   (cycle.rs: analytic insertions + optimize)
+//!   2. Cleanup       (optional; threshold defaults to clamp_min;
+//!                     post-cleanup clamp sweep)
+//!   3. Inflate       (optional; clamps BEFORE and after re-optimize —
+//!                     the ClampedNeedleSynthesizer overrides)
+//!   4. Stagnation    record mf_end → check (divergence → oscillation → plateau)
+//!
+//! Budget checks run pre-flight, after the needle phase, and post-cycle.
+//! The loop ends with a final optimize + clamp sweep + evaluation.
+//! User abort = callback returning Err (the KeyboardInterrupt analog).
 
 use crate::synthesis::cleanup::{cleanup_design, CleanupResult};
 use crate::synthesis::config::{PipelineConfig, TerminationReason};

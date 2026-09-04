@@ -90,6 +90,7 @@ class TargetCollection:
     _angular_targets:  list[AngularTarget]  = field(default_factory=list)
 
     def add(self, target: BaseTarget) -> None:
+        """Append a :class:`SpectralTarget` or :class:`AngularTarget`."""
         if isinstance(target, SpectralTarget):
             self._spectral_targets.append(target)
         elif isinstance(target, AngularTarget):
@@ -98,19 +99,23 @@ class TargetCollection:
             raise TypeError(f"Unsupported target type: {type(target)}")
 
     def clear(self) -> None:
+        """Remove all spectral and angular targets."""
         self._spectral_targets.clear()
         self._angular_targets.clear()
 
     @property
     def spectral_targets(self) -> list[SpectralTarget]:
+        """The ingested wavelength-domain targets."""
         return self._spectral_targets
 
     @property
     def angular_targets(self) -> list[AngularTarget]:
+        """The ingested angle-domain targets."""
         return self._angular_targets
 
     @property
     def count(self) -> int:
+        """Total number of spectral plus angular targets."""
         return len(self._spectral_targets) + len(self._angular_targets)
 
     def build_weaver(self, cache_size: int = 128, tolerance_floor: float = 1e-12) -> TargetWeaver:

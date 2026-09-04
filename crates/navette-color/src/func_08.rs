@@ -57,6 +57,12 @@ fn bradford_gains(src_white: &[f64; 3], dst_white: &[f64; 3]) -> [f64; 3] {
 /// point) — no panic, just wrong colours. This helper exists so there is a
 /// single, clearly‑named code path for applying row‑vector matrices.
 #[inline]
+/// Multiply a row vector by a 3×3 matrix: `out[j] = Σᵢ v[i]·m[i][j]`.
+///
+/// This is the convention used throughout the engine (row-major batches,
+/// row-vector maths); [`crate::common::mat3_mul_vec`] is the column-vector
+/// counterpart. Used to apply adaptation matrices from
+/// [`calc_transform_matrix`].
 pub fn vec_mul_mat3(v: &[f64; 3], m: &[[f64; 3]; 3]) -> [f64; 3] {
     [
         v[0] * m[0][0] + v[1] * m[1][0] + v[2] * m[2][0],
