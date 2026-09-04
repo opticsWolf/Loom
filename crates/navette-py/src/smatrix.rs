@@ -13,7 +13,7 @@ use std::f64::consts::PI;
 
 use navette::smatrix::coherent_block::*;
 use navette::smatrix::core_engine::*;
-use navette::smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_A, NREQ_P_MB, NREQ_P_MB_A, NREQ_P_MB_T, NREQ_P_PHI, NREQ_P_T};
+use navette::smatrix::needle_engine::{max_disp_order, NREQ_DFOD, NREQ_DGDD, NREQ_DGD, NREQ_DPHI, NREQ_DTOD, NREQ_P, NREQ_P_A, NREQ_P_AB, NREQ_P_MB, NREQ_P_MB_A, NREQ_P_MB_AB, NREQ_P_MB_RB, NREQ_P_MB_T, NREQ_P_MB_TB, NREQ_P_PHI, NREQ_P_RB, NREQ_P_T, NREQ_P_TB};
 use navette::smatrix::needle_operator::*;
 use navette::smatrix::optics_core::*;
 use navette::smatrix::optimizer::*;
@@ -433,6 +433,8 @@ pub fn core_engine(
     incoherent_flags=None, targets_r=None, weights_r=None,
     targets_t=None, weights_t=None, targets_a=None, weights_a=None,
     targets_phi=None, weights_phi=None,
+    targets_tb=None, weights_tb=None, targets_rb=None, weights_rb=None,
+    targets_ab=None, weights_ab=None,
     start_idx=0, end_idx=None, channel=0,
     calc_s=true, calc_p=true, host_mask=None
 ))]
@@ -458,6 +460,12 @@ pub fn needle_engine<'py>(
     weights_a: Option<PyReadonlyArray1<f64>>,
     targets_phi: Option<PyReadonlyArray1<f64>>,
     weights_phi: Option<PyReadonlyArray1<f64>>,
+    targets_tb: Option<PyReadonlyArray1<f64>>,
+    weights_tb: Option<PyReadonlyArray1<f64>>,
+    targets_rb: Option<PyReadonlyArray1<f64>>,
+    weights_rb: Option<PyReadonlyArray1<f64>>,
+    targets_ab: Option<PyReadonlyArray1<f64>>,
+    weights_ab: Option<PyReadonlyArray1<f64>>,
     start_idx: usize,
     end_idx: Option<usize>,
     channel: usize,
@@ -507,6 +515,12 @@ pub fn needle_engine<'py>(
     let want_pmb = requested & NREQ_P_MB != 0;
     let want_pmb_t = requested & NREQ_P_MB_T != 0;
     let want_pmb_a = requested & NREQ_P_MB_A != 0;
+    let want_ptb = requested & NREQ_P_TB != 0;
+    let want_prb = requested & NREQ_P_RB != 0;
+    let want_pab = requested & NREQ_P_AB != 0;
+    let want_pmb_tb = requested & NREQ_P_MB_TB != 0;
+    let want_pmb_rb = requested & NREQ_P_MB_RB != 0;
+    let want_pmb_ab = requested & NREQ_P_MB_AB != 0;
     let want_pt = requested & NREQ_P_T != 0;
     let want_pa = requested & NREQ_P_A != 0;
     let want_pphi = requested & NREQ_P_PHI != 0;
@@ -573,9 +587,22 @@ pub fn needle_engine<'py>(
     let weight_a_of = |k: usize| wgt_a.as_ref().map(|t| t[k]).unwrap_or(1.0);
     let target_phi_of = |k: usize| tgt_phi.as_ref().map(|t| t[k]).unwrap_or(0.0);
     let weight_phi_of = |k: usize| wgt_phi.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let tgt_tb = load_pair(&targets_tb, "targets_tb")?;
+    let wgt_tb = load_pair(&weights_tb, "weights_tb")?;
+    let tgt_rb = load_pair(&targets_rb, "targets_rb")?;
+    let wgt_rb = load_pair(&weights_rb, "weights_rb")?;
+    let tgt_ab = load_pair(&targets_ab, "targets_ab")?;
+    let wgt_ab = load_pair(&weights_ab, "weights_ab")?;
+    let target_tb_of = |k: usize| tgt_tb.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_tb_of = |k: usize| wgt_tb.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_rb_of = |k: usize| tgt_rb.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_rb_of = |k: usize| wgt_rb.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_ab_of = |k: usize| tgt_ab.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_ab_of = |k: usize| wgt_ab.as_ref().map(|t| t[k]).unwrap_or(1.0);
 
     // Incoherent flags only needed for the multiblock path.
-    let want_any_pmb = want_pmb || want_pmb_t || want_pmb_a;
+    let want_any_pmb =
+        want_pmb || want_pmb_t || want_pmb_a || want_pmb_tb || want_pmb_rb || want_pmb_ab;
     let inc = match (&incoherent_flags, want_any_pmb) {
         (_, false) => None,
         (None, true) => {
@@ -612,7 +639,8 @@ pub fn needle_engine<'py>(
             .map_err(pyo3::exceptions::PyValueError::new_err)?),
         None => None,
     };
-    let coh_locs: Vec<(usize, f64)> = if want_p || want_pt || want_pa || want_pphi || want_disp {
+    let coh_locs: Vec<(usize, f64)> =
+        if want_p || want_pt || want_pa || want_pphi || want_ptb || want_prb || want_pab || want_disp {
         z_slice
             .iter()
             .map(|&z| locate_depth_in(thick_slice, start_idx, idx_end, z))
@@ -630,6 +658,12 @@ pub fn needle_engine<'py>(
         pphi: [Option<Vec<f64>>; 2],
         pmb_t: [Option<Vec<f64>>; 2],
         pmb_a: [Option<Vec<f64>>; 2],
+        ptb: [Option<Vec<f64>>; 2],
+        prb: [Option<Vec<f64>>; 2],
+        pab: [Option<Vec<f64>>; 2],
+        pmb_tb: [Option<Vec<f64>>; 2],
+        pmb_rb: [Option<Vec<f64>>; 2],
+        pmb_ab: [Option<Vec<f64>>; 2],
     }
     impl PointOut {
         fn empty() -> Self {
@@ -637,6 +671,8 @@ pub fn needle_engine<'py>(
                 p: [None, None], pmb: [None, None], q: [None, None],
                 pt: [None, None], pa: [None, None], pphi: [None, None],
                 pmb_t: [None, None], pmb_a: [None, None],
+                ptb: [None, None], prb: [None, None], pab: [None, None],
+                pmb_tb: [None, None], pmb_rb: [None, None], pmb_ab: [None, None],
             }
         }
     }
@@ -664,7 +700,7 @@ pub fn needle_engine<'py>(
                 let mut o = PointOut::empty();
 
                 // Coherent observables share ONE fields build per polarization.
-                if want_p || want_pt || want_pa || want_pphi || want_disp {
+                if want_p || want_pt || want_pa || want_pphi || want_ptb || want_prb || want_pab || want_disp {
                     for (pi, &on) in pol_on.iter().enumerate() {
                         if !on {
                             continue;
@@ -698,6 +734,27 @@ pub fn needle_engine<'py>(
                             o.pphi[pi] = Some(p_coherent_phi_from_fields(
                                 &fields, nsin_fi, lam, pol, np_c, channel,
                                 target_phi_of(k), weight_phi_of(k),
+                                thick_slice, start_idx, idx_end, z_slice,
+                            ));
+                        }
+                        if want_ptb {
+                            o.ptb[pi] = Some(p_coherent_tb_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_tb_of(k), weight_tb_of(k),
+                                thick_slice, start_idx, idx_end, z_slice,
+                            ));
+                        }
+                        if want_prb {
+                            o.prb[pi] = Some(p_coherent_rb_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_rb_of(k), weight_rb_of(k),
+                                thick_slice, start_idx, idx_end, z_slice,
+                            ));
+                        }
+                        if want_pab {
+                            o.pab[pi] = Some(p_coherent_ab_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_ab_of(k), weight_ab_of(k),
                                 thick_slice, start_idx, idx_end, z_slice,
                             ));
                         }
@@ -743,6 +800,27 @@ pub fn needle_engine<'py>(
                                 lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
                                 np_c, PmbQuantity::A,
                                 target_a_of(k), weight_a_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_tb {
+                            o.pmb_tb[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
+                                np_c, PmbQuantity::TB,
+                                target_tb_of(k), weight_tb_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_rb {
+                            o.pmb_rb[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
+                                np_c, PmbQuantity::RB,
+                                target_rb_of(k), weight_rb_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_ab {
+                            o.pmb_ab[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
+                                np_c, PmbQuantity::AB,
+                                target_ab_of(k), weight_ab_of(k), locs, pi as i32,
                             ));
                         }
                     }
@@ -854,6 +932,48 @@ pub fn needle_engine<'py>(
         for pi in 0..2 {
             if pol_on[pi] {
                 emit!(format!("Pmb_A_{}", pol_suffix(pi)), pmb_a, pi);
+            }
+        }
+    }
+    if want_ptb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_TB_{}", pol_suffix(pi)), ptb, pi);
+            }
+        }
+    }
+    if want_prb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_RB_{}", pol_suffix(pi)), prb, pi);
+            }
+        }
+    }
+    if want_pab {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_AB_{}", pol_suffix(pi)), pab, pi);
+            }
+        }
+    }
+    if want_pmb_tb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_TB_{}", pol_suffix(pi)), pmb_tb, pi);
+            }
+        }
+    }
+    if want_pmb_rb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_RB_{}", pol_suffix(pi)), pmb_rb, pi);
+            }
+        }
+    }
+    if want_pmb_ab {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_AB_{}", pol_suffix(pi)), pmb_ab, pi);
             }
         }
     }
@@ -1331,6 +1451,12 @@ pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NREQ_P_PHI", NREQ_P_PHI)?;
     m.add("NREQ_P_MB_T", NREQ_P_MB_T)?;
     m.add("NREQ_P_MB_A", NREQ_P_MB_A)?;
+    m.add("NREQ_P_TB", NREQ_P_TB)?;
+    m.add("NREQ_P_RB", NREQ_P_RB)?;
+    m.add("NREQ_P_AB", NREQ_P_AB)?;
+    m.add("NREQ_P_MB_TB", NREQ_P_MB_TB)?;
+    m.add("NREQ_P_MB_RB", NREQ_P_MB_RB)?;
+    m.add("NREQ_P_MB_AB", NREQ_P_MB_AB)?;
     m.add("NREQ_DPHI", NREQ_DPHI)?;
     m.add("NREQ_DGD", NREQ_DGD)?;
     m.add("NREQ_DGDD", NREQ_DGDD)?;

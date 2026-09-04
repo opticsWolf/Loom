@@ -533,7 +533,6 @@ pub fn p_coherent_t_from_fields(
 /// A = 1 − R − T with R = |r|² and flux-corrected T = |t_fwd|²·f.
 /// Flux factors depend only on the boundary half-spaces, hence are
 /// δ-constants: ∂A/∂δ = −2·Re{conj(r)·∂r/∂δ} − 2·f·Re{conj(t)·∂t/∂δ}.
-/// Back-incidence transmission is excluded (front-incidence experiment).
 pub fn p_coherent_a_from_fields(
     fields: &StackFields,
     nsin_fi: Complex64,
@@ -560,6 +559,103 @@ pub fn p_coherent_a_from_fields(
         // Half-gradient parts (dA/2): mirror the R convention in
         // `p_coherent_from_fields` so `resid` keeps its 2·w·(A−A_t) form.
         let slope_part = -((rc * s[0]).re + f * (tc * s[2]).re);
+        out[zi] = resid * slope_part;
+    }
+    out
+}
+
+/// Transmission-merit needle gradient for back incidence.
+///
+/// Tb = |t_back|² · fb with the backward flux factor `fb = Re(y_first) /
+/// Re(y_last)` ([`block_flux_factors`], channel 1). Merit `w·(Tb − Tb_t)²`
+/// gives P_TB(z) = 2·w·(Tb − Tb_t)·fb·Re{conj(tb)·∂tb/∂δ} with the
+/// channel-1 slope of [`needle_slopes4_ddz`].
+pub fn p_coherent_tb_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    target: f64,
+    weight: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    let t_k = fields.s_left[end_idx].1;
+    let f = block_flux_factors(fields, pol)[1];
+    let t_int = t_k.norm_sqr() * f;
+    let resid = 2.0 * weight * (t_int - target);
+    let tc = t_k.conj();
+    let mut out = vec![0.0; z_grid.len()];
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let dt = needle_slopes4_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam)[1];
+        out[zi] = resid * f * (tc * dt).re;
+    }
+    out
+}
+
+/// Reflection-merit needle gradient for back incidence.
+///
+/// Rb = |r_back|² (no flux factor for reflection). Merit `w·(Rb − Rb_t)²`
+/// gives P_RB(z) = 2·w·(Rb − Rb_t)·Re{conj(rb)·∂rb/∂δ} with the channel-3
+/// slope of [`needle_slopes4_ddz`].
+pub fn p_coherent_rb_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    target: f64,
+    weight: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    let r_k = fields.s_left[end_idx].3;
+    let resid = 2.0 * weight * (r_k.norm_sqr() - target);
+    let rc = r_k.conj();
+    let mut out = vec![0.0; z_grid.len()];
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let dr = needle_slopes4_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam)[3];
+        out[zi] = resid * (rc * dr).re;
+    }
+    out
+}
+
+/// Absorption-merit needle gradient for back incidence.
+///
+/// Ab = 1 − Rb − Tb with Rb = |r_back|² and flux-corrected
+/// Tb = |t_back|²·fb. Mirrors [`p_coherent_A_from_fields`] with the
+/// channel-3/1 slopes.
+pub fn p_coherent_ab_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    target: f64,
+    weight: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    let m = fields.s_left[end_idx];
+    let (r_k, t_k) = (m.3, m.1);
+    let f = block_flux_factors(fields, pol)[1];
+    let a = 1.0 - r_k.norm_sqr() - t_k.norm_sqr() * f;
+    let resid = 2.0 * weight * (a - target);
+    let (rc, tc) = (r_k.conj(), t_k.conj());
+    let mut out = vec![0.0; z_grid.len()];
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let s = needle_slopes4_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam);
+        let slope_part = -((rc * s[3]).re + f * (tc * s[1]).re);
         out[zi] = resid * slope_part;
     }
     out
@@ -653,6 +749,12 @@ pub enum PmbQuantity {
     T,
     /// Total front-incidence absorptance `1 − v[0] − v[2]`.
     A,
+    /// Total backward transmittance `v[1]` (back-incidence experiment).
+    TB,
+    /// Total back reflectance `v[3]` (back-incidence experiment).
+    RB,
+    /// Total back-incidence absorptance `1 − v[3] − v[1]`.
+    AB,
 }
 
 pub fn p_multiblock_point(
@@ -689,12 +791,14 @@ pub fn p_multiblock_point(
             track = cascade_step(&track, [0.0, tau, tau, 0.0], None);
         }
     }
-    // Cascade total and adjoint output row for the demanded quantity:
-    // R → v[0], T → v[2], A → 1 − v[0] − v[2] (front incidence throughout).
+    // Cascade total and adjoint output row for the demanded quantity.
     let tot = match quantity {
         PmbQuantity::R => track.v[0],
         PmbQuantity::T => track.v[2],
         PmbQuantity::A => 1.0 - track.v[0] - track.v[2],
+        PmbQuantity::TB => track.v[1],
+        PmbQuantity::RB => track.v[3],
+        PmbQuantity::AB => 1.0 - track.v[3] - track.v[1],
     };
     let resid = 2.0 * weight * (tot - target);
 
@@ -714,12 +818,15 @@ pub fn p_multiblock_point(
             fac[3] * (amp.3.conj() * slopes[3]).re,
         ];
         // Adjoint weights: g[p][e] = ∂v[e]/∂param_p; absorption is the
-        // negated sum of the R and T rows.
+        // negated sum of the corresponding R and T rows.
         let wv = &track.g[bi * 4..bi * 4 + 4];
         let wrow = |c: usize| match quantity {
             PmbQuantity::R => wv[c][0],
             PmbQuantity::T => wv[c][2],
             PmbQuantity::A => -(wv[c][0] + wv[c][2]),
+            PmbQuantity::TB => wv[c][1],
+            PmbQuantity::RB => wv[c][3],
+            PmbQuantity::AB => -(wv[c][3] + wv[c][1]),
         };
         let dot = wrow(0) * g_int[0]
             + wrow(1) * g_int[1]
@@ -1384,6 +1491,47 @@ mod tests {
     }
 
     #[test]
+    fn p_back_channels_match_merit_finite_difference() {
+        // t_back (channel 1, flux fb), r_back (channel 3), and back
+        // absorption Ab = 1 − Rb − fb·Tb on the absorbing stack.
+        for pol in [0, 1] {
+            let (n, d, rv, rt) = stack_absorbing();
+            let (j, xi) = (2usize, 25.0f64);
+            let n_prime = n_(1.9, 0.0);
+            let sin_t = 0.3;
+            let end = n.len() - 1;
+            let nsin = n[0] * cplx(sin_t, 0.0);
+            let fields = build_stack_fields_range(0, end, &n, &d, &rv, &rt, LAM, nsin, pol);
+            let z = d[1] + xi;
+            let delta = 5e-4_f64;
+            let (m0, _) = solve_all(&n, &d, &rv, &rt, LAM, sin_t, pol);
+            let (nn, dd, rr, tt) = insert_needle(&n, &d, &rv, &rt, j, xi, n_prime, delta);
+            let (m1, _) = solve_all(&nn, &dd, &rr, &tt, LAM, sin_t, pol);
+            // Flux factor is boundary-invariant; recompute proves it.
+            let f0 = block_flux_factors(
+                &build_stack_fields(&n, &d, &rv, &rt, LAM, nsin, pol), pol)[1];
+            let f1 = block_flux_factors(
+                &build_stack_fields(&nn, &dd, &rr, &tt, LAM, nsin, pol), pol)[1];
+            assert!((f0 - f1).abs() < 1e-12, "backward flux must be needle-invariant");
+            let cases: [(fn(&StackFields, Complex64, f64, i32, Complex64, f64, f64, &[f64], usize, usize, &[f64]) -> Vec<f64>, f64, f64, &str); 3] = [
+                (p_coherent_tb_from_fields, m0.1.norm_sqr() * f0, m1.1.norm_sqr() * f1, "TB"),
+                (p_coherent_rb_from_fields, m0.3.norm_sqr(), m1.3.norm_sqr(), "RB"),
+                (p_coherent_ab_from_fields,
+                    1.0 - m0.3.norm_sqr() - m0.1.norm_sqr() * f0,
+                    1.0 - m1.3.norm_sqr() - m1.1.norm_sqr() * f1, "AB"),
+            ];
+            for (fun, x0, x1, name) in cases {
+                // target 0, weight 1 → P = 2·X0·(dX-part); half convention.
+                let p = fun(&fields, nsin, LAM, pol, n_prime, 0.0, 1.0, &d, 0, end, &[z]);
+                let fd = (x1 * x1 - x0 * x0) / delta / 2.0;
+                let scale = fd.abs().max(p[0].abs()).max(1e-12);
+                let err = (fd - p[0]).abs() / scale;
+                assert!(err < 2e-3, "{name} pol={pol}: fd={fd:.6e} analytic={:.6e} err={err:.2e}", p[0]);
+            }
+        }
+    }
+
+    #[test]
     fn p_phase_matches_merit_finite_difference() {
         // Offset target (φ0 − 0.05) so the residual is nonzero; exercises the
         // t_fwd channel, covering the per-channel slope fix as well.
@@ -1801,6 +1949,63 @@ mod tests {
                 let scale = fd.abs().max(p.abs()).max(1e-12);
                 let err = (fd - p).abs() / scale;
                 assert!(err < 2e-3, "PmbA pol={pol} z={z}: fd={fd:.6e} p={p:.6e} err={err:.2e}");
+            }
+        }
+    }
+
+    #[test]
+    fn pmb_back_channels_match_cascade_finite_difference() {
+        // Back-incidence totals through the two-block cascade: TB = v[1],
+        // RB = v[3], AB = 1 − v[3] − v[1]; absorbing block-1 film.
+        let layers = [
+            (n_(1.0, 0.0), 0.0),
+            (n_(2.35, 0.0), 40.0),
+            (n_(1.45, 0.0), 60.0),
+            (n_(1.8, 0.4), 50.0),
+            (n_(1.45, 0.0), 30.0),
+            (n_(1.52, 0.0), 0.0),
+        ];
+        let n: Vec<Complex64> = layers.iter().map(|&(m, _)| m).collect();
+        let d: Vec<f64> = layers.iter().map(|&(_, t)| t).collect();
+        let rv = vec![0.0; 6];
+        let rt = vec![0; 6];
+        let flags = [0, 0, 1, 0, 0, 0];
+        let lam = 550.0f64;
+        let cache = cache_of(&n);
+        let np = [n_(2.6, 0.0)];
+        let target = [0.0f64];
+        let weights = [1.0f64];
+        let qty = |ig: [f64; 4], q: PmbQuantity| match q {
+            PmbQuantity::TB => ig[1],
+            PmbQuantity::RB => ig[3],
+            PmbQuantity::AB => 1.0 - ig[3] - ig[1],
+            _ => unreachable!(),
+        };
+        for &pol in &[0i32, 1] {
+            let ig0 = solve_int_mode_a(&n, &d, &rv, &rt, &flags, lam, 0.0, pol);
+            assert!(qty(ig0, PmbQuantity::AB) > 1e-3, "test stack should absorb");
+            for &q in &[PmbQuantity::TB, PmbQuantity::RB, PmbQuantity::AB] {
+                for &(z, j, xi) in &[(15.0f64, 1usize, 15.0f64), (120.0, 3, 20.0)] {
+                    let p = p_function_multiblock(
+                        &[lam], &[0.0], &cache, &d, &flags, &rt, &rv,
+                        &np, q, &target, &weights, &[z], None, pol,
+                    )
+                    .unwrap()[0];
+                    let delta = 5e-4_f64;
+                    let x0 = qty(ig0, q);
+                    let (nn, dd, rr, tt) = insert_needle(&n, &d, &rv, &rt, j, xi, np[0], delta);
+                    let mut fl2 = flags.to_vec();
+                    let tail = flags[j + 1..].to_vec();
+                    fl2.truncate(j + 1);
+                    fl2.push(0);
+                    fl2.push(0);
+                    fl2.extend_from_slice(&tail);
+                    let x1 = qty(solve_int_mode_a(&nn, &dd, &rr, &tt, &fl2, lam, 0.0, pol), q);
+                    let fd = (x1 * x1 - x0 * x0) / delta / 2.0;
+                    let scale = fd.abs().max(p.abs()).max(1e-12);
+                    let err = (fd - p).abs() / scale;
+                    assert!(err < 2e-3, "Pmb{q:?} pol={pol} z={z}: fd={fd:.6e} p={p:.6e} err={err:.2e}");
+                }
             }
         }
     }

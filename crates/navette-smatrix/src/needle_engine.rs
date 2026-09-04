@@ -52,6 +52,18 @@ pub const NREQ_P_PHI: u64 = 1 << 9;
 pub const NREQ_P_MB_T: u64 = 1 << 10;
 /// Request multiblock absorption-merit gradient Pmb_A(z).
 pub const NREQ_P_MB_A: u64 = 1 << 11;
+/// Request coherent back-transmission-merit gradient P_TB(z) (t_back + flux).
+pub const NREQ_P_TB: u64 = 1 << 12;
+/// Request coherent back-reflection-merit gradient P_RB(z).
+pub const NREQ_P_RB: u64 = 1 << 13;
+/// Request coherent back-absorption-merit gradient P_AB(z).
+pub const NREQ_P_AB: u64 = 1 << 14;
+/// Request multiblock back-transmission-merit gradient Pmb_TB(z).
+pub const NREQ_P_MB_TB: u64 = 1 << 15;
+/// Request multiblock back-reflection-merit gradient Pmb_RB(z).
+pub const NREQ_P_MB_RB: u64 = 1 << 16;
+/// Request multiblock back-absorption-merit gradient Pmb_AB(z).
+pub const NREQ_P_MB_AB: u64 = 1 << 17;
 
 /// Highest dispersion derivative order implied by the request mask.
 pub fn max_disp_order(requested: u64) -> Option<usize> {
