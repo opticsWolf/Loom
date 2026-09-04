@@ -13,7 +13,7 @@ TEST_COUNT = 20
 numba_imported = False
 try:
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "loom"))
-    from func_2 import redheffer_product_real as numba_func
+    from loom_matrix import redheffer_product_real as numba_func
     numba_imported = True
 except ImportError:
     print("Note: Original numba version not found. Running rust-only validation.")

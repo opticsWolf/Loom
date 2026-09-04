@@ -12,22 +12,10 @@ UNIT_NAME = "redheffer_product_complex_field"
 numba_imported = False
 try:
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "loom"))
-    from kernel import redheffer_product_complex_field as numba_func
+    from loom_matrix import redheffer_product_complex_field as numba_func
     numba_imported = True
 except ImportError:
-    try:
-        # Try alternative module names
-        for mod_name in ["kernel", "func_1", "fields", "redheffer"]:
-            try:
-                mod = __import__(mod_name)
-                if hasattr(mod, UNIT_NAME):
-                    numba_func = getattr(mod, UNIT_NAME)
-                    numba_imported = True
-                    break
-            except ImportError:
-                continue
-    except Exception:
-        pass
+    pass
     if not numba_imported:
         print("Note: Original numba version not found. Running rust-only validation.")
 
