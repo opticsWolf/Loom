@@ -9,6 +9,7 @@ Usage:
     python 1dinterpol_test_bench.py [--test] [--bench] [--scale]
 """
 
+import os
 import sys
 import time
 import argparse
@@ -28,6 +29,9 @@ except ImportError:
     print("⚠️  SciPy not found. SciPy references (PCHIP, Makima) will be skipped.")
 
 # 2. Python Backend (Loom)
+import os as _os
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "refs"))
 try:
     import loom_unispline as unispline_py
     HAS_PY = True
@@ -37,11 +41,11 @@ except ImportError:
 
 # 3. Rust Backend (Navette)
 try:
-    import navette_interpolat as unispline_rs
+    import navette._interpolate as unispline_rs
     HAS_RS = True
 except ImportError:
     HAS_RS = False
-    print("⚠️  navette_interpolator not found. Skipping Rust backend.")
+    print("⚠️  navette._interpolate not found (run `maturin develop`). Skipping Rust backend.")
 
 
 # =============================================================================
@@ -149,7 +153,7 @@ def run_functional_tests():
     print("="*80)
 
     if not HAS_RS:
-        print("⚠️ Skipping Rust-specific extended tests (navette_interpolator missing).")
+        print("⚠️ Skipping Rust-specific extended tests (navette._interpolate missing).")
         return
 
     # 1. Unsorted Queries
@@ -210,7 +214,7 @@ def run_functional_tests():
         x = np.linspace(0, 10, 20)
         y = np.sin(x)
         spline = unispline_rs.UniInterpolator(x, y, method="pchip")
-        unispline_rs.UniInterpolator.__module__ = "navette_interpolator"
+        unispline_rs.UniInterpolator.__module__ = "navette._interpolate"
         
         data = pickle.dumps(spline)
         spline2 = pickle.loads(data)

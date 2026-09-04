@@ -34,6 +34,9 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 # Engine discovery
 # --------------------------------------------------------------------------- #
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "refs"))
 import loom_spectraldata as loom_py  # pure-Python reference (required)
 
 try:

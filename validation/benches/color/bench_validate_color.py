@@ -9,11 +9,13 @@ It measures mathematical parity between Navette and Colour-Science, while benchm
 the computational throughput speedup of Navette over Loom.
 """
 
+import os
 import sys
 import time
 import warnings
 import numpy as np
 import colour
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "refs"))
 import loom_colorengine as ce
 from navette import color as nc
 

@@ -9,7 +9,7 @@ use navette_materials::{
     cauchy, cody_lorentz, drude, ema, forouhi_bloomer, lorentz, sellmeier, tauc_lorentz, ubf,
 };
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/materials/golden/");
+const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../validation/parity/materials/goldens/");
 
 fn load(case: &str, part: &str) -> Array1<f64> {
     let path = format!("{GOLDEN}{case}__{part}.npy");

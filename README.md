@@ -72,8 +72,8 @@ Navette/
 │   ├── navette-materials/    # pure-Rust dispersion core
 │   ├── navette/              # umbrella rlib (published as `navette` on crates.io)
 │   └── navette-py/           # PyO3 aggregator -> navette._navette (one wheel)
-├── tests/                    # pytest (test_navette_imports.py runs without a build)
-├── benchmarks/  examples/  tools/  docs/plans/  attic/
+├── validation/               # tests, parity, benches, goldens + references (see validation/README.md)
+├── examples/  tools/  docs/plans/  attic/
 ```
 
 ### Install & build
@@ -84,5 +84,5 @@ maturin develop
 # checks
 cargo check --workspace
 cargo test --workspace
-pytest tests/test_navette_imports.py
+pytest validation
 ```

@@ -5,13 +5,14 @@ Golden-reference generator for the navette.materials Rust port.
 
 With fastmath disabled on the Python side, plain float64 NumPy evaluations of
 the documented kernel formulas ARE the reference. This script writes, per case,
-three .npy files into ../golden/:
+three .npy files into the sibling goldens/ directory:
 
     <case>__wl.npy   wavelength grid [nm]        (float64)
     <case>__re.npy   Re(nk)  (or Re(eps) for EMA cases)
     <case>__im.npy   Im(nk)  (or Im(eps) for EMA cases)
 
-The Rust parity test (tests/parity.rs) mirrors the same parameter values, runs
+The Rust parity test (crates/navette-materials/tests/parity.rs) mirrors the same
+parameter values, runs
 the ported kernels on the wl grid, and asserts agreement. Keeping params in two
 places is deliberate for now: the .npy holds only arrays, no metadata, so the
 Rust side needs no JSON parser.
@@ -21,7 +22,7 @@ import os
 import numpy as np
 
 HC = 1239.8419843320028  # eV·nm
-OUT = os.path.join(os.path.dirname(__file__), "..", "golden")
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "goldens")
 os.makedirs(OUT, exist_ok=True)
 
 

@@ -12,11 +12,11 @@ not merely whatever the code happened to emit when they were captured.
 
 Regenerate the literal GOLDEN_MERIT table after an *intended* behaviour change:
 
-    python tests/test_golden.py --emit-golden
+    python validation/goldens/spectralweave/test_golden.py --emit-golden
 
 Run the suite:
 
-    python -m pytest tests/test_golden.py -q
+    python -m pytest validation/goldens/spectralweave/test_golden.py -q
 """
 from __future__ import annotations
 
@@ -301,5 +301,5 @@ if __name__ == "__main__":
     if "--emit-golden" in sys.argv:
         _emit_golden()
     else:
-        print("run:  python -m pytest tests/test_golden.py -q")
-        print("or :  python tests/test_golden.py --emit-golden")
+        print("run:  python -m pytest validation/goldens/spectralweave/test_golden.py -q")
+        print("or :  python validation/goldens/spectralweave/test_golden.py --emit-golden")
