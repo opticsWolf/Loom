@@ -12,7 +12,7 @@ Traditional TMM suffers from numerical divergence (exponentially growing evanesc
 
 As a Principal Performance Engineer, you need tools that scale. Navette is built for speed:
 
-- **Parallel Execution**: Utilizes Numba’s `@njit(parallel=True)` to saturate all available CPU cores.
+- **Parallel Execution**: Utilizes Rust + rayon data-parallelism across wavelengths/angles to saturate all available CPU cores.
     
 - **Vectorized Engine**: Operations are performed across the entire (wavelength × angle) coordinate space in a single pass, eliminating Python's loop overhead.
     
@@ -44,7 +44,7 @@ Navette goes beyond simple Fresnel equations to provide research-grade accuracy:
 |**Coherent Blocks**|**$2 \times 2$ Complex Field Matrices**: Maintains full phase and amplitude information, ensuring rigorous calculation of thin-film interference and ellipsometric parameters.|
 |**Incoherent Blocks**|**Stokes-Mueller / Intensity Redheffer**: Prevents unphysical interference artifacts in macroscopic substrates by utilizing intensity-based propagation.|
 |**Roughness Model**|**Névot-Croce (Exact Wavevector)**: Achieves research-grade accuracy for X-ray and UV interfaces by modeling exact wavevector correlations across boundaries.|
-|**Optimization**|**Numba-JIT / Parallelized `prange`**: Delivers near-native C performance with Pythonic flexibility, optimized for high-concurrency simulation and real-time GUI responsiveness.|
+|**Optimization**|**Rust / rayon + PyO3**: Native multi-threaded kernels (GIL released) with a thin Python API, optimized for high-concurrency simulation and real-time GUI responsiveness.|
 |**Polarization**|**Full $s$ and $p$ Support**: Comprehensive Jones and Stokes calculus integration, following standard commercial ellipsometry conventions (Azzam & Bashara).|
 |**Complexity**|**$O(N)$ Scaling**: Optimized linear time complexity relative to the number of layers, ensuring stable performance for complex multi-stack architectures.|
 
@@ -53,14 +53,15 @@ Navette goes beyond simple Fresnel equations to provide research-grade accuracy:
 ```
 Navette/
 ├── Cargo.toml                # Rust workspace (cargo check/test --workspace)
-├── pyproject.toml            # pure-Python `navette` package (src layout)
+├── pyproject.toml            # maturin project: builds the `navette` wheel (src layout)
 ├── src/navette/              # unified Python package
 │   ├── __init__.py           # version + public surface
 │   ├── color/                # wrapper over native `navette._color`
 │   ├── interpolate/          # wrapper over native `navette._interpolate`
 │   ├── smatrix/              # ScatterMatrix + needle (native `navette._smatrix`)
 │   ├── spectralweave/        # weavers + merit (native `navette._spectralweave`)
-│   ├── materials/            # dispersion models (+ optional `navette.materials._native`)
+│   ├── materials/            # dispersion models (native `navette._materials`)
+│   ├── _*.py                 # shims re-exporting the `navette._navette` submodules
 │   ├── structure/            # stacks, architect, solver arrays (pure Python)
 │   ├── config/               # YAML/JSON libraries and stack configs
 │   └── data/CIE/             # bundled reference spectra
@@ -86,3 +87,23 @@ cargo check --workspace
 cargo test --workspace
 pytest validation
 ```
+
+### Layout notes
+
+- `crates/` holds the Cargo workspace (five pure-Rust engine cores, the
+  `navette` umbrella rlib, and the `navette-py` PyO3 aggregator) — the
+  idiomatic Rust layout, publishable to crates.io.
+- `src/navette/` is the Python package in src-layout — the idiomatic
+  Python layout, which maturin detects automatically for mixed projects.
+
+### Release & publish
+
+```powershell
+maturin build --release   # -> target/wheels/navette-0.3.0-*.whl (single wheel, all engines)
+```
+
+- crates.io (`navette` + the five engine crates): publish the engine
+  crates first, then the umbrella —
+  `cargo publish -p navette-color -p navette-interpolate -p navette-materials -p navette-smatrix -p navette-spectralweave`,
+  then `cargo publish -p navette` (all pass `cargo publish --dry-run`).
+- PyPI (`navette`): `maturin upload target/wheels/navette-0.3.0-*.whl`.
