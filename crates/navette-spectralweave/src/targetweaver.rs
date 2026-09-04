@@ -124,11 +124,12 @@ impl TargetWeaver {
         Ok(new_frame)
     }
 
-    /// Pre-calculates normalizations and transforms targets upon ingestion.
-    /// `band` holds raw-unit half-widths for the `r`/`c` kinds (empty or
-    /// all-zero when unused); it is scaled by the same `norm_factor` as the
-    /// targets (per-point exact mapping in log mode, first-order otherwise).
-    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str, band: &[f64]) {
+    /// Resolve the normalization for one curve: mode + factor, shared by
+    /// every point of the curve. Spectral curves resolve per call (one
+    /// curve per call); angular targets MUST resolve once over the full
+    /// angle curve and share the result across points — per-point
+    /// resolution would weight each angle by its own magnitude.
+    pub fn resolve_norm(raw_targets: &[f64], mode_str: &str) -> (ResolvedNormMode, f64) {
         let mut t_min = f64::MAX;
         let mut t_max = f64::MIN;
         let mut t_sum = 0.0;
@@ -154,27 +155,77 @@ impl TargetWeaver {
             }
         };
 
-        let norm_factor: f64;
-        let mut normalized_targets = Vec::with_capacity(raw_targets.len());
+        let norm_factor =
+            Self::norm_factor_for(&resolved_mode, raw_targets, t_min, t_max, t_sum);
+        (resolved_mode, norm_factor)
+    }
 
+    /// Normalization factor for a resolved mode (see `resolve_norm`).
+    /// Linear falls back to half-range scaling on zero-mean/cancelling
+    /// data and to raw scale on constant data; log falls back to raw log
+    /// scale on ~= 1 data. Everywhere else this is the legacy formula.
+    fn norm_factor_for(
+        resolved_mode: &ResolvedNormMode,
+        raw_targets: &[f64],
+        t_min: f64,
+        t_max: f64,
+        t_sum: f64,
+    ) -> f64 {
+        match resolved_mode {
+            ResolvedNormMode::Phase | ResolvedNormMode::Complex => 1.0,
+            ResolvedNormMode::Log => {
+                let n = raw_targets.len() as f64;
+                let mut log_min = f64::MAX;
+                let mut log_max = f64::MIN;
+                let mut log_sum = 0.0;
+                for &v in raw_targets {
+                    let lv = v.max(1e-12).log10().abs();
+                    if lv < log_min { log_min = lv; }
+                    if lv > log_max { log_max = lv; }
+                    log_sum += lv;
+                }
+                let log_avg = log_sum / n;
+                let log_scale = if log_avg <= 1e-9 * (log_max - log_min).max(1e-300) {
+                    1.0
+                } else {
+                    log_avg
+                };
+                1.0 / log_scale.max(1e-300)
+            },
+            ResolvedNormMode::Linear => {
+                let t_avg = (t_sum / raw_targets.len() as f64).abs();
+                let spread = t_max - t_min;
+                let scale = if t_avg <= 1e-9 * spread { spread / 2.0 } else { t_avg };
+                if scale > 0.0 { 1.0 / scale } else { 1.0 }
+            },
+        }
+    }
+
+    /// Pre-calculates normalizations and transforms targets upon ingestion.
+    /// `band` holds raw-unit half-widths for the `r`/`c` kinds (empty or
+    /// all-zero when unused); it is scaled by the same `norm_factor` as the
+    /// targets (per-point exact mapping in log mode, first-order otherwise).
+    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str, band: &[f64]) {
+        let (resolved_mode, norm_factor) = Self::resolve_norm(raw_targets, mode_str);
+        self.register_metadata_resolved(uid, key, raw_targets, tolerances, kind, resolved_mode, norm_factor, band)
+    }
+
+    /// `register_metadata` with a pre-resolved `(mode, factor)` — the
+    /// angular path resolves once over the full curve and shares it.
+    pub fn register_metadata_resolved(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, resolved_mode: ResolvedNormMode, norm_factor: f64, band: &[f64]) {
+        // Normalization itself lives in `norm_factor_for` (shared); here we
+        // only apply it. Phase/Complex resolve to nf == 1 by construction.
+        let mut normalized_targets = Vec::with_capacity(raw_targets.len());
         match resolved_mode {
             ResolvedNormMode::Phase | ResolvedNormMode::Complex => {
-                norm_factor = 1.0;
                 normalized_targets.extend_from_slice(raw_targets);
             },
             ResolvedNormMode::Log => {
-                let log_sum: f64 = raw_targets.iter().map(|&v| v.max(1e-12).log10().abs()).sum();
-                let log_avg = log_sum / raw_targets.len() as f64;
-                norm_factor = 1.0 / log_avg.max(1e-12);
-
                 for &v in raw_targets {
                     normalized_targets.push(v.max(1e-12).log10() * norm_factor);
                 }
             },
             ResolvedNormMode::Linear => {
-                let t_avg = (t_sum / raw_targets.len() as f64).abs();
-                norm_factor = 1.0 / t_avg.max(1e-12);
-
                 for &v in raw_targets {
                     normalized_targets.push(v * norm_factor);
                 }

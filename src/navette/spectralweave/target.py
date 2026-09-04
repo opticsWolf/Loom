@@ -38,6 +38,8 @@ class SpectralTarget:
     soft center box (reduced ``(d/band)^2`` inside, exceedance + 1 outside).
     ``band`` is a per-point half-width in raw units (scalar broadcasts);
     omit it and ``r`` falls back to ±``tolerances``, ``c`` to ``e``.
+    Tolerances are fractions of the curve level (linear/log), absolute
+    radians (phase) — see ``docs/spectralweave-target-kinds.md``.
     Note for needle optimization: the folded needle evaluation drops the
     ``c`` +1 outside-level (constant offset — gradients exact, values read
     lower by the violated-point count); see

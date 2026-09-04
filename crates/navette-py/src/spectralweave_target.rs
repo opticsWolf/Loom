@@ -158,6 +158,10 @@ impl PyTargetWeaver {
             }
         }
 
+        // Resolve normalization ONCE over the full angular curve and share
+        // it across points (per-point resolution would weight each angle by
+        // its own magnitude, unlike spectral targets).
+        let (shared_mode, shared_nf) = TargetWeaver::resolve_norm(vals, &norm_mode);
         let a_ptr = angs.as_ptr() as usize; let a_len = angs.len();
         let v_ptr = vals.as_ptr() as usize; let v_len = vals.len();
         let t_ptr = tols.as_ptr() as usize; let t_len = tols.len();
@@ -199,7 +203,7 @@ impl PyTargetWeaver {
                     .map_err(PyValueError::new_err)?;
                 self.inner.inner.inner.map_frame_to_key(&key, &frame);
 
-                self.inner.register_metadata(frame.uid, key, &val_arr, &tol_arr, k, &norm_mode, &band_arr);
+                self.inner.register_metadata_resolved(frame.uid, key, &val_arr, &tol_arr, k, shared_mode, shared_nf, &band_arr);
             }
             Ok(())
         })

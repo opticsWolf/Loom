@@ -15,6 +15,45 @@ Target semantics live in two Rust mirrors that must stay in lockstep:
 Python surface: `src/navette/spectralweave/target.py`
 (`SpectralTarget`, `AngularTarget`, `TargetCollection`).
 
+## Normalization strategy (verified)
+
+Each target curve is self-normalized at ingestion so heterogeneous
+quantities (R ~ 1, weak T ~ 0.01, phases in radians) contribute comparably:
+values are scaled to O(1), the sim is scaled identically, and the residual
+is divided by the **raw** tolerance. Consequences:
+
+| mode | norm_factor | scaled values | tolerance means |
+|---|---|---|---|
+| `linear` | $1/\|mean\|$ | raw·nf | **fraction of the curve mean** |
+| `log` | $1/mean(\|log_{10}\|)$ | log₁₀·nf | fraction of the mean log magnitude |
+| `phase` | $1$ | raw (radians) | absolute radians |
+| `complex` | $1$ | raw (no normalization) | raw units |
+| `auto` | log iff all-positive and max/min ≥ 100×, else linear | — | — |
+
+So `tolerances=[0.05]` on an R ~ 0.5 curve is an effective absolute window
+of 0.025 (5% of the mean) — tolerances are **relative to the curve level**,
+not absolute, except in phase/complex modes. The same triple
+(normalized, nf, floored tolerances) feeds `calculate_merit`, `MeritSpec`
+and the fold, so all three agree by construction.
+
+Resolution scope and guards:
+
+- Normalization is **per curve**: one `(mode, nf)` for a whole spectral
+  curve, and — since the angular fix — one shared pair for a whole
+  angular curve (previously each angle normalized itself, weighting equal
+  absolute deviations differently per point).
+- **Zero-mean guard** (linear): mean-normalization would explode on
+  zero-mean/cancelling data (old nf hit 1e12), so when
+  $|mean| \le 10^{-9}\cdot spread$ the curve scales by the half-range
+  instead (exact O(1) for symmetric data); all-constant data keeps raw
+  scale (nf = 1). Non-degenerate curves are bit-for-bit legacy.
+- **~= 1 guard** (log): all-$|log| \approx 0$ data (values ~= 1) falls
+  back to raw log scale for the same reason.
+- Tolerance floor (`tolerance_floor`, default 1e-12) clamps near-zero
+  tolerances so the merit can never divide by zero.
+- `complex` is currently **raw-scale linear** (real f64 data, nf = 1) —
+  an opt-out of normalization, not complex-number support.
+
 ## Kinds (per point, merit space)
 
 Scaled residual `d = sim_scaled − target_scaled`, floored tolerance `tol`,
