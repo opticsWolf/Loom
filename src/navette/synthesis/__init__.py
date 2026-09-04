@@ -27,6 +27,24 @@ label        CurveIds (s / p / u)
 ``"AB"``     ABs / ABp / ABu (back-absorptance)
 ===========  ===============================
 
+Differential-phase labels (transmitted, synthesis-only quantities):
+
+===========  =====================================================
+label        meaning
+===========  =====================================================
+``"PDts"``   arg(t_s) minus the equivalent-medium reference
+``"PDtp"``   arg(t_p) minus the equivalent-medium reference
+===========  =====================================================
+
+The reference is ``passes · 2π · n_inc · D · cosθ / λ`` (``passes = 1``
+for transmitted): the propagation phase through a layer of incidence
+medium of the coating's total thickness ``D``. ``PDts``/``PDtp`` map to
+the ``Ts``/``Tp`` curves with ``phase=True`` (required — anything else
+raises) plus the reference subtraction; ingestion forces phase
+normalization (raw radians, ``nf = 1``). See
+``docs/spectralweave-target-kinds.md`` for conventions (solver
+forward-propagation sign, needle gain shift).
+
 Any other label raises ``ValueError`` — the synthesis side speaks this fixed
 vocabulary (the weaver itself accepts anything). Targets with
 ``phase=True`` become phase demands on the mapped curve's S-matrix element
@@ -53,7 +71,9 @@ __all__ = [
     "build_merit_spec",
     "sim_curves_from_arrays",
     "build_needle_targets",
+    "apply_reference_rotation",
     "SPECTRAL_MAP",
+    "DIFFERENTIAL_PASSES",
 ]
 
 # Re-export native classes under friendly names.
@@ -71,13 +91,34 @@ SPECTRAL_MAP: Dict[Tuple[str, str], str] = {
 }
 
 
+# Differential-phase labels: spectral label → (host CurveId, polarization,
+# reference passes). The label already encodes the polarization; a mismatch
+# raises. `passes = 1` is single traversal (transmitted PDts/PDtp).
+_DIFFERENTIAL: Dict[str, Tuple[str, str, float]] = {
+    "PDts": ("Ts", "s", 1.0),
+    "PDtp": ("Tp", "p", 1.0),
+}
+#: Reference passes per differential-phase label (``PDts``/``PDtp`` → 1.0).
+DIFFERENTIAL_PASSES: Dict[str, float] = {
+    label: passes for label, (_, _, passes) in _DIFFERENTIAL.items()
+}
+
+
 def _curve_id(spectral: str, polarization: str) -> str:
+    if spectral in _DIFFERENTIAL:
+        curve, pol, _ = _DIFFERENTIAL[spectral]
+        if polarization != pol:
+            raise ValueError(
+                f"Cannot convert spectral={spectral!r}, polarization={polarization!r}: "
+                f"{spectral!r} is {pol}-polarized (label encodes polarization)."
+            )
+        return curve
     try:
         return SPECTRAL_MAP[(spectral, polarization)]
     except KeyError:
         raise ValueError(
             f"Cannot convert spectral={spectral!r}, polarization={polarization!r}: "
-            f"supported labels are {sorted({s for s, _ in SPECTRAL_MAP})}, "
+            f"supported labels are {sorted({s for s, _ in SPECTRAL_MAP} | set(_DIFFERENTIAL))}, "
             f"polarizations 's'/'p'/'u'."
         ) from None
 
@@ -138,6 +179,14 @@ def build_merit_spec(collection: TargetCollection,
         curve = _curve_id(t.spectral, t.polarization)
         ki = get_key(float(e["angle"]), curve)
         nf = float(e["norm_factor"])
+        # PD labels are differential-phase: phase=True is required (a
+        # differential intensity is meaningless) and ingestion already
+        # forced the phase triple (raw radians, nf == 1).
+        diff = _DIFFERENTIAL.get(t.spectral)
+        if diff is not None and not t.phase:
+            raise ValueError(
+                f"spectral={t.spectral!r} is differential-phase: pass phase=True."
+            )
         if t.phase:
             # Phase arm scales nothing (nf == 1 invariant): unscale the
             # resolved triple back to raw radians + raw band.
@@ -156,6 +205,7 @@ def build_merit_spec(collection: TargetCollection,
             str(e["kind"]), mode, out_nf,
             band=np.ascontiguousarray(band, dtype=np.float64),
             phase=bool(t.phase),
+            differential_passes=(diff[2] if diff is not None else None),
         )
 
     for (_, e), t in zip(spectral_by_uid, spec_targets):
@@ -167,19 +217,53 @@ def build_merit_spec(collection: TargetCollection,
     return spec
 
 
+def apply_reference_rotation(cplx, wavelengths, angle_deg: float,
+                             n_inc: float = 1.0, total_d: float = 0.0,
+                             passes: float = 1.0):
+    """Rotate complex amplitudes into differential-phase space.
+
+    Multiplies by ``exp(-i·ref)`` with
+    ``ref = passes · 2π · n_inc · total_d · cosθ / λ`` (``wavelengths`` and
+    ``total_d`` share units; ``angle_deg`` is degrees in the incidence
+    medium), so ``arg()`` of the result is the differential phase
+    ``Δφ = arg(a) − ref``. Last axis is wavelength; leading axes (angles)
+    broadcast. An absolute-phase demand on the rotated rows is exactly a
+    differential-phase demand on the raw rows (the test oracle for
+    ``PDts``/``PDtp`` — native and numpy paths must agree to 1e-12).
+    """
+    a = np.asarray(cplx)
+    wl = np.asarray(wavelengths, dtype=np.float64).ravel()
+    if a.shape[-1] != wl.size:
+        raise ValueError(
+            f"last axis {a.shape[-1]} != {wl.size} wavelengths."
+        )
+    ref = (float(passes) * 2.0 * np.pi * float(n_inc) * float(total_d)
+           * np.cos(np.radians(float(angle_deg))) / wl)
+    rot = np.exp(-1j * ref).reshape((1,) * (a.ndim - 1) + (-1,))
+    return a * rot
+
+
 def sim_curves_from_arrays(angles, wavelengths,
                            curves: Dict[str, np.ndarray],
-                           complex_curves: Dict[str, np.ndarray] | None = None):
+                           complex_curves: Dict[str, np.ndarray] | None = None,
+                           total_d: float = 0.0,
+                           n_front: float = 1.0,
+                           n_back: float = 1.0):
     """Build a native ``SimCurves`` from row-major ``[n_angles, n_wavs]`` maps.
 
     ``curves`` maps CurveId codes (``"Rs"``…``"ABu"``) to float rows;
     ``complex_curves`` maps ``Rs/Rp/Ts/Tp/RBs/RBp/TBs/TBp`` to complex rows
     for phase demands. Lengths are validated (FFI safety).
+    ``total_d``/``n_front``/``n_back`` are the stack metadata for
+    differential-phase (``PDts``/``PDtp``) demands — total coating
+    thickness (same units as ``wavelengths``) and the real
+    incidence/exit indices. Defaults zero the reference.
     """
     angles = np.ascontiguousarray(np.asarray(angles, dtype=np.float64)).ravel()
     wavelengths = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64)).ravel()
     n = angles.size * wavelengths.size
-    sim = _NativeSimCurves(angles, wavelengths)
+    sim = _NativeSimCurves(angles, wavelengths, float(total_d),
+                            float(n_front), float(n_back))
     for code, arr in curves.items():
         v = np.ascontiguousarray(np.asarray(arr, dtype=np.float64)).ravel()
         if v.size != n:

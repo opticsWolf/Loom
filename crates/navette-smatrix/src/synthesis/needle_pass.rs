@@ -96,6 +96,14 @@ pub struct NeedleTargets {
     pub tb: (Vec<f64>, Vec<f64>),
     pub ab: (Vec<f64>, Vec<f64>),
     pub phi: [(Vec<f64>, Vec<f64>); 4],
+    /// Exact `dM/dD` correction per phase channel for differential demands:
+    /// inserting thickness δ anywhere grows the reference by the same δ,
+    /// so `dM/dδ` picks up `Σ −2·kz·w·(s−rt)` over folded points (kz =
+    /// `passes·reference_wavenumber`, `w`/`rt` the emitted pair). Uniform in
+    /// z — subtract from the assembled `P_PHI` gradient; `argmax` (the site)
+    /// is provably unaffected, only predicted-gain bookkeeping shifts.
+    /// Zero for absolute-phase (and all non-phase) demand sets.
+    pub phi_gain_shift: [f64; 4],
 }
 
 /// Fold a [`MeritSpec`] into flat per-quantity needle inputs.
@@ -132,6 +140,7 @@ pub fn build_needle_targets(
     let mut buckets: [(Vec<f64>, Vec<f64>); 6] =
         [zero(), zero(), zero(), zero(), zero(), zero()];
     let mut phi: [(Vec<f64>, Vec<f64>); 4] = [zero(), zero(), zero(), zero()];
+    let mut phi_gain_shift = [0.0f64; 4];
 
     for t in spec.targets() {
         let key = &spec.keys()[t.key_idx as usize];
@@ -237,13 +246,17 @@ pub fn build_needle_targets(
             let raw_target = tgt_norm / t.norm_factor;
             let nf2 = t.norm_factor * t.norm_factor;
 
-            // Operating-point residual for activation (None before the
+            // Operating-point sim value in demand space (None before the
             // first simulation). Absorption samples A = 1 − R − T from
-            // the companion rows; phase samples arg() of the complex row,
-            // wrapped exactly when the evaluator would wrap (Phase mode).
+            // the companion rows; phase samples arg() of the complex row
+            // minus the differential reference (`PDts`/`PDtp`) when set.
+            // Residuals wrap exactly when the evaluator would (Phase mode).
             let wrap_phase = t.phase
                 && t.transform == crate::synthesis::merit::SimTransform::Phase;
-            let d_opt: Option<f64> = match (current_sim, &op) {
+            let n_inc = current_sim.map(|sim| {
+                if key.curve.is_back() { sim.n_back_re } else { sim.n_front_re }
+            });
+            let s_op: Option<f64> = match (current_sim, &op) {
                 (Some(sim), Some(rows)) => {
                     let v = match rows {
                         OpRows::Intensity(r) => interp_clamped(&sim.wavelengths, r, twl_i),
@@ -252,17 +265,30 @@ pub fn build_needle_targets(
                                 - interp_clamped(&sim.wavelengths, t2, twl_i)
                         },
                         OpRows::Phase(c) => {
-                            cinterp_clamped(&sim.wavelengths, c, twl_i).arg()
+                            let mut a = cinterp_clamped(&sim.wavelengths, c, twl_i).arg();
+                            if let Some(passes) = t.differential_passes {
+                                a -= crate::optics_core::reference_phase(
+                                    twl_i,
+                                    n_inc.unwrap_or(1.0),
+                                    key.angle,
+                                    sim.total_d,
+                                    passes,
+                                );
+                            }
+                            a
                         },
                     };
-                    let mut d = v * t.norm_factor - tgt_norm;
-                    if wrap_phase {
-                        d -= std::f64::consts::TAU * (d / std::f64::consts::TAU).round();
-                    }
-                    Some(d)
+                    Some(v)
                 },
                 _ => None,
             };
+            let d_opt: Option<f64> = s_op.map(|v| {
+                let mut d = v * t.norm_factor - tgt_norm;
+                if wrap_phase {
+                    d -= std::f64::consts::TAU * (d / std::f64::consts::TAU).round();
+                }
+                d
+            });
 
             // Fold to an equivalent (raw_target, weight) quadratic, or skip.
             let folded: Option<(f64, f64)> = match t.kind {
@@ -319,6 +345,20 @@ pub fn build_needle_targets(
                 BucketKind::Phi(ch) => {
                     phi[ch].1[k] += w;
                     phi[ch].0[k] += w * rt;
+                    // Differential gain shift, exact at the op point:
+                    // dM/dD contribution −2·kz·w·(s−rt) with the emitted
+                    // pair (holds for every kind arm — verified per-arm in
+                    // the `phi_gain_shift_matches_fd` test). Skipped points
+                    // (folded None) and the no-sim arm (s unknown) add 0.
+                    if let (Some(passes), Some(s), Some(n)) =
+                        (t.differential_passes, s_op, n_inc)
+                    {
+                        let kz = passes
+                            * crate::optics_core::reference_wavenumber(
+                                twl_i, n, key.angle,
+                            );
+                        phi_gain_shift[ch] += -2.0 * kz * w * (s - rt);
+                    }
                 },
             }
         }
@@ -334,7 +374,7 @@ pub fn build_needle_targets(
         }
     }
     let [r, t, a, rb, tb, ab] = buckets;
-    Ok(NeedleTargets { r, t, a, rb, tb, ab, phi })
+    Ok(NeedleTargets { r, t, a, rb, tb, ab, phi, phi_gain_shift })
 }
 
 /// One angle row of a row-major [n_angles, n_wav] sim curve.
@@ -787,6 +827,7 @@ mod tests {
             tolerances: tols.to_vec().into(),
             band: vec![].into(),
             phase: true,
+            differential_passes: None,
         })
         .unwrap();
         spec
@@ -803,6 +844,7 @@ mod tests {
             tolerances: vec![0.1].into(),
             band: vec![].into(),
             phase: true,
+            differential_passes: None,
         }
     }
 
@@ -828,6 +870,7 @@ mod tests {
             tolerances: tols.to_vec().into(),
             band: band.to_vec().into(),
             phase: false,
+            differential_passes: None,
         })
         .unwrap();
         spec
@@ -841,9 +884,74 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         };
         sim.curves[curve.index()] = Some(vec![val].into());
         sim
+    }
+
+    #[test]
+    fn phi_gain_shift_matches_fd() {
+        // Ts complex phase flat 0.3, D = 100 nm air, θ = 0°: kz(400) = 2π/400,
+        // kz(500) = 2π/500. PD targets sit 0.01 above Δφ (tol 0.05) →
+        // r = −0.2/point. dM/dD = Σ 2·r·(−kz/tol) must equal the fold's
+        // phi_gain_shift[2] (Ts → channel 2) and a D finite difference.
+        use std::f64::consts::{PI, TAU};
+        let ref_of = |wl: f64| TAU * 100.0 / wl;
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        let tgt: Vec<f64> = [400.0, 500.0].iter().map(|&w| 0.3 - ref_of(w) + 0.01).collect();
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: vec![400.0, 500.0].into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Phase,
+            norm_factor: 1.0,
+            normalized_targets: tgt.into(),
+            tolerances: vec![0.05, 0.05].into(),
+            band: vec![].into(),
+            phase: true,
+            differential_passes: Some(1.0),
+        })
+        .unwrap();
+        let mk_sim = |d: f64| {
+            let mut sim = SimCurves {
+                angles: vec![0.0].into(),
+                wavelengths: vec![400.0, 500.0].into(),
+                curves: [None, None, None, None, None, None, None, None, None],
+                back: [None, None, None, None, None, None],
+                cplx: [None, None, None, None, None, None],
+                cplx_back: [None, None, None, None],
+                total_d: d,
+                n_front_re: 1.0,
+                n_back_re: 1.0,
+            };
+            sim.cplx[3] = Some(vec![
+                Complex64::from_polar(0.7, 0.3),
+                Complex64::from_polar(0.7, 0.3),
+            ].into());
+            sim
+        };
+        let angles = [0.0];
+        let wavs = [400.0, 500.0];
+        let nt = build_needle_targets(&spec, &angles, &wavs, Some(&mk_sim(100.0))).unwrap();
+        // Hand calc: 2·(−0.2)·(−kz/0.05) per point = 8·kz summed.
+        let expect = 8.0 * (TAU / 400.0 + TAU / 500.0);
+        assert!((nt.phi_gain_shift[2] - expect).abs() < 1e-9,
+            "shift={} expect={}", nt.phi_gain_shift[2], expect);
+        assert!(nt.phi_gain_shift[0] == 0.0 && nt.phi_gain_shift[1] == 0.0
+            && nt.phi_gain_shift[3] == 0.0);
+        // Finite difference of the true merit over D.
+        let h = 1e-3;
+        let m_hi = spec.merit(&mk_sim(100.0 + h), 1e6);
+        let m_lo = spec.merit(&mk_sim(100.0 - h), 1e6);
+        let fd = (m_hi - m_lo) / (2.0 * h);
+        assert!((fd - expect).abs() < 1e-6, "fd={fd} expect={expect}");
+        assert!((nt.phi_gain_shift[2] - fd).abs() < 1e-6);
+        // Sanity: merit itself is 2·(−0.2)² = 0.08, and π-scale check
+        // ref(400) = π/2 exactly.
+        assert!((spec.merit(&mk_sim(100.0), 1e6) - 0.08).abs() < 1e-12);
+        assert!((ref_of(400.0) - PI / 2.0).abs() < 1e-15);
     }
 
     #[test]
@@ -888,6 +996,7 @@ mod tests {
             tolerances: vec![tol].into(),
             band: vec![].into(),
             phase: false,
+            differential_passes: None,
         };
         let (nfa, nfb) = (2.0_f64, 3.0_f64);
         spec.add_target(mk(0.4 * nfa, 0.1, nfa)).unwrap();
@@ -921,6 +1030,7 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         };
         sim.curves[CurveId::Ru.index()] = Some(vec![0.7f64].into()); // above → satisfied
 
@@ -1059,6 +1169,7 @@ mod tests {
             tolerances: vec![0.01].into(),
             band: vec![].into(),
             phase: false,
+            differential_passes: None,
         })
         .unwrap();
         assert!(build_needle_targets(&spec_log, &[0.0], &[400.0], None).is_err());

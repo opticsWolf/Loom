@@ -53,11 +53,17 @@ pub struct PySimCurves {
 #[pymethods]
 impl PySimCurves {
     #[new]
-    #[pyo3(signature = (angles, wavelengths))]
+    #[pyo3(signature = (angles, wavelengths, total_d=0.0, n_front=1.0, n_back=1.0))]
     /// Empty rows on the given axes; fill with `set_curve`/`set_complex`.
+    /// `total_d`/`n_front`/`n_back` are the stack metadata for
+    /// differential-phase (`PDts`/`PDtp`) demands (defaults zero the
+    /// reference, i.e. differential ≡ absolute).
     fn new(
         angles: PyReadonlyArray1<'_, f64>,
         wavelengths: PyReadonlyArray1<'_, f64>,
+        total_d: f64,
+        n_front: f64,
+        n_back: f64,
     ) -> PyResult<Self> {
         let a = angles.as_slice()?;
         let w = wavelengths.as_slice()?;
@@ -65,6 +71,9 @@ impl PySimCurves {
             inner: SimCurves {
                 angles: Arc::from(a),
                 wavelengths: Arc::from(w),
+                total_d,
+                n_front_re: n_front,
+                n_back_re: n_back,
                 curves: Default::default(),
                 back: Default::default(),
                 cplx: Default::default(),
@@ -154,8 +163,11 @@ impl PyMeritSpec {
     }
 
     #[pyo3(signature = (key_idx, wavelengths, normalized, tolerances, kind, transform,
-                        norm_factor, band=None, phase=false))]
+                        norm_factor, band=None, phase=false, differential_passes=None))]
     /// Append one target frame. Arrays are per-point values on `wavelengths`.
+    /// `differential_passes` (None = absolute phase; 1.0 = `PDts`/`PDtp`
+    /// transmitted) subtracts the equivalent-medium reference (see
+    /// `SimCurves` metadata); requires `phase=true`.
     #[allow(clippy::too_many_arguments)]
     fn add_target(
         &mut self,
@@ -168,6 +180,7 @@ impl PyMeritSpec {
         norm_factor: f64,
         band: Option<PyReadonlyArray1<'_, f64>>,
         phase: bool,
+        differential_passes: Option<f64>,
     ) -> PyResult<()> {
         let wl = wavelengths.as_slice()?;
         let nt = normalized.as_slice()?;
@@ -187,6 +200,7 @@ impl PyMeritSpec {
                 tolerances: Arc::from(tol),
                 band: Arc::from(b.as_slice()),
                 phase,
+                differential_passes,
             })
             .map_err(PyValueError::new_err)
     }
@@ -252,7 +266,14 @@ pub fn build_needle_targets(
     pair(py, "tb", nt.tb)?;
     pair(py, "ab", nt.ab)?;
     for (i, p) in nt.phi.into_iter().enumerate() {
-        pair(py, &format!("phi{i}"), p)?;
+        // Exact dM/dD correction for differential demands (0.0 otherwise):
+        // subtract from the assembled P_PHI gradient (see `needle_gradient`
+        // `gain_shift_phi`). Uniform in z — the needle site never moves.
+        let inner = PyDict::new(py);
+        inner.set_item("targets", PyArray::from_vec(py, p.0))?;
+        inner.set_item("weights", PyArray::from_vec(py, p.1))?;
+        inner.set_item("gain_shift", nt.phi_gain_shift[i])?;
+        d.set_item(format!("phi{i}"), inner)?;
     }
     Ok(d.unbind())
 }

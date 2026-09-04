@@ -291,10 +291,18 @@ impl SimTransform {
 /// Each curve is row-major [n_angles, n_wavs]; `angles` / `wavelengths`
 /// describe the axes. Arc slices make this cheap to share across rayon
 /// workers during Jacobian assembly.
-#[derive(Clone, Debug, Default)]
+///
+/// `total_d` / `n_front_re` / `n_back_re` describe the stack for
+/// differential-phase (`PDts`/`PDtp`) demands: total coating thickness
+/// (same units as `wavelengths`) and the real incidence/exit indices.
+/// Defaults (0/1/1) zero the reference, i.e. differential ≡ absolute.
+#[derive(Clone, Debug)]
 pub struct SimCurves {
     pub angles: Arc<[f64]>,
     pub wavelengths: Arc<[f64]>,
+    pub total_d: f64,
+    pub n_front_re: f64,
+    pub n_back_re: f64,
     /// Order: [Rs, Rp, Ru, Ts, Tp, Tu, As, Ap, Au]. Absorption slots stay
     /// `None`: absorptance is derived from the companion R/T curves.
     pub curves: [Option<Arc<[f64]>>; 9],
@@ -307,6 +315,22 @@ pub struct SimCurves {
     /// Complex back amplitudes for back-phase demands: [RBs, RBp, TBs, TBp]
     /// (no unpolarized complex rows — back-phase needs s/p keys).
     pub cplx_back: [Option<Arc<[Complex64]>>; 4],
+}
+
+impl Default for SimCurves {
+    fn default() -> Self {
+        Self {
+            angles: Arc::from(Vec::new()),
+            wavelengths: Arc::from(Vec::new()),
+            total_d: 0.0,
+            n_front_re: 1.0,
+            n_back_re: 1.0,
+            curves: Default::default(),
+            back: Default::default(),
+            cplx: Default::default(),
+            cplx_back: Default::default(),
+        }
+    }
 }
 
 impl SimCurves {
@@ -400,6 +424,12 @@ pub struct MeritTarget {
     /// element (see `CurveId::phase_channel`) instead of intensities.
     /// Absorption keys with `phase` are rejected at registration.
     pub phase: bool,
+    /// Differential phase (`PDts`/`PDtp`): subtract `passes × reference_phase`
+    /// (equivalent incidence-medium layer of `SimCurves::total_d`) from the
+    /// sampled `arg()` before wrapping. `None` = absolute phase. Requires
+    /// `phase` (rejected otherwise); `passes` is 1 for transmitted, 2 for a
+    /// reflection round trip; must be finite and non-negative.
+    pub differential_passes: Option<f64>,
 }
 
 /// Flat, immutable, Send+Sync target description.
@@ -464,6 +494,16 @@ impl MeritSpec {
                 "phase transform needs norm_factor == 1 (got {}); pass raw values",
                 target.norm_factor
             ));
+        }
+        // Differential phase is phase-only (subtracting a propagation
+        // reference from an intensity is meaningless) with a sane pass count.
+        if let Some(passes) = target.differential_passes {
+            if !target.phase {
+                return Err("differential_passes without phase: PD demands are phase-only".into());
+            }
+            if !(passes >= 0.0) || !passes.is_finite() {
+                return Err(format!("differential passes must be finite and >= 0 (got {passes})"));
+            }
         }
         self.targets.push(target);
         Ok(())
@@ -643,13 +683,31 @@ impl MeritSpec {
                     row[n_wav - 1]
                 }
             };
+            // Differential-phase reference for this key (front/back medium
+            // + total thickness from the sim metadata; None = absolute).
+            // `key.angle` is degrees (converter convention); the reference
+            // helper converts internally.
+            let n_inc = if key.curve.is_back() { sim.n_back_re } else { sim.n_front_re };
+            let diff_passes = t.differential_passes;
             for i in 0..t_wl.len() {
                 let sim_raw = match &input {
                     TargetInput::Intensity(row) => sample(row, i, &mut sim_idx),
                     TargetInput::Absorption(r, tt) => {
                         1.0 - sample(r, i, &mut sim_idx) - sample(tt, i, &mut sim_idx)
                     },
-                    TargetInput::Phase(crow) => sample_c(crow, i, &mut sim_idx).arg(),
+                    TargetInput::Phase(crow) => {
+                        let mut a = sample_c(crow, i, &mut sim_idx).arg();
+                        if let Some(passes) = diff_passes {
+                            a -= crate::optics_core::reference_phase(
+                                t_wl[i],
+                                n_inc,
+                                key.angle,
+                                sim.total_d,
+                                passes,
+                            );
+                        }
+                        a
+                    },
                 };
 
                 let target_scaled = t.normalized_targets[i];
@@ -720,6 +778,7 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         }
     }
 
@@ -756,6 +815,7 @@ mod tests {
             tolerances: tols.into(),
             band: band.into(),
             phase: false,
+            differential_passes: None,
         }
     }
 
@@ -778,6 +838,7 @@ mod tests {
             tolerances: tols.into(),
             band: Vec::new().into(),
             phase: true,
+            differential_passes: None,
         }
     }
 
@@ -1002,6 +1063,7 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         };
         sim.curves[CurveId::Ru.index()] = Some(Arc::from(vec![10.0, 20.0, 30.0]));
 
@@ -1043,6 +1105,7 @@ mod tests {
             back: sim.back.clone(),
             cplx: sim.cplx.clone(),
             cplx_back: sim.cplx_back.clone(),
+            ..Default::default()
         };
         let mut spec_u = MeritSpec::new();
         let ku = spec_u.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
@@ -1142,6 +1205,7 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         };
         sim.curves[CurveId::Rs.index()] = Some(Arc::from(vec![0.6, 0., 0., 0., 0.]));
         sim.curves[CurveId::Ts.index()] = Some(Arc::from(vec![0.3, 0., 0., 0., 0.]));
@@ -1180,6 +1244,7 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         };
         sim.cplx[0] = Some(Arc::from(vec![
             Complex64::from_polar(0.5, 0.3), Complex64::new(0.0, 0.0),
@@ -1205,6 +1270,7 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         };
         sim.cplx[3] = Some(Arc::from(vec![
             Complex64::from_polar(0.7, 0.3 - 0.01 + std::f64::consts::TAU),
@@ -1228,6 +1294,103 @@ mod tests {
         assert!(spec.add_target(tgt2).is_err());
     }
 
+    /// Differential-phase entry: absolute-phase entry + `passes`.
+    fn entry_pd(
+        key_idx: u32,
+        wl: Vec<f64>,
+        targets: Vec<f64>,
+        tols: Vec<f64>,
+        kind: ConstraintKind,
+        passes: f64,
+    ) -> MeritTarget {
+        let mut t = entry_phase(key_idx, wl, targets, tols, kind, SimTransform::Phase, 1.0);
+        t.differential_passes = Some(passes);
+        t
+    }
+
+    fn sim_pd() -> SimCurves {
+        // One angle (0°), NW wavelengths from 400 nm; Ts complex row
+        // 0.7·e^{i·0.3} at 400 nm; stack D = 100 nm of air (n = 1).
+        let mut sim = SimCurves {
+            angles: vec![0.0].into(),
+            wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
+            curves: [None, None, None, None, None, None, None, None, None],
+            back: [None, None, None, None, None, None],
+            cplx: [None, None, None, None, None, None],
+            cplx_back: [None, None, None, None],
+            total_d: 100.0,
+            n_front_re: 1.0,
+            n_back_re: 1.0,
+        };
+        sim.cplx[3] = Some(Arc::from(vec![
+            Complex64::from_polar(0.7, 0.3), Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0)]));
+        sim
+    }
+
+    #[test]
+    fn differential_phase_subtracts_reference() {
+        // λ = 400, D = 100, n = 1, θ = 0: ref = 2π·100/400 = π/2 ≈ 1.5707963.
+        // Δφ = 0.3 − π/2; demanding exactly that with tol 0.05 → zero.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        let delta = 0.3 - std::f64::consts::PI / 2.0;
+        spec.add_target(entry_pd(k as u32, vec![400.0], vec![delta], vec![0.05],
+            ConstraintKind::Exact, 1.0)).unwrap();
+        let sim = sim_pd();
+        assert!(spec.merit(&sim, 1e6) < 1e-28);
+        // Same demand as absolute (passes path off): residual is −π/2 →
+        // (−π/2/0.05)² ≈ 986.96 — the reference is doing the work.
+        let mut abs_spec = MeritSpec::new();
+        let ka = abs_spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        abs_spec.add_target(entry_phase(ka as u32, vec![400.0], vec![delta], vec![0.05],
+            ConstraintKind::Exact, SimTransform::Phase, 1.0)).unwrap();
+        let m_abs = abs_spec.merit(&sim, 1e6);
+        let expect = ((0.3 - delta) / 0.05).powi(2);
+        assert!((m_abs - expect).abs() < 1e-9, "m_abs={m_abs} expect={expect}");
+    }
+
+    #[test]
+    fn differential_phase_zero_d_is_absolute() {
+        // D = 0 kills the reference: differential ≡ absolute bit-for-bit.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        spec.add_target(entry_pd(k as u32, vec![400.0], vec![0.3], vec![0.05],
+            ConstraintKind::Exact, 1.0)).unwrap();
+        let mut sim = sim_pd();
+        sim.total_d = 0.0;
+        assert!(spec.merit(&sim, 1e6) < 1e-28);
+    }
+
+    #[test]
+    fn differential_phase_passes_scale() {
+        // passes = 2 doubles the subtracted reference (round-trip).
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        let delta = 0.3 - std::f64::consts::PI; // 2 × π/2
+        spec.add_target(entry_pd(k as u32, vec![400.0], vec![delta], vec![0.05],
+            ConstraintKind::Exact, 2.0)).unwrap();
+        assert!(spec.merit(&sim_pd(), 1e6) < 1e-28);
+    }
+
+    #[test]
+    fn differential_validation() {
+        // Without phase → Err; negative/NaN passes → Err.
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        let mut t = entry(k as u32, vec![400.0], vec![0.0], vec![0.1],
+            ConstraintKind::Exact, SimTransform::Linear, 1.0);
+        t.differential_passes = Some(1.0);
+        assert!(spec.add_target(t).is_err());
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            let mut t2 = entry_pd(k as u32, vec![400.0], vec![0.0], vec![0.1],
+                ConstraintKind::Exact, bad);
+            t2.differential_passes = Some(bad);
+            assert!(spec.add_target(t2).is_err(), "passes={bad}");
+        }
+    }
+
     #[test]
     fn back_intensity_and_absorption() {
         // RBs row 0.4, TBs row 0.5: R demand 0.4 → 0; ABs demand 0.1 → 0.
@@ -1245,6 +1408,7 @@ mod tests {
             back: [None, None, None, None, None, None],
             cplx: [None, None, None, None, None, None],
             cplx_back: [None, None, None, None],
+            ..Default::default()
         };
         sim.back[0] = Some(Arc::from(vec![0.4, 0., 0., 0., 0.]));
         sim.back[3] = Some(Arc::from(vec![0.5, 0., 0., 0., 0.]));

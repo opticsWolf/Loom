@@ -24,6 +24,48 @@ pub const DBL_EPS: f64 = 2.22e-16;
 /// Speed of light in nm/fs — ω = 2π·c/λ with λ in nm gives rad/fs.
 pub const C_NM_PER_FS: f64 = 299.792458;
 
+/// Propagation phase of the differential-phase reference: the phase a plane
+/// wave accumulates crossing an equivalent layer of incidence medium —
+/// thickness `total_d`, real index `n_inc_re` — at incidence angle
+/// `theta_inc_deg` (degrees, in the incidence medium, so no Snell step):
+/// `passes · 2π · n · d · cosθ / λ`.
+///
+/// `wavelength` and `total_d` must share length units (nm in this crate).
+/// `passes` is 1 for transmitted (single traversal, `PDts`/`PDtp`) and 2
+/// for a reflection round trip. The incidence medium is assumed lossless;
+/// pass `Re(n)` — any extinction only attenuates, it never phases.
+/// Pure function (no solves); cost is one `cos` per call — hoist per angle
+/// in hot loops via [`reference_wavenumber`].
+///
+/// Sign convention: `+kD` matches this crate's forward-propagation phase
+/// (pinned by the `solver_propagation_sign_matches_reference` test — an
+/// all-matched slab of D simulated by the solver has `arg(tf) = +kD`).
+/// That is the conjugate of Macleod/`e^{+iωt}` textbooks; the crate is
+/// self-consistent (all phase demands, needle `P_PHI` and GD/GDD share it),
+/// so differential and absolute demands agree with each other exactly —
+/// only textbook-imported target numbers need conjugating.
+#[inline]
+pub fn reference_phase(
+    wavelength: f64,
+    n_inc_re: f64,
+    theta_inc_deg: f64,
+    total_d: f64,
+    passes: f64,
+) -> f64 {
+    passes * reference_wavenumber(wavelength, n_inc_re, theta_inc_deg) * total_d
+}
+
+/// Axial wavenumber part of [`reference_phase`]: `2π · n · cosθ / λ`
+/// (radians per unit thickness; the caller scales by `passes · D`).
+/// The needle gain correction for differential
+/// demands is built from this: `dM/dD = Σ −2·kz·w·Δ/tol²` over folded points
+/// (exact pre-fold data), a position-independent shift of `P(z)` that never
+/// moves the needle site `argmax` — only the predicted-gain bookkeeping.
+#[inline]
+pub fn reference_wavenumber(wavelength: f64, n_inc_re: f64, theta_inc_deg: f64) -> f64 {
+    2.0 * std::f64::consts::PI * n_inc_re * theta_inc_deg.to_radians().cos() / wavelength
+}
+
 #[inline(always)]
 /// Construct a complex value without importing the trait soup at call sites.
 pub fn cplx(re: f64, im: f64) -> Complex64 {
@@ -188,4 +230,26 @@ pub fn grad_nonuniform(y: &[f64], x: &[f64]) -> Vec<f64> {
             + (hd / (hs * (hd + hs))) * y[i + 1];
     }
     d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_phase_hand_calc() {
+        // λ = 500 nm, n = 1, θ = 0°, D = 100 nm, 1 pass:
+        // 2π·1·100·1/500 = 2π/5 = 1.2566370614...
+        let p = reference_phase(500.0, 1.0, 0.0, 100.0, 1.0);
+        assert!((p - 2.0 * std::f64::consts::PI / 5.0).abs() < 1e-12, "p={p}");
+        // Oblique: θ = 60° halves the axial projection.
+        let po = reference_phase(500.0, 1.0, 60.0, 100.0, 1.0);
+        assert!((po - p / 2.0).abs() < 1e-12, "po={po}");
+        // Two passes double; zero thickness kills the reference.
+        assert!((reference_phase(500.0, 1.0, 0.0, 100.0, 2.0) - 2.0 * p).abs() < 1e-12);
+        assert_eq!(reference_phase(500.0, 1.5, 10.0, 0.0, 1.0), 0.0);
+        // Wavenumber × D × passes reconstructs the phase.
+        let kz = reference_wavenumber(500.0, 1.5, 10.0);
+        assert!((1.0 * kz * 100.0 - reference_phase(500.0, 1.5, 10.0, 100.0, 1.0)).abs() < 1e-15);
+    }
 }

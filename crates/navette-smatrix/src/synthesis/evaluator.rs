@@ -54,12 +54,18 @@ impl SmatrixContext {
             return Err("stack needs at least ambient + substrate".into());
         }
 
-        // Per-point (r, t_back) intensities via the dual solver.
+        // Per-point intensities + forward-transmission amplitudes via the
+        // dual solver. BlockResult order is (rf, tb, tf, rb, R, Tb, T, Rb):
+        // `.2` is the complex forward t (front incidence) — `.1`/`.5` are
+        // the BACKWARD (reciprocal) quantities, equal in intensity by
+        // reciprocity but NOT in phase. PDts/PDtp need `.2`.
         struct Pt {
             rs: f64,
             rp: f64,
             ts: f64,
             tp: f64,
+            tfs: Complex64,
+            tfp: Complex64,
         }
         let pts: Vec<Pt> = (0..na * nw)
             .into_par_iter()
@@ -85,7 +91,8 @@ impl SmatrixContext {
                     lam,
                     nsin_fi,
                 );
-                Pt { rs: s_res.4, rp: p_res.4, ts: s_res.5, tp: p_res.5 }
+                Pt { rs: s_res.4, rp: p_res.4, ts: s_res.5, tp: p_res.5,
+                     tfs: s_res.2, tfp: p_res.2 }
             })
             .collect();
 
@@ -107,11 +114,29 @@ impl SmatrixContext {
         curves[CurveId::Rp.index()] = Some(mk(CurveId::Rp));
         curves[CurveId::Ts.index()] = Some(mk(CurveId::Ts));
         curves[CurveId::Tp.index()] = Some(mk(CurveId::Tp));
+        // Complex forward-t rows for (differential-)phase demands.
+        let mut cplx: [Option<Arc<[Complex64]>>; 6] = [None, None, None, None, None, None];
+        cplx[CurveId::Ts.index()] =
+            Some(pts.iter().map(|p| p.tfs).collect::<Vec<_>>().into());
+        cplx[CurveId::Tp.index()] =
+            Some(pts.iter().map(|p| p.tfp).collect::<Vec<_>>().into());
+        // Stack metadata for the PD reference: ambient/substrate thickness
+        // entries are zero, so the plain sum is the coating thickness D;
+        // ambient index at the centre wavelength (dispersive ambients are
+        // pathological — the scalar is a documented approximation).
+        let total_d: f64 = sa.thicknesses.iter().sum();
+        let n_front_re = sa.n_stack_cache[(nw / 2) * nl * 2];
+        // Substrate exit index (back-phase reference; unused front-only).
+        let n_back_re = sa.n_stack_cache[(nw / 2) * nl * 2 + (nl - 1) * 2];
 
         Ok(SimCurves {
             angles: self.sin_theta.clone().into(),
             wavelengths: self.wavls.clone().into(),
+            total_d,
+            n_front_re,
+            n_back_re,
             curves,
+            cplx,
             ..Default::default()
         })
     }
@@ -195,6 +220,7 @@ mod tests {
             tolerances: vec![0.01].into(),
             band: vec![].into(),
             phase: false,
+            differential_passes: None,
         })
         .unwrap();
         spec
@@ -280,5 +306,148 @@ mod tests {
             (d_final - d_qw).abs() < 1.0,
             "d_final={d_final}, expected {d_qw}"
         );
+    }
+
+    /// Independent 2×2 characteristic-matrix oracle (s-pol, normal
+    /// incidence): M = [[cosδ, i·sinδ/n],[i·n·sinδ, cosδ]],
+    /// t = 2·n₀/(n₀·M₁₁ + n₀·n_s·M₁₂ + M₂₁ + n_s·M₂₂).
+    fn oracle_tf(n0: f64, n1: f64, ns: f64, d: f64, lam: f64) -> Complex64 {
+        use num_complex::Complex64 as C;
+        let delta = 2.0 * std::f64::consts::PI * n1 * d / lam;
+        let (s, c) = delta.sin_cos();
+        let m11 = C::new(c, 0.0);
+        let m12 = C::new(0.0, s / n1);
+        let m21 = C::new(0.0, s * n1);
+        let m22 = C::new(c, 0.0);
+        C::new(2.0 * n0, 0.0)
+            / (C::new(n0, 0.0) * m11 + C::new(n0 * ns, 0.0) * m12 + m21 + C::new(ns, 0.0) * m22)
+    }
+
+    #[test]
+    fn solver_propagation_sign_matches_reference() {
+        // All-matched stack (n = 1 everywhere, film D = 500): tf is pure
+        // propagation — its arg IS the solver's propagation-phase sign,
+        // and `reference_phase` must reproduce it (convention lock for
+        // every differential-phase demand in the crate).
+        let nw = 3;
+        let ambient = LayerSpec::constant("air", 1.0, 0.0, 0.0, nw);
+        let substrate = LayerSpec::constant("sub", 1.0, 0.0, 0.0, nw);
+        let slab = DesignStack::with_films(
+            ambient, substrate, vec![LayerSpec::constant("F", 1.0, 0.0, 500.0, nw)],
+        ).unwrap();
+        let ctx = SmatrixContext {
+            wavls: vec![400.0],
+            sin_theta: vec![0.0],
+            spec: MeritSpec::new(),
+            clamp_min_nm: 2.0,
+            clamp_max_nm: 1000.0,
+            lm: LmConfig::default(),
+        };
+        let sim = ctx.simulate(&slab).unwrap();
+        let tf = sim.cplx[CurveId::Ts.index()].as_ref().unwrap()[0];
+        // kD = 2π·500/400 = 2.5π → +π/2 vs −π/2, unambiguous.
+        assert!((tf.arg() - std::f64::consts::PI / 2.0).abs() < 1e-9, "tf={tf}");
+        // `reference_phase` is unwrapped (2.5π here) while `arg()` wraps:
+        // compare in wrapped space, exactly as the merit kernel does.
+        let r = crate::optics_core::reference_phase(400.0, 1.0, 0.0, 500.0, 1.0);
+        let rw = r - std::f64::consts::TAU * (r / std::f64::consts::TAU).round();
+        assert!((rw - tf.arg()).abs() < 1e-9, "ref={r} arg={}", tf.arg());
+    }
+
+    #[test]
+    fn simulate_fills_pd_metadata_and_complex_t() {
+        let n_l = 1.52_f64.sqrt();
+        let d = 200.0;
+        let ctx = ar_ctx(1000.0);
+        let stack = ar_stack(d);
+        let sim = ctx.simulate(&stack).unwrap();
+        // Metadata: coating thickness + media.
+        assert!((sim.total_d - d).abs() < 1e-12, "total_d={}", sim.total_d);
+        assert!((sim.n_front_re - 1.0).abs() < 1e-12);
+        assert!((sim.n_back_re - 1.52).abs() < 1e-12);
+        // Complex-t rows present for Ts/Tp, consistent with intensities:
+        // |tf|² × flux (n_s/n_0 at normal incidence) == Ts row.
+        let ts = sim.curve(CurveId::Ts).unwrap();
+        let tfs = &sim.cplx[CurveId::Ts.index()].as_ref().unwrap();
+        assert_eq!(tfs.len(), ts.len());
+        for k in 0..ts.len() {
+            assert!((tfs[k].norm_sqr() * 1.52 - ts[k]).abs() < 1e-10, "k={k}");
+        }
+        // Independent oracle per wavelength (pins tf-vs-tb: the backward
+        // amplitude has a different phase in asymmetric stacks).
+        // `.conj()`: the solver's forward-propagation convention is the
+        // conjugate of Macleod textbooks (see `reference_phase` docs) —
+        // magnitudes/physics identical, phase sign flipped crate-wide.
+        for (k, &lam) in [900.0, 1000.0, 1100.0].iter().enumerate() {
+            let t_oracle = oracle_tf(1.0, n_l, 1.52, d, lam).conj();
+            let diff = (tfs[k] - t_oracle).norm();
+            assert!(diff < 1e-9, "k={k} lam={lam} diff={diff}");
+        }
+    }
+
+    #[test]
+    fn pd_merit_matches_hand_delta_phi() {
+        // Δφ = arg(t_oracle) − 2π·D/λ (air, normal) demanded exactly → ~0.
+        let n_l = 1.52_f64.sqrt();
+        let d = 200.0;
+        let mut ctx = ar_ctx(1000.0);
+        let stack = ar_stack(d);
+        let sim = ctx.simulate(&stack).unwrap();
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        let wl = vec![900.0, 1000.0, 1100.0];
+        let tgt: Vec<f64> = wl.iter().map(|&lam| {
+            // `.conj()`: solver convention (see oracle test above).
+            oracle_tf(1.0, n_l, 1.52, d, lam).conj().arg() - 2.0 * std::f64::consts::PI * d / lam
+        }).collect();
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: wl.into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Phase,
+            norm_factor: 1.0,
+            normalized_targets: tgt.into(),
+            tolerances: vec![0.05, 0.05, 0.05].into(),
+            band: vec![].into(),
+            phase: true,
+            differential_passes: Some(1.0),
+        })
+        .unwrap();
+        assert!(spec.merit(&sim, 1e6) < 1e-20, "m={}", spec.merit(&sim, 1e6));
+        ctx.spec = spec;
+        assert!(ctx.evaluate_merit(&stack).unwrap() < 1e-20);
+    }
+
+    #[test]
+    fn optimizer_recovers_thickness_from_pd_target() {
+        // End-to-end PD loop: demand the QW design's Δφ, start at 350 nm.
+        // Convergence is on MERIT (phase wraps admit 2π-branch solutions).
+        let n_l = 1.52_f64.sqrt();
+        let d_qw = 1000.0 / (4.0 * n_l);
+        let qw_stack = ar_stack(d_qw);
+        let probe = ar_ctx(1000.0);
+        let qw_sim = probe.simulate(&qw_stack).unwrap();
+        let qw_phase = qw_sim.cplx[CurveId::Ts.index()].as_ref().unwrap()[1].arg();
+        let ref_qw = 2.0 * std::f64::consts::PI * d_qw / 1000.0;
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Ts });
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: vec![1000.0].into(),
+            kind: ConstraintKind::Exact,
+            transform: SimTransform::Phase,
+            norm_factor: 1.0,
+            normalized_targets: vec![qw_phase - ref_qw].into(),
+            tolerances: vec![0.05].into(),
+            band: vec![].into(),
+            phase: true,
+            differential_passes: Some(1.0),
+        })
+        .unwrap();
+        let mut ctx = ar_ctx(1000.0);
+        ctx.spec = spec;
+        let mut stack = ar_stack(350.0);
+        let mf = ctx.optimize_thicknesses(&mut stack).unwrap();
+        assert!(mf < 1e-6, "mf={mf}");
     }
 }

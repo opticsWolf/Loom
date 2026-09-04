@@ -126,6 +126,49 @@ Spectral-label mapping for the converter (`TargetCollection` → `MeritSpec`):
 (R → r_front, T → t_fwd, RB → r_back, TB → t_back). Anything else raises
 `ValueError`. Angular targets expand to one single-point demand per angle.
 
+## Differential phase (`PDts`/`PDtp`)
+
+`PDts`/`PDtp` demand the coating-induced transmitted phase: the design's
+`arg(t)` minus the equivalent incidence-medium layer,
+
+$$\Delta\varphi(\lambda) = \arg t(\lambda) - passes\cdot\frac{2\pi\,n_{inc}\,D\cos\theta_{inc}}{\lambda},$$
+
+with `passes = 1` (single traversal; `passes = 2` covers a reflection
+round trip if reflection labels are ever added), `D` the total coating
+thickness and `n_inc` the real incidence index. Group delay / GDD over
+$\Delta\varphi$ come for free (finite differences kill the reference
+anyway); the differential form matters for absolute-phase targets and
+for correct needle-gain bookkeeping.
+
+Evaluation points (all in solver convention — see the sign note below):
+
+- Ingestion forces phase normalization (raw radians, `nf = 1`); the
+  converter maps `PDts` → (`Ts`, phase, passes 1), `PDtp` → (`Tp`, …).
+  `phase=False` or a polarization mismatch raises `ValueError`.
+- `SimCurves` carries `total_d`/`n_front_re`/`n_back_re` (defaults 0/1/1
+  zero the reference); the thickness-optimizer evaluator fills them from
+  the stack (ambient index at centre λ — dispersive ambients are
+  pathological, documented approximation). `total_d = 0` reproduces
+  absolute phase bit-for-bit.
+- The merit Phase arm subtracts the reference before wrapping; the fold
+  passes PD demands to the `phi` buckets unchanged (same channel as the
+  absolute element) and additionally accumulates the exact `dM/dD`
+  correction `phi_gain_shift[ch] = Σ −2·kz·w·(s−rt)` (`kz =
+  passes·reference_wavenumber`). Subtract it from the assembled `P_PHI`
+  (`needle_gradient(…, gain_shift_phi=…)`); it is uniform in z, so the
+  needle site (`argmax`) never moves — only predicted-gain bookkeeping.
+- Manual-sim recipe (zero core involvement, doubles as test oracle):
+  `apply_reference_rotation` multiplies complex rows by `e^{−i·ref}`;
+  an absolute-phase demand on rotated rows is exactly a differential
+  demand on raw rows.
+
+Sign convention: the reference is `+kD`, matching this crate's
+forward-propagation phase (an all-matched slab simulated by the solver
+has `arg(tf) = +kD` — pinned by test). That is the conjugate of
+Macleod/`e^{+iωt}` textbooks; the crate is self-consistent (absolute
+phase demands, `P_PHI`, GD/GDD share it), so only textbook-imported
+target numbers need conjugating — never solver-produced ones.
+
 ### The dropped `+1` level
 
 Outside the band, `calculate_merit` contributes

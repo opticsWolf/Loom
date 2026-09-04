@@ -160,23 +160,28 @@ class TargetCollection:
         Compiles the defined targets into a Rust-native TargetWeaver.
         """
         weaver = TargetWeaver(cache_size=cache_size, tolerance_floor=tolerance_floor)
-        
-        # Iterating in Python and passing to Rust here is fine because it 
+
+        # Iterating in Python and passing to Rust here is fine because it
         # only happens ONCE during initialization, not inside the hot loop.
+        # PDts/PDtp force phase normalization (raw radians, nf == 1): they
+        # are differential-phase quantities and any other resolution would
+        # not unscale back to radians in the synthesis converter.
         for t in self._spectral_targets:
             weaver.add_spectral_target(
                 t.wavelengths, t.values, t.tolerances,
-                t.angle, t.polarization, t.spectral, t.kind, t.normalization_mode,
+                t.angle, t.polarization, t.spectral, t.kind,
+                "phase" if t.spectral in ("PDts", "PDtp") else t.normalization_mode,
                 t.band,
             )
-            
+
         for t in self._angular_targets:
             weaver.add_angular_target(
                 t.wavelength, t.angles, t.values, t.tolerances,
-                t.polarization, t.spectral, t.kind, t.normalization_mode,
+                t.polarization, t.spectral, t.kind,
+                "phase" if t.spectral in ("PDts", "PDtp") else t.normalization_mode,
                 t.band,
             )
-            
+
         return weaver
 
 

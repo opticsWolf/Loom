@@ -127,6 +127,7 @@ def needle_gradient(
     weights_rb: Union[float, Sequence[float], np.ndarray, None] = None,
     targets_ab: Union[float, Sequence[float], np.ndarray, None] = None,
     weights_ab: Union[float, Sequence[float], np.ndarray, None] = None,
+    gain_shift_phi: float = 0.0,
     start_idx: int = 0,
     end_idx: Optional[int] = None,
     channel: int = 0,
@@ -172,6 +173,14 @@ def needle_gradient(
         Polarization branches to evaluate ('sp' = both in one sweep).
     host_mask : (n_layers,) bool array, optional
         Restricts admissible hosts for the multiblock path.
+    gain_shift_phi : float
+        Uniform correction subtracted from ``P_PHI`` outputs for
+        differential-phase (``PDts``/``PDtp``) demands: inserting thickness
+        ``δ`` anywhere grows the equivalent-medium reference by the same
+        ``δ``, contributing ``dM/dD = Σ −2·kz·w·Δ/tol²``. Take it from the
+        folded ``phi{ch}["gain_shift"]`` (``build_needle_targets``); it is
+        z-independent, so the needle site (``argmax``) never moves — only
+        predicted-gain bookkeeping shifts. Default 0 (absolute phase).
 
     Returns
     -------
@@ -268,6 +277,11 @@ def needle_gradient(
 
     # Reshape flat [n_points, n_z] buffers into (n_angles, n_wavs, n_depths).
     nz = z.size
-    return {
+    reshaped = {
         k: np.asarray(v).reshape(n_angles, n_wavs, nz) for k, v in out.items()
     }
+    if gain_shift_phi:
+        for kk in list(reshaped):
+            if kk.startswith("P_PHI"):
+                reshaped[kk] = reshaped[kk] - float(gain_shift_phi)
+    return reshaped
