@@ -5,11 +5,16 @@ A :class:`Navette_Structure` validates the stack, flattens it into
 :class:`SolverArrays` for the native engine, and serializes via
 ``get_state``/``from_state``. Behaves like a read sequence of layers
 (``len()``, indexing, iteration, ``+`` concatenation).
+
+Units: all lengths are nanometres (thicknesses, interface widths,
+roughness sigma). State files store unitless numbers under this
+convention — files authored when roughness was recorded in Angstrom
+read 10x too small; there is no auto-detection, convert old files.
 """
 from typing import Any, Dict, Iterator, List, Optional, Union
 import numpy as np
 
-from .types import SolverArrays
+from .types import RoughnessType, SolverArrays
 from .materials import DictMaterialProvider, MaterialProvider
 from .models import Group, Layer
 from .expander import _DEFAULT_GROUP, _LayerExpander
@@ -60,11 +65,39 @@ class Navette_Structure:
             if layer.thickness < 0:
                 errors.append(f"Layer {i} ({layer.material}): Negative thickness {layer.thickness} nm.")
             if layer.roughness < 0:
-                errors.append(f"Layer {i} ({layer.material}): Negative roughness {layer.roughness} A.")
+                errors.append(f"Layer {i} ({layer.material}): Negative roughness {layer.roughness} nm.")
+            try:
+                RoughnessType(int(layer.rough_type))
+            except (ValueError, TypeError):
+                errors.append(f"Layer {i} ({layer.material}): Unknown rough_type {layer.rough_type!r}.")
             if layer.interface and layer.interface_thickness >= layer.thickness:
                 errors.append(f"Layer {i} ({layer.material}): Interface thickness ({layer.interface_thickness}) >= layer thickness ({layer.thickness}).")
             if self._materials and not self._materials.contains(layer.material):
                 errors.append(f"Layer {i}: Material '{layer.material}' not found in material provider.")
+
+        seen_groups = set()
+        for layer in self.layer_list:
+            group = self.group_dict.get(layer.material)
+            if group is not None and id(group) not in seen_groups:
+                seen_groups.add(id(group))
+                errors.extend(group.validate())
+
+        if self._materials:
+            try:
+                sa = self.get_solver_inputs()
+            except Exception as exc:
+                errors.append(f"Nominal expansion failed: {exc}")
+                return errors
+            if not np.all(np.isfinite(sa.thicknesses)) or not np.all(np.isfinite(sa.indices)):
+                errors.append("Nominal expansion produced NaN/inf (check group factors).")
+            if np.any(sa.indices.real < 0.0):
+                errors.append("Nominal expansion produced n < 0 (check group n_factor).")
+            if np.any(sa.indices.imag < 0.0):
+                errors.append("Nominal expansion produced k < 0 (check group k_factor).")
+            interior = sa.thicknesses[1:-1] if sa.thicknesses.shape[0] > 2 else np.empty(0)
+            if interior.size and np.any(interior <= 0.0):
+                errors.append("Nominal expansion produced interior zero-thickness rows "
+                              "(group factors floored a film away; ambient/substrate may be 0).")
         return errors
 
     def get_solver_inputs(self) -> SolverArrays:

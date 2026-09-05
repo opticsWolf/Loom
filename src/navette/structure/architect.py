@@ -52,7 +52,7 @@ import numpy as np
 from .structure import Navette_Structure
 from .models import Layer, Group
 from .materials import MaterialProvider, DictMaterialProvider
-from .types import SolverArrays
+from .types import RoughnessType, SolverArrays
 from .expander import _LayerExpander
 
 __all__ = [
@@ -215,11 +215,14 @@ class Navette_Architect:
 
     def replace_material(self, old_name: str, new_name: str) -> int:
         """Replace all occurrences of old material name with new. Returns count."""
+        # NOTE: walks unique structures directly — `_iter_layers` yields
+        # clones for inverted blocks, which must never be mutated.
         count = 0
-        for layer, _ in self._iter_layers():
-            if layer.material == old_name:
-                layer.material = new_name
-                count += 1
+        for struct in self.unique_structures:
+            for layer in struct.layer_list:
+                if layer.material == old_name:
+                    layer.material = new_name
+                    count += 1
         return count
 
     # -- block management --------------------------------------------------
@@ -358,6 +361,30 @@ class Navette_Architect:
 
         The first layer yielded is the ambient; the last is the substrate.
         This is exactly the contract _LayerExpander.expand consumes.
+
+        Inversion mirrors plane properties: bulk/design state (material,
+        thickness, coherence, grading, optimize/needle/layer_type) stays
+        with the layer, but the interface slice and roughness describe
+        the boundary with the forward predecessor — i.e. the incoming-
+        light side. Inverted blocks therefore yield clones with the
+        plane flags shifted one step toward the incident side (clone[i-1]
+        carries layer[i]'s interface/roughness; the first-yielded clone
+        carries layer[0]'s flags, which the expander drops at the
+        incident edge exactly like the forward first layer). The carve
+        follows the material: each donor clone is pre-shrunk by its
+        slice width while the carrier is pre-grown by the same amount,
+        so the expander's trailing-side carve reproduces the exact
+        mirror bulk split. Repetition edges are exact too: the incident
+        edge of the first repetition and the exit edge of the last get
+        private copies without the boundary carve (interior repetition
+        boundaries share the base clones). Sub-layer counts are
+        preserved verbatim (direct `_thickness` writes — the property
+        setter would re-refine from the adjusted thickness and change
+        the count). Forward behavior is untouched (originals, no clones).
+        Shared structures are never mutated.
+
+        NOTE: `_iter_layers` yields clones for inverted blocks — callers
+        that mutate layers must not use it (see `replace_material`).
         """
         for block in self._blocks:
             layers = block.structure.layer_list
@@ -365,10 +392,40 @@ class Navette_Architect:
             if n == 0:
                 continue
 
-            for _ in range(block.repeat_count):
+            if block.inverted:
+                # Base clones with full boundary treatment (valid for
+                # interior repetition boundaries on both sides).
+                clones = [layer.clone() for layer in layers]
+                for i in range(1, n):
+                    donor = layers[i]
+                    t = donor.interface_thickness if donor.interface else 0.0
+                    clones[i - 1].interface = donor.interface
+                    clones[i - 1].interface_thickness = donor.interface_thickness
+                    clones[i - 1].roughness = donor.roughness
+                    clones[i - 1].rough_type = donor.rough_type
+                    clones[i]._thickness = max(0.0, clones[i]._thickness - t)
+                    clones[i - 1]._thickness = clones[i - 1]._thickness + t
+                first = layers[0]
+                t0 = first.interface_thickness if first.interface else 0.0
+                clones[n - 1].interface = first.interface
+                clones[n - 1].interface_thickness = first.interface_thickness
+                clones[n - 1].roughness = first.roughness
+                clones[n - 1].rough_type = first.rough_type
+                clones[n - 1]._thickness = clones[n - 1]._thickness + t0
+                clones[0]._thickness = clones[0]._thickness - t0
+            for rep in range(block.repeat_count):
                 if block.inverted:
+                    use = clones
+                    if t0 > 0.0 and (rep == 0 or rep == block.repeat_count - 1):
+                        # Edge repetitions get private copies: the incident
+                        # edge hosts no slice, the exit edge is carved by none.
+                        use = [c.clone() for c in clones]
+                        if rep == 0:
+                            use[n - 1]._thickness = use[n - 1]._thickness - t0
+                        if rep == block.repeat_count - 1:
+                            use[0]._thickness = use[0]._thickness + t0
                     for i in range(n - 1, -1, -1):
-                        yield layers[i], True
+                        yield use[i], True
                 else:
                     for i in range(n):
                         yield layers[i], False

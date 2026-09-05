@@ -22,9 +22,20 @@ class ErrorType(IntEnum):
     COMBINED = 2
 
 class RoughnessType(IntEnum):
-    """Structure-level roughness switch (detail lives in smatrix.RoughnessType)."""
+    """Per-interface roughness form factor (solver contract, [nm] sigma).
+
+    Canonical definition shared by the structure model and the smatrix
+    engine (`navette.smatrix.RoughnessType` re-exports this): NONE is an
+    ideal interface; LINEAR/STEP/EXPONENTIAL/GAUSSIAN are analytic
+    graded-index profiles; NEVOT_CROCE is the Nevot-Croce X-ray factor.
+    Stored on :class:`Layer.rough_type` and passed to the engine as int.
+    """
     NONE = 0
-    SCALAR = 1
+    LINEAR = 1
+    STEP = 2
+    EXPONENTIAL = 3
+    GAUSSIAN = 4
+    NEVOT_CROCE = 5
 
 class ErrorMask(IntEnum):
     """Slots of the per-layer error vector (thickness, n/k, roughness, ...)."""

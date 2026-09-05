@@ -158,7 +158,7 @@ class GroupConfig(BaseModel):
     thick_factor: float = 1.0
     thick_summand: float = 0.0
     n_factor: float = 1.0
-    k_factor: float = 0.0
+    k_factor: float = 1.0
     inh_delta_summand: float = 0.0
     roughness_summand: float = 0.0
     interface_summand: float = 0.0

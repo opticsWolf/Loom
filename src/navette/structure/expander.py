@@ -74,10 +74,14 @@ class _LayerExpander:
             group = get_group(mat_name, _DEFAULT_GROUP)
 
             base_nk = materials.get_nk(mat_name)
-            layer_nk = base_nk * group.nk_factor if (group.n_factor != 1.0 or group.k_factor != 0.0) else base_nk
+            # Independent n/k scaling (identity (1, 1); matches the
+            # table-material convention in navette-materials).
+            layer_nk = base_nk.real * group.n_factor + 1j * (base_nk.imag * group.k_factor) \
+                if (group.n_factor != 1.0 or group.k_factor != 1.0) else base_nk
             layer_thickness = layer.thickness * group.thick_factor + group.thick_summand
 
-            current_roughness = layer.roughness
+            # Roughness unit contract: [nm] in, [nm] out (solver unit).
+            current_roughness = max(0.0, layer.roughness + group.roughness_summand)
 
             if apply_errors:
                 if group.error_mask[ErrorMask.THICKNESS]:
@@ -95,7 +99,7 @@ class _LayerExpander:
             layer_thickness = max(0.0, layer_thickness)
 
             if layer.interface and prev_eff_nk is not None:
-                t_interface = layer.interface_thickness
+                t_interface = layer.interface_thickness + group.interface_summand
                 if apply_errors and group.error_mask[ErrorMask.INTERFACE]:
                     t_interface = group.interface_error(t_interface, layer.thickness, rng=rng)
                 
