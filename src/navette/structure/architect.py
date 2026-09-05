@@ -52,7 +52,7 @@ import numpy as np
 from .structure import Navette_Structure
 from .models import Layer, Group
 from .materials import MaterialProvider, DictMaterialProvider
-from .types import RoughnessType, SolverArrays
+from .types import BlockKind, LayerType, OptMask, SolverArrays
 from .expander import _LayerExpander
 
 __all__ = [
@@ -79,11 +79,21 @@ class StructureBlock:
         Number of consecutive repetitions of this block.
     label : str
         Optional human-readable tag (for node-graph display).
+    kind : BlockKind
+        Declared composition role: STACK (half-space to half-space) or
+        FILMS (thin-film-only, legal only between stacks or films).
     """
     structure: Navette_Structure
     inverted: bool = False
     repeat_count: int = 1
     label: str = ""
+    kind: Union[BlockKind, int] = BlockKind.STACK
+
+    def __post_init__(self) -> None:
+        try:
+            self.kind = BlockKind(self.kind)
+        except ValueError:
+            raise ValueError(f"StructureBlock: unknown kind {self.kind!r} (see BlockKind).") from None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -164,22 +174,28 @@ class Navette_Architect:
                 inverted=block.inverted,
                 repeat=block.repeat_count,
                 label=block.label,
+                kind=block.kind,
             )
         return new_arch
     
     def validate(self) -> List[str]:
-        """Return list of warnings/errors (empty if all good)."""
-        issues = []
-        # Check groups
+        """Collect every issue (empty if all good); never raises.
+
+        Authoring-time API: group-merge conflicts, chain composition,
+        then each unique structure's own validation (thicknesses,
+        materials, group domains, nominal dry-run). Solve-time callers
+        (`get_solver_inputs`, the bridge) run this first and raise.
+        """
+        issues: List[str] = []
         try:
             self._merged_group_dict()
         except ValueError as e:
             issues.append(str(e))
-        # Check materials exist for all layers
-        if self._materials:
-            for layer, _ in self._iter_layers():
-                if not self._materials.has_material(layer.material):
-                    issues.append(f"Material '{layer.material}' not found")
+        issues.extend(self._validate_chain())
+        for struct in self.unique_structures:
+            for issue in struct.validate():
+                if issue not in issues:
+                    issues.append(issue)
         return issues
 
     @property
@@ -250,6 +266,7 @@ class Navette_Architect:
         inverted: bool = False,
         repeat: int = 1,
         label: str = "",
+        kind: Union[BlockKind, int] = BlockKind.STACK,
     ) -> None:
         """
         Append a Navette_Structure to the simulation stack.
@@ -268,7 +285,7 @@ class Navette_Architect:
             structure.materials = self._materials
 
         self._blocks.append(
-            StructureBlock(structure, inverted, repeat, label)
+            StructureBlock(structure, inverted, repeat, label, kind)
         )
 
     def insert_structure(
@@ -278,6 +295,7 @@ class Navette_Architect:
         inverted: bool = False,
         repeat: int = 1,
         label: str = "",
+        kind: Union[BlockKind, int] = BlockKind.STACK,
     ) -> None:
         """Insert a structure block (optionally inverted/repeated/labelled)."""
         if repeat < 1:
@@ -286,7 +304,7 @@ class Navette_Architect:
             structure.materials = self._materials
         self._blocks.insert(
             index,
-            StructureBlock(structure, inverted, repeat, label)
+            StructureBlock(structure, inverted, repeat, label, kind)
         )
 
     def replace_structure(self, block_index: int, new_structure: Navette_Structure) -> None:
@@ -299,6 +317,7 @@ class Navette_Architect:
             inverted=block.inverted,
             repeat_count=block.repeat_count,
             label=block.label,
+            kind=block.kind,
         )
 
     def move_block(self, from_index: int, to_index: int) -> None:
@@ -343,6 +362,7 @@ class Navette_Architect:
             inverted=block.inverted,
             repeat_count=block.repeat_count,
             label=block.label,
+            kind=block.kind,
         )
 
     # -- layer counting ----------------------------------------------------
@@ -362,29 +382,11 @@ class Navette_Architect:
         The first layer yielded is the ambient; the last is the substrate.
         This is exactly the contract _LayerExpander.expand consumes.
 
-        Inversion mirrors plane properties: bulk/design state (material,
-        thickness, coherence, grading, optimize/needle/layer_type) stays
-        with the layer, but the interface slice and roughness describe
-        the boundary with the forward predecessor — i.e. the incoming-
-        light side. Inverted blocks therefore yield clones with the
-        plane flags shifted one step toward the incident side (clone[i-1]
-        carries layer[i]'s interface/roughness; the first-yielded clone
-        carries layer[0]'s flags, which the expander drops at the
-        incident edge exactly like the forward first layer). The carve
-        follows the material: each donor clone is pre-shrunk by its
-        slice width while the carrier is pre-grown by the same amount,
-        so the expander's trailing-side carve reproduces the exact
-        mirror bulk split. Repetition edges are exact too: the incident
-        edge of the first repetition and the exit edge of the last get
-        private copies without the boundary carve (interior repetition
-        boundaries share the base clones). Sub-layer counts are
-        preserved verbatim (direct `_thickness` writes — the property
-        setter would re-refine from the adjusted thickness and change
-        the count). Forward behavior is untouched (originals, no clones).
-        Shared structures are never mutated.
-
-        NOTE: `_iter_layers` yields clones for inverted blocks — callers
-        that mutate layers must not use it (see `replace_material`).
+        Order only: inverted blocks yield the original layers last-first
+        with the flag set; all mirror physics (plane-flag ownership,
+        donor-side carve, repetition edges) lives in `_LayerExpander`,
+        which sees the whole traversal and the groups. Shared structures
+        are never mutated, so mutating callers may use this directly.
         """
         for block in self._blocks:
             layers = block.structure.layer_list
@@ -392,40 +394,10 @@ class Navette_Architect:
             if n == 0:
                 continue
 
-            if block.inverted:
-                # Base clones with full boundary treatment (valid for
-                # interior repetition boundaries on both sides).
-                clones = [layer.clone() for layer in layers]
-                for i in range(1, n):
-                    donor = layers[i]
-                    t = donor.interface_thickness if donor.interface else 0.0
-                    clones[i - 1].interface = donor.interface
-                    clones[i - 1].interface_thickness = donor.interface_thickness
-                    clones[i - 1].roughness = donor.roughness
-                    clones[i - 1].rough_type = donor.rough_type
-                    clones[i]._thickness = max(0.0, clones[i]._thickness - t)
-                    clones[i - 1]._thickness = clones[i - 1]._thickness + t
-                first = layers[0]
-                t0 = first.interface_thickness if first.interface else 0.0
-                clones[n - 1].interface = first.interface
-                clones[n - 1].interface_thickness = first.interface_thickness
-                clones[n - 1].roughness = first.roughness
-                clones[n - 1].rough_type = first.rough_type
-                clones[n - 1]._thickness = clones[n - 1]._thickness + t0
-                clones[0]._thickness = clones[0]._thickness - t0
-            for rep in range(block.repeat_count):
+            for _ in range(block.repeat_count):
                 if block.inverted:
-                    use = clones
-                    if t0 > 0.0 and (rep == 0 or rep == block.repeat_count - 1):
-                        # Edge repetitions get private copies: the incident
-                        # edge hosts no slice, the exit edge is carved by none.
-                        use = [c.clone() for c in clones]
-                        if rep == 0:
-                            use[n - 1]._thickness = use[n - 1]._thickness - t0
-                        if rep == block.repeat_count - 1:
-                            use[0]._thickness = use[0]._thickness + t0
                     for i in range(n - 1, -1, -1):
-                        yield use[i], True
+                        yield layers[i], True
                 else:
                     for i in range(n):
                         yield layers[i], False
@@ -457,6 +429,47 @@ class Navette_Architect:
                     merged[name] = group
         return merged
 
+    def _validate_chain(self) -> List[str]:
+        """Check block composition rules (chain must start/end with STACK).
+
+        Marker rules apply to marked stacks: a STACK whose rows carry
+        AMBIENT/SUBSTRATE markers must open with AMBIENT and close with
+        SUBSTRATE, with no markers in the interior; marker-less (legacy)
+        stacks pass. FILMS blocks must hold FILM rows only. Empty
+        structures are errors, never silently skipped.
+        """
+        issues: List[str] = []
+        if not self._blocks:
+            return ["Navette_Architect chain is empty."]
+        if self._blocks[0].kind != BlockKind.STACK:
+            issues.append("Chain must start with a STACK block.")
+        if self._blocks[-1].kind != BlockKind.STACK:
+            issues.append("Chain must end with a STACK block.")
+        for b, block in enumerate(self._blocks):
+            layers = block.structure.layer_list
+            if not layers:
+                issues.append(f"Block {b} ({block.label!r}): empty structure.")
+                continue
+            roles: List[Optional[LayerType]] = []
+            for layer in layers:
+                try:
+                    roles.append(LayerType(int(layer.layer_type)))
+                except (ValueError, TypeError):
+                    roles.append(None)  # range-checked by structure.validate()
+            if block.kind == BlockKind.FILMS:
+                if any(r is not None and r != LayerType.FILM for r in roles):
+                    issues.append(f"Block {b} ({block.label!r}): FILMS block must hold FILM rows only.")
+            else:
+                marked = [r for r in roles if r in (LayerType.AMBIENT, LayerType.SUBSTRATE)]
+                if marked:
+                    if roles[0] != LayerType.AMBIENT:
+                        issues.append(f"Block {b} ({block.label!r}): STACK must open with an AMBIENT row.")
+                    if roles[-1] != LayerType.SUBSTRATE:
+                        issues.append(f"Block {b} ({block.label!r}): STACK must close with a SUBSTRATE row.")
+                    if any(r in (LayerType.AMBIENT, LayerType.SUBSTRATE) for r in roles[1:-1]):
+                        issues.append(f"Block {b} ({block.label!r}): half-space markers inside the film sequence.")
+        return issues
+
     def get_solver_inputs(self) -> SolverArrays:
         """
         Generate flattened Structure-of-Arrays for the solver across ALL
@@ -469,6 +482,9 @@ class Navette_Architect:
         """
         if not self._blocks:
             raise ValueError("Navette_Architect is empty.")
+        issues = self.validate()
+        if issues:
+            raise ValueError("Navette_Architect invalid:\n" + "\n".join(issues))
         if self._materials is None:
             raise ValueError("No material provider set.")
 
@@ -493,6 +509,9 @@ class Navette_Architect:
         """
         if not self._blocks:
             raise ValueError("Navette_Architect is empty.")
+        issues = self.validate()
+        if issues:
+            raise ValueError("Navette_Architect invalid:\n" + "\n".join(issues))
         if self._materials is None:
             raise ValueError("No material provider set.")
 
@@ -599,17 +618,43 @@ class Navette_Architect:
         """
         Return a UNIQUE list of layers eligible for optimisation.
         Even if a structure is referenced 5 times, its layers appear once.
+        Honors the merged groups' THICKNESS slots (see OptMask).
         """
+        merged = self._merged_group_dict()
         params: List[Layer] = []
         for struct in self.unique_structures:
             for layer in struct.layer_list:
-                if layer.optimize:
-                    params.append(layer)
+                if not layer.optimize:
+                    continue
+                group = merged.get(layer.material)
+                if group is not None and len(group.optimization_mask) == len(OptMask) \
+                        and not group.optimization_mask[OptMask.THICKNESS]:
+                    continue
+                params.append(layer)
         return params
 
+    def set_optimization_mask(self, group_name: str, mask: List[int]) -> None:
+        """Write path for a group's optimization mask (binary, 7 slots).
+
+        Resolves the group through the merged chain dict and writes it on
+        the owning structure (shared references see the change).
+        """
+        if len(mask) != len(OptMask) or any(v not in (0, 1) for v in mask):
+            raise ValueError(f"set_optimization_mask: mask must be {len(OptMask)} binary entries (see OptMask).")
+        for struct in self.unique_structures:
+            if group_name in struct.group_dict:
+                struct.group_dict[group_name].optimization_mask = list(mask)
+                return
+        raise KeyError(f"set_optimization_mask: unknown group '{group_name}'.")
+
     def total_sub_layers(self) -> int:
-        """Number of physical slices after inhomogeneous subdivision (no error application)."""
-        # Quick approximation: iterate layers and sum sub_layer_count
+        """Solver row count: exact via nominal expansion when possible,
+        else the structural approximation (interface ~= +1)."""
+        try:
+            return len(self.get_solver_inputs().thicknesses)
+        except Exception:
+            pass
+        # Fallback approximation: iterate layers and sum sub_layer_count.
         total = 0
         prev_exists = False
         for layer, _ in self._iter_layers():
@@ -651,6 +696,7 @@ class Navette_Architect:
                 "inverted": b.inverted,
                 "repeat_count": b.repeat_count,
                 "label": b.label,
+                "kind": int(b.kind),
             }
             for b in self._blocks
         ]
@@ -684,5 +730,6 @@ class Navette_Architect:
                     inverted=bs.get("inverted", False),
                     repeat=bs.get("repeat_count", 1),
                     label=bs.get("label", ""),
+                    kind=bs.get("kind", BlockKind.STACK),
                 )
         return arch

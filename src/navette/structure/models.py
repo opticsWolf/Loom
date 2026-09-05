@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import warnings
 import numpy as np
 
-from .types import INT_TYPE, ErrorType, RoughnessType, ErrorMask, LayerMask
+from .types import INT_TYPE, ErrorType, LayerType, OptMask, RoughnessType, ErrorMask, LayerMask
 
 """Layer and Group: the Python-side thin-film stack model.
 
@@ -25,7 +25,7 @@ class Layer:
     __slots__ = (
         "material", "coherent", "_inhomogen", "rough_type", "_inh_delta",
         "roughness", "interface", "interface_thickness", "_thickness",
-        "optimize", "needle", "layer_typ", "sub_layer_count",
+        "optimize", "needle", "layer_type", "sub_layer_count",
     )
 
     def __init__(
@@ -41,7 +41,7 @@ class Layer:
         interface_thickness: float = 0.0,
         optimize: bool = True,
         needle: bool = True,
-        layer_typ: int = 1,
+        layer_type: Union[int, LayerType] = LayerType.FILM,
     ) -> None:
         self.material = material_name
         self.coherent = coherent
@@ -57,7 +57,10 @@ class Layer:
         self._thickness = float(thickness)
         self.optimize = optimize
         self.needle = needle
-        self.layer_typ = layer_typ
+        try:
+            self.layer_type = LayerType(layer_type)
+        except ValueError:
+            raise ValueError(f"Layer: unknown layer_type {layer_type!r} (see LayerType).") from None
         self._refine_layer_count()
 
     def __call__(self) -> Tuple[str, float]:
@@ -121,7 +124,7 @@ class Layer:
             "interface_thickness": self.interface_thickness,
             "optimize": self.optimize,
             "needle": self.needle,
-            "layer_typ": self.layer_typ,
+            "layer_type": int(self.layer_type),
         }
 
     @classmethod
@@ -137,6 +140,13 @@ class Layer:
             if not hasattr(self, key):
                 warnings.warn(f"Layer.set_properties: ignoring unknown attribute '{key}'.", stacklevel=2)
                 continue
+            if key in ("rough_type", "layer_type"):
+                enum = RoughnessType if key == "rough_type" else LayerType
+                try:
+                    value = enum(value)
+                except ValueError:
+                    warnings.warn(f"Layer.set_properties: unknown {key} {value!r}; ignoring.", stacklevel=2)
+                    continue
             try:
                 setattr(self, key, value)
             except AttributeError:
@@ -202,7 +212,7 @@ class Group:
         self.interface_summand = interface_summand
 
         self.error_mask = [0] * len(ErrorMask)
-        self.optimization_mask = [0] * 7
+        self.optimization_mask = [1] * len(OptMask)
         
         for err_attr in ["thickness", "n", "k", "inh_delta", "roughness", "interface"]:
             setattr(self, f"{err_attr}_error_type", ErrorType.GAUSSIAN)
@@ -224,6 +234,8 @@ class Group:
             issues.append(f"Group '{self.group_name}': n_factor {self.n_factor} < 0 (no negative-index media).")
         if not (self.k_factor >= 0.0):
             issues.append(f"Group '{self.group_name}': k_factor {self.k_factor} < 0 (no gain media).")
+        if len(self.optimization_mask) != len(OptMask) or any(v not in (0, 1) for v in self.optimization_mask):
+            issues.append(f"Group '{self.group_name}': optimization_mask must be {len(OptMask)} binary entries (see OptMask).")
         return issues
 
     @staticmethod

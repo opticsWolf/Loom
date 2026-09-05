@@ -71,7 +71,7 @@ def layer_from_config(cfg: LayerConfig, material_provider: MaterialProvider) -> 
         thickness=cfg.thickness_nm,
         material_name=cfg.material_code,
         coherent=cfg.coherent,
-        roughness=cfg.roughness_angstrom,
+        roughness=cfg.roughness_nm,
         rough_type=cfg.rough_type,
         inhomogen=cfg.inhomogen,
         inh_delta=cfg.inh_delta,
@@ -79,7 +79,7 @@ def layer_from_config(cfg: LayerConfig, material_provider: MaterialProvider) -> 
         interface_thickness=cfg.interface_thickness_nm,
         optimize=cfg.optimize,
         needle=cfg.needle,
-        layer_typ=cfg.layer_type,
+        layer_type=cfg.layer_type,
     )
 
 def group_from_config(cfg: GroupConfig) -> Group:
@@ -116,3 +116,20 @@ def group_from_config(cfg: GroupConfig) -> Group:
     copy_params(cfg.k_error_params, group.k_error_params)
 
     return group
+
+
+def structure_from_config(
+    layer_cfgs: List[LayerConfig],
+    group_cfgs: List[GroupConfig],
+    materials: Any,
+) -> Navette_Structure:
+    """Build a Navette_Structure from typed configs (the live config path).
+
+    Groups are keyed by config name, which by convention equals the
+    governed material name (the expander looks groups up by material;
+    `validate()` flags keys that govern nothing).
+    """
+    layers = [layer_from_config(c, materials) for c in layer_cfgs]
+    groups = {c.name: group_from_config(c) for c in group_cfgs}
+    # Navette_Structure auto-wraps plain dicts into DictMaterialProvider.
+    return Navette_Structure(layer_list=layers, group_dict=groups, materials=materials)

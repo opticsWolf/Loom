@@ -53,6 +53,43 @@ class LayerMask(IntEnum):
     INHOMOGEN = 2
     ROUGHNESS = 3
 
+class OptMask(IntEnum):
+    """Slots of the per-group optimization mask (`Group.optimization_mask`).
+
+    Convention: 1 = the property may be optimized, 0 = fixed. The mask
+    refines `Layer.optimize` per property for optimizers that support it;
+    `get_optimization_parameters` already honors the THICKNESS slot.
+    MATERIAL governs material-substitution moves (e.g. needle insertion).
+    """
+    THICKNESS = 0
+    N = 1
+    K = 2
+    ROUGHNESS = 3
+    INH_DELTA = 4
+    INTERFACE = 5
+    MATERIAL = 6
+
+class LayerType(IntEnum):
+    """Design role of a layer (vocabulary for the former open `layer_typ` int).
+
+    Markers delimit stacks: a `STACK` block opens with `AMBIENT` and closes
+    with `SUBSTRATE`; `FILM` rows are the thin-film sequence. `FILM = 1`
+    keeps every pre-enum state file valid (1 was the only value in use).
+    """
+    AMBIENT = 0
+    FILM = 1
+    SUBSTRATE = 2
+
+class BlockKind(IntEnum):
+    """Composition role of an architect block (declared, never inferred).
+
+    `STACK` spans half-space to half-space; `FILMS` is a thin-film-only
+    sequence legal only between stacks (or films), taking its boundary
+    media from its neighbors at expansion time.
+    """
+    STACK = 0
+    FILMS = 1
+
 @dataclass(frozen=True)
 class InterpolationSettings:
     method: str = "linear"

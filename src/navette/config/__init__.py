@@ -18,7 +18,7 @@ from .models import (
     ArchitectState,
     StructureState,
 )
-from .builders import material_provider_from_library, layer_from_config, group_from_config
+from .builders import material_provider_from_library, layer_from_config, group_from_config, structure_from_config
 from .loader import (
     load_material_library,
     save_material_library,
@@ -41,6 +41,7 @@ __all__ = [
     "material_provider_from_library",
     "layer_from_config",
     "group_from_config",
+    "structure_from_config",
     "load_material_library",
     "save_material_library",
     "save_architect",

@@ -14,7 +14,7 @@ read 10x too small; there is no auto-detection, convert old files.
 from typing import Any, Dict, Iterator, List, Optional, Union
 import numpy as np
 
-from .types import RoughnessType, SolverArrays
+from .types import OptMask, RoughnessType, SolverArrays
 from .materials import DictMaterialProvider, MaterialProvider
 from .models import Group, Layer
 from .expander import _DEFAULT_GROUP, _LayerExpander
@@ -76,41 +76,54 @@ class Navette_Structure:
                 errors.append(f"Layer {i}: Material '{layer.material}' not found in material provider.")
 
         seen_groups = set()
+        governed = set()
         for layer in self.layer_list:
             group = self.group_dict.get(layer.material)
+            governed.add(layer.material)
             if group is not None and id(group) not in seen_groups:
                 seen_groups.add(id(group))
                 errors.extend(group.validate())
+        for name in self.group_dict:
+            if name not in governed:
+                errors.append(f"Group '{name}' governs no layer material (lookup is by material name; silent _DEFAULT_GROUP applies).")
 
-        if self._materials:
+        if self._materials and not any("not found in material provider" in e for e in errors):
             try:
-                sa = self.get_solver_inputs()
+                sa = self._expand_arrays()
             except Exception as exc:
                 errors.append(f"Nominal expansion failed: {exc}")
                 return errors
             if not np.all(np.isfinite(sa.thicknesses)) or not np.all(np.isfinite(sa.indices)):
                 errors.append("Nominal expansion produced NaN/inf (check group factors).")
             if np.any(sa.indices.real < 0.0):
-                errors.append("Nominal expansion produced n < 0 (check group n_factor).")
+                errors.append("Nominal expansion produced n < 0 (check provider data / group n_factor).")
             if np.any(sa.indices.imag < 0.0):
-                errors.append("Nominal expansion produced k < 0 (check group k_factor).")
+                errors.append("Nominal expansion produced k < 0 (check provider data / group k_factor).")
             interior = sa.thicknesses[1:-1] if sa.thicknesses.shape[0] > 2 else np.empty(0)
             if interior.size and np.any(interior <= 0.0):
                 errors.append("Nominal expansion produced interior zero-thickness rows "
                               "(group factors floored a film away; ambient/substrate may be 0).")
         return errors
 
-    def get_solver_inputs(self) -> SolverArrays:
-        """Flatten the stack to engine arrays (nominal values, no errors)."""
+    def _expand_arrays(self, *, apply_errors: bool = False, rng: Optional[np.random.Generator] = None) -> SolverArrays:
+        """Unvalidated expansion core (validation lives in the callers)."""
         if not self.layer_list: raise ValueError("Structure is empty.")
         if self._materials is None: raise ValueError("No material provider set.")
-        return _LayerExpander.expand(((layer, False) for layer in self.layer_list), self._materials, self.group_dict, apply_errors=False)
+        return _LayerExpander.expand(((layer, False) for layer in self.layer_list), self._materials, self.group_dict, apply_errors=apply_errors, rng=rng)
+
+    def get_solver_inputs(self) -> SolverArrays:
+        """Flatten the stack to engine arrays (nominal values, no errors)."""
+        issues = self.validate()
+        if issues:
+            raise ValueError("Navette_Structure invalid:\n" + "\n".join(issues))
+        return self._expand_arrays()
 
     def get_error_solver_inputs(self, rng: Optional[np.random.Generator] = None) -> SolverArrays:
         """Flatten the stack with group fabrication errors drawn (see Group)."""
-        if not self.layer_list: raise ValueError("Structure is empty.")
-        if self._materials is None: raise ValueError("No material provider set.")
-        return _LayerExpander.expand(((layer, False) for layer in self.layer_list), self._materials, self.group_dict, apply_errors=True, rng=rng)
+        issues = self.validate()
+        if issues:
+            raise ValueError("Navette_Structure invalid:\n" + "\n".join(issues))
+        return self._expand_arrays(apply_errors=True, rng=rng)
 
     def generate_simple_layer_list(self) -> List[List[Any]]:
         """Legacy [thickness, index, coherent, roughness, rough_type] rows."""
@@ -149,7 +162,27 @@ class Navette_Structure:
     def __bool__(self) -> bool: return len(self.layer_list) > 0
 
     def total_physical_thickness(self) -> float: return sum(layer.thickness for layer in self.layer_list)
-    def get_optimization_parameters(self) -> List[Layer]: return [layer for layer in self.layer_list if layer.optimize]
+    def get_optimization_parameters(self) -> List[Layer]:
+        """Layers eligible for optimization (flag + group THICKNESS slot)."""
+        out: List[Layer] = []
+        for layer in self.layer_list:
+            if not layer.optimize:
+                continue
+            group = self.group_dict.get(layer.material)
+            if group is not None and len(group.optimization_mask) == len(OptMask) \
+                    and not group.optimization_mask[OptMask.THICKNESS]:
+                continue
+            out.append(layer)
+        return out
+
+    def set_optimization_mask(self, group_name: str, mask: List[int]) -> None:
+        """Write path for a group's optimization mask (binary, 7 slots)."""
+        group = self.group_dict.get(group_name)
+        if group is None:
+            raise KeyError(f"set_optimization_mask: unknown group '{group_name}'.")
+        if len(mask) != len(OptMask) or any(v not in (0, 1) for v in mask):
+            raise ValueError(f"set_optimization_mask: mask must be {len(OptMask)} binary entries (see OptMask).")
+        group.optimization_mask = list(mask)
     
     def replace_material(self, old_name: str, new_name: str) -> int:
         count = 0
@@ -169,6 +202,15 @@ class Navette_Structure:
         return before - len(self.layer_list)
 
     def total_sub_layers(self) -> int:
+        """Solver row count: exact via nominal expansion when materials
+        are set, else the structural approximation (interface ~= +1)."""
+        if not self.layer_list:
+            return 0
+        if self._materials is not None:
+            try:
+                return len(self._expand_arrays().thicknesses)
+            except Exception:
+                pass
         total = 0
         for i, layer in enumerate(self.layer_list):
             total += layer.sub_layer_count if (layer.inhomogen and layer.sub_layer_count > 1) else 1

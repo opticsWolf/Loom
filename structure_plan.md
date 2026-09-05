@@ -42,7 +42,7 @@ Status key: `[ ]` open · `[P]` proposed · `[R]` reviewed/approved ·
 - Verification: `Layer.from_state(L.get_state()).material == L.material`
   plus structure save→load probe via `config/loader.py`.
 
-## STRUCT-3 — Interface ε vs n: efficiency analysis (c) — [P], DEFERRED
+## STRUCT-3 — Interface ε vs n (c) — [V]
 
 No code until the analysis is reviewed. Caller audit completed:
 
@@ -125,9 +125,9 @@ t_interface = layer.interface_thickness + group.interface_summand
   `Group(thick_factor=-1).validate()` non-empty; dry-run flags a
   summand-zeroed film.
 
-## STRUCT-6 — Architect validation (f) — [P], DEFERRED
+## STRUCT-6 — Architect validation (f) — [V]
 
-Proposal (no code yet):
+Implemented:
 - `has_material` → `contains` (protocol method), fixing the live
   `AttributeError`.
 - `validate()` delegates: per-structure `structure.validate()` for every
@@ -144,18 +144,18 @@ Proposal (no code yet):
   *Raise* means fail-fast on the first problem: one exception, no partial
   results. This suits solve time, where proceeding with a known-bad
   stack can only produce garbage (or a native crash) — fail-closed.
-  Recommendation (needs approval): collect everywhere in `validate()`
-  (structures AND architect — authoring-time API), and make
-  `get_solver_inputs()` / the STRUCT-10 bridge run validation first and
-  raise on any issue (solve-time gate). The existing group-merge
-  `ValueError` already follows the raise half; validation-gating the
-  bridge extends the same rule uniformly. Nothing that reaches the
-  engine is known-bad; nothing authoring a config is interrupted.
+  Implemented as recommended: collect everywhere in `validate()`
+  (structures AND architect — authoring-time API); `get_solver_inputs()`
+  on both classes runs full validation first and raises (solve-time
+  gate). Recursion-safe split: `_expand_arrays()` is the unvalidated
+  core used by `validate()`'s dry-run; the public getters validate then
+  expand. Nothing that reaches the engine is known-bad; nothing
+  authoring a config is interrupted.
 
-## STRUCT-7 — Composition: stacks vs film blocks (g) — [P], DEFERRED
+## STRUCT-7 — Composition: stacks vs film blocks (g) — [V]
 
-Proposal (no code yet, review decisions taken: declared kinds,
-`layer_type` enum, block-type enum):
+Implemented per the reviewed decisions (declared kinds, `layer_type`
+enum, block-type enum):
 
 - `Layer.layer_typ: int` → `Layer.layer_type: LayerType` (new `IntEnum`
   in `types.py`, re-exported; config schema `layer_type` maps onto it):
@@ -200,11 +200,17 @@ forward-predecessor and must travel under reversal.
   flips with the light path. (Caveat for later: the mix is hardcoded
   f=0.5; if asymmetric mixes ever arrive, arg order starts to matter
   and the transfer must swap mix args too — noted, not implemented.)
-- In `_iter_layers`, inverted blocks yield **clones** (never mutate the
-  shared structures) with transferred flags: yielded `reversed[j]`
-  carries the `interface`/`interface_thickness`/`roughness`/`rough_type`
-  of its forward successor; the first-yielded layer gets clean flags.
-  Forward ambient-plane flags are dropped (solver ignores ambient rows).
+- Superseded by the two-phase expander (round 2): `_iter_layers` is
+  back to order-only (originals, no clones). Per entry, the plane takes
+  its flags from the traversal predecessor when both entries are
+  inverted, else from itself; k == 0 and inverted-run incident edges
+  are clean. The slice width (owner-group summand + error draw) is
+  computed once per plane and carved from the owner's bulk — own rows
+  forward, donor rows (uniform buffer rescale = pre-split carve)
+  inverted. Mix partners are the plane's two sides (owner + previous
+  forward, owner + carrier inverted). Roughness follows the plane with
+  or without a slice, always with owner-group draws. Forward output is
+  bit-identical to the legacy traversal, including MC draw order.
 - Non-inverted path yields originals, zero-cost, behavior-identical.
 - Documented limitation: exactness holds for whole-chain reversal;
   single inverted blocks inside a larger chain mirror bulk order with
@@ -289,3 +295,19 @@ forward-predecessor and must travel under reversal.
   incident edge, exact at repeat boundaries via per-rep edge copies);
   `replace_material` rewritten off `_iter_layers` (clone mutation trap).
   STRUCT-3/6/7 remain [P] deferred (analysis for STRUCT-3 delivered).
+- 2026-09-05: round 2 [V] — two-phase expander replaces the clone
+  transfer (reverted `_iter_layers` to order-only): planes resolve by
+  lookahead with owner-group summand+draws, donor-side buffer rescale;
+  this closes the MC-exactness and group-summand approximations in one
+  move. Two probe-caught bugs on the way: mix partners must be
+  owner+carrier (not prev) in inverted mode; roughness follows the
+  plane with or without a slice (decoupled from the interface flag).
+  Vacuous ravel-based nk checks replaced by dispersive 2D row-flip
+  checks; lossy-R asymmetry identified as correct physics (lossless
+  reciprocity holds 1e-12). Added STRUCT-3 (`looyenga_n`, eps_to_nk at
+  insertion), STRUCT-7 (LayerType/BlockKind, chain rules, state kinds),
+  STRUCT-6 (collect + solve-gate raise, recursion-safe split),
+  loader/mask wiring (OptMask, `structure_from_config`, write paths,
+  live THICKNESS consumer, orphan-group flag, schema nm/enum fixes),
+  smell fixes (exact total_sub_layers, enum coercion in set_properties).
+  Full workspace: 249 cargo + 28 pytest + 11/11 parity ALL OK.
