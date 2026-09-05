@@ -18,6 +18,8 @@ use crate::synthesis::cleanup::{cleanup_design, CleanupResult};
 use crate::synthesis::config::{PipelineConfig, TerminationReason};
 use crate::synthesis::context::DesignContext;
 use crate::synthesis::cycle::{run_needle_cycles, ContrastMap, NeedleCycleConfig, NeedleCycleResult};
+use crate::synthesis::merit::MeritSpec;
+use crate::synthesis::needle_pass::{build_needle_targets, NeedleTargets};
 use crate::synthesis::inflate::{inflate_design, InflateResult};
 use crate::synthesis::stagnation::StagnationDetector;
 use crate::synthesis::structure::DesignStack;
@@ -128,10 +130,7 @@ impl NeedlePipeline {
             let needle_results = run_needle_cycles(
                 ctx,
                 &mut self.stack,
-                &self.spectral.wavls,
-                &self.spectral.sin_theta,
-                &self.spectral.targets_r,
-                &self.spectral.weights_r,
+                &self.spectral,
                 &self.contrast,
                 &needle_cfg,
             )?;
@@ -266,31 +265,73 @@ impl NeedlePipeline {
     }
 }
 
-/// Spectral problem definition needed by the needle pass.
+/// Spectral problem definition needed by the needle pass: the fixed grid
+/// plus the full folded demand set (all quantities — R/T/A, back-incidence
+/// siblings, per-channel phase pairs). Folded once at construction
+/// (conservative form: no operating-point sim, so one-sided/banded kinds
+/// take their conservative arm and masking resolves inside the scan's
+/// merit evaluations, exactly as the standalone fold documents).
 #[derive(Clone, Debug)]
 pub struct SpectralInputs {
     pub wavls: Vec<f64>,
     /// Sines of incidence angles.
     pub sin_theta: Vec<f64>,
-    /// Raw reflectance targets, angle-major (see needle_pass builder).
-    pub targets_r: Vec<f64>,
-    /// Folded weights, angle-major.
-    pub weights_r: Vec<f64>,
+    /// Conservative fold of `spec` on (`angles_deg`, `wavls`) — the
+    /// starting fold; re-folded against the live sim each needle cycle
+    /// (see `run_needle_cycles`).
+    pub fold: NeedleTargets,
+    /// Kept for per-cycle re-folds (spec + degree-convention angles).
+    pub spec: MeritSpec,
+    pub angles_deg: Vec<f64>,
+}
+
+impl SpectralInputs {
+    /// Build from a merit spec: `angles_deg` matches the spec's key
+    /// convention (degrees, as produced by the Python converter).
+    pub fn from_spec(
+        spec: &MeritSpec,
+        angles_deg: &[f64],
+        wavls: &[f64],
+    ) -> Result<Self, String> {
+        let fold = build_needle_targets(spec, angles_deg, wavls, None)?;
+        Ok(SpectralInputs {
+            wavls: wavls.to_vec(),
+            sin_theta: angles_deg
+                .iter()
+                .map(|a| (a * std::f64::consts::PI / 180.0).sin())
+                .collect(),
+            fold,
+            spec: spec.clone(),
+            angles_deg: angles_deg.to_vec(),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::synthesis::merit::SimCurves;
     use crate::synthesis::structure::LayerSpec;
 
     const NW: usize = 3;
 
     fn dummy_spectral() -> SpectralInputs {
+        let zero = || (vec![0.0f64; NW], vec![0.0f64; NW]);
         SpectralInputs {
             wavls: vec![500.0; NW],
             sin_theta: vec![0.0],
-            targets_r: vec![0.0; NW],
-            weights_r: vec![1.0; NW],
+            fold: NeedleTargets {
+                r: (vec![0.0; NW], vec![1.0; NW]),
+                t: zero(),
+                a: zero(),
+                rb: zero(),
+                tb: zero(),
+                ab: zero(),
+                phi: [zero(), zero(), zero(), zero()],
+                phi_gain_shift: [0.0; 4],
+            },
+            spec: MeritSpec::new(),
+            angles_deg: vec![0.0],
         }
     }
 
@@ -312,10 +353,16 @@ mod tests {
         fn evaluate_merit(&self, _s: &DesignStack) -> Result<f64, String> {
             Ok(2.5)
         }
+        fn simulate(&self, _s: &DesignStack) -> Result<SimCurves, String> {
+            Err("mock context has no simulator".into())
+        }
         fn optimize_thicknesses(&mut self, s: &mut DesignStack) -> Result<f64, String> {
             self.evaluate_merit(s)
         }
     }
+
+    use crate::synthesis::merit::MeritSpec;
+    use crate::synthesis::needle_pass::NeedleTargets;
 
     fn pipeline(cfg_over: impl FnOnce(&mut PipelineConfig)) -> NeedlePipeline {
         let mut cfg = PipelineConfig::default();
@@ -409,6 +456,9 @@ mod tests {
         impl DesignContext for CountingCtx {
             fn evaluate_merit(&self, _: &DesignStack) -> Result<f64, String> {
                 Ok(1.0)
+            }
+            fn simulate(&self, _: &DesignStack) -> Result<SimCurves, String> {
+                Err("mock context has no simulator".into())
             }
             fn optimize_thicknesses(
                 &mut self,

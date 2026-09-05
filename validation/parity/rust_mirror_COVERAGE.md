@@ -13,6 +13,8 @@ existing parity scripts and follow the same runnable-script convention
 | `parity/synthesis/test_merit_mirror.py` | `smatrix/src/synthesis/merit.rs` | 30/30 |
 | `parity/synthesis/test_needlefold_mirror.py` | `needle_pass.rs` fold tests | 14/20 |
 | `parity/smatrix/test_physics_mirror.py` | `evaluator.rs` physics, `optics_core.rs`, `needle_operator.rs` subset, interpolate smoke | 5 + 1 + 11 |
+| `parity/synthesis/test_pipeline.py` | bound pipeline end-to-end (stack/context primitives, mixed-target run, abort, validation) | new |
+| `benches/synthesis/bench_refold.py` | per-cycle re-fold A/B (wall time + merit/insertions) + re-fold-vs-LM breakdown | new |
 
 ## Fully mirrored (1:1 — same inputs, expectations, tolerances)
 
@@ -40,11 +42,17 @@ existing parity scripts and follow the same runnable-script convention
 
 ## Gaps — Rust internals with no Python exposure
 
-These can only be covered by exposing more API (deliberately not done here).
 The physics each one guards is covered *end-to-end* by the mirrors above.
+Since the pipeline binding, `pipeline` (7) and `config` (2) run through
+`test_pipeline.py`; `cycle` gained 2 Rust tests (R/T discriminator) and
+runs end-to-end. Remaining unexposed units:
 
-- Optimizer pipeline (55): `cleanup` (6), `config` (2), `inflate` (8),
-  `pipeline` (7), `stagnation` (11), `structure` (11), `thick_opt` (10).
+- Optimizer sub-units (45): `cleanup` (6), `inflate` (8), `stagnation`
+  (11), `structure` (11), `thick_opt` (10) — exercised only via pipeline
+  runs, not unit-mirrored.
+- `cycle` (3 Rust tests): static-fold R/T discriminator (mock ctx, also
+  covers the simulate-failure fallback) + live re-fold masking with the
+  real solver context.
 - `run_needle_pass` machinery (6): `scan_sites_*`, `profile_*`,
   `dual_pol_*`, `best_*`, `interp_clamped_edges`, `invalid_inputs_rejected`.
 - `needle_operator` oracles (12): `subblock_range_*`,

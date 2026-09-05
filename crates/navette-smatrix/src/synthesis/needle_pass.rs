@@ -31,7 +31,11 @@ use std::sync::Arc;
 use num_complex::Complex64;
 use rayon::prelude::*;
 
-use crate::needle_operator::{build_stack_fields_range, p_coherent_from_fields};
+use crate::needle_operator::{
+    build_stack_fields_range, p_coherent_a_from_fields, p_coherent_ab_from_fields,
+    p_coherent_from_fields, p_coherent_phi_from_fields, p_coherent_rb_from_fields,
+    p_coherent_t_from_fields, p_coherent_tb_from_fields,
+};
 use crate::synthesis::merit::{CurveId, MeritKey, MeritSpec, MeritTarget, SimCurves};
 
 // ---------------------------------------------------------------------------
@@ -88,6 +92,7 @@ pub fn build_scan_sites(films: &[crate::synthesis::structure::LayerSpec], scan_s
 /// back-incidence siblings (`.rb`, `.tb`, `.ab`), and one pair per
 /// S-matrix channel for phase demands (`.phi[0..=3]` → separate `P_PHI`
 /// calls, since the engine takes a single channel per call).
+#[derive(Clone, Debug)]
 pub struct NeedleTargets {
     pub r: (Vec<f64>, Vec<f64>),
     pub t: (Vec<f64>, Vec<f64>),
@@ -681,10 +686,11 @@ pub struct NeedlePassInput<'a> {
     pub wavls: &'a [f64],
     /// Sines of the incidence angles (solver convention).
     pub sin_theta: &'a [f64],
-    /// Raw reflectance targets, angle-major (see `build_needle_targets`).
-    pub targets_r: &'a [f64],
-    /// Folded merit weights, angle-major.
-    pub weights_r: &'a [f64],
+    /// Full folded demand set (R/T/A, back-incidence siblings, one phase
+    /// pair per S-matrix channel), all angle-major — see
+    /// `build_needle_targets`. All-zero buckets cost nothing (skipped
+    /// point-wise) and contribute nothing.
+    pub fold: &'a NeedleTargets,
     /// Complex index of the contrast material, per wavelength.
     pub needle_n_per_wav: &'a [Complex64],
     /// Coherent sub-block `[start_idx, end_idx)` (absolute indices);
@@ -713,14 +719,24 @@ pub fn needle_pass_scan(input: &NeedlePassInput<'_>, sites: &[ScanSite]) -> Resu
     if input.thicknesses.len() != nl || input.rough_types.len() != nl || input.rough_vals.len() != nl {
         return Err("per-layer array length mismatch".into());
     }
-    if input.targets_r.len() != na * nw || input.weights_r.len() != na * nw {
-        return Err("targets/weights must be angle-major na*nw".into());
+    let bucket_ok = |p: &(Vec<f64>, Vec<f64>)| p.0.len() == na * nw && p.1.len() == na * nw;
+    let f0 = input.fold;
+    if !(bucket_ok(&f0.r) && bucket_ok(&f0.t) && bucket_ok(&f0.a)
+        && bucket_ok(&f0.rb) && bucket_ok(&f0.tb) && bucket_ok(&f0.ab)
+        && f0.phi.iter().all(bucket_ok))
+    {
+        return Err("fold buckets must be angle-major na*nw".into());
     }
     if input.needle_n_per_wav.len() != nw {
         return Err("needle_n_per_wav must have one index per wavelength".into());
     }
     if !(input.start_idx < input.end_idx && input.end_idx < nl) {
         return Err("invalid block range".into());
+    }
+    if input.end_idx < input.start_idx + 2 {
+        // No host layer (hosts are start+1..end) — reject here rather
+        // than tripping the locator assert downstream.
+        return Err("block must contain at least one host layer".into());
     }
     if nz == 0 {
         return Ok(NeedlePassResult { sites: Vec::new(), p_profile: Vec::new() });
@@ -748,8 +764,10 @@ pub fn needle_pass_scan(input: &NeedlePassInput<'_>, sites: &[ScanSite]) -> Resu
                 .collect();
             let nsin_fi = ns[0] * Complex64::new(sin_t, 0.0);
             let np_c = input.needle_n_per_wav[w];
-            let tgt = input.targets_r[k];
-            let wgt = input.weights_r[k];
+            let fold = input.fold;
+            let th = input.thicknesses;
+            let si = input.start_idx;
+            let ei = input.end_idx;
 
             let mut acc = vec![0.0f64; nz];
             for (pi, &on) in pol_on.iter().enumerate() {
@@ -757,31 +775,47 @@ pub fn needle_pass_scan(input: &NeedlePassInput<'_>, sites: &[ScanSite]) -> Resu
                     continue;
                 }
                 let fields = build_stack_fields_range(
-                    input.start_idx,
-                    input.end_idx,
-                    &ns,
-                    input.thicknesses,
-                    input.rough_vals,
-                    input.rough_types,
-                    lam,
-                    nsin_fi,
-                    pi as i32,
+                    si, ei, &ns, th, input.rough_vals, input.rough_types,
+                    lam, nsin_fi, pi as i32,
                 );
-                let contrib = p_coherent_from_fields(
-                    &fields,
-                    nsin_fi,
-                    lam,
-                    pi as i32,
-                    np_c,
-                    tgt,
-                    wgt,
-                    input.thicknesses,
-                    input.start_idx,
-                    input.end_idx,
-                    &z_grid,
-                );
-                for (zi, v) in contrib.into_iter().enumerate() {
-                    acc[zi] += v;
+                let pol = pi as i32;
+                // One call per quantity; weight-0 points are exact zeros
+                // (residual factor vanishes), so skipping them is bit-exact
+                // and keeps R-only folds at the old cost.
+                let mut add = |contrib: Vec<f64>| {
+                    for (zi, v) in contrib.into_iter().enumerate() {
+                        acc[zi] += v;
+                    }
+                };
+                if fold.r.1[k] != 0.0 {
+                    add(p_coherent_from_fields(&fields, nsin_fi, lam, pol, np_c,
+                        fold.r.0[k], fold.r.1[k], th, si, ei, &z_grid));
+                }
+                if fold.t.1[k] != 0.0 {
+                    add(p_coherent_t_from_fields(&fields, nsin_fi, lam, pol, np_c,
+                        fold.t.0[k], fold.t.1[k], th, si, ei, &z_grid));
+                }
+                if fold.a.1[k] != 0.0 {
+                    add(p_coherent_a_from_fields(&fields, nsin_fi, lam, pol, np_c,
+                        fold.a.0[k], fold.a.1[k], th, si, ei, &z_grid));
+                }
+                if fold.tb.1[k] != 0.0 {
+                    add(p_coherent_tb_from_fields(&fields, nsin_fi, lam, pol, np_c,
+                        fold.tb.0[k], fold.tb.1[k], th, si, ei, &z_grid));
+                }
+                if fold.rb.1[k] != 0.0 {
+                    add(p_coherent_rb_from_fields(&fields, nsin_fi, lam, pol, np_c,
+                        fold.rb.0[k], fold.rb.1[k], th, si, ei, &z_grid));
+                }
+                if fold.ab.1[k] != 0.0 {
+                    add(p_coherent_ab_from_fields(&fields, nsin_fi, lam, pol, np_c,
+                        fold.ab.0[k], fold.ab.1[k], th, si, ei, &z_grid));
+                }
+                for (ch, pair) in fold.phi.iter().enumerate() {
+                    if pair.1[k] != 0.0 {
+                        add(p_coherent_phi_from_fields(&fields, nsin_fi, lam, pol,
+                            np_c, ch, pair.0[k], pair.1[k], th, si, ei, &z_grid));
+                    }
                 }
             }
             acc
@@ -844,13 +878,27 @@ mod tests {
         (cache, thicknesses, vec![0; NL], vec![0.0; NL])
     }
 
+    /// R-only fold over the test grid (one angle → na*nw = nw points).
+    fn fold_r(targets: &[f64], weights: &[f64]) -> NeedleTargets {
+        let zero = || (vec![0.0f64; NW], vec![0.0f64; NW]);
+        NeedleTargets {
+            r: (targets.to_vec(), weights.to_vec()),
+            t: zero(),
+            a: zero(),
+            rb: zero(),
+            tb: zero(),
+            ab: zero(),
+            phi: [zero(), zero(), zero(), zero()],
+            phi_gain_shift: [0.0; 4],
+        }
+    }
+
     fn pass_input<'a>(
         cache: &'a [f64],
         d: &'a [f64],
         rt: &'a [i32],
         rv: &'a [f64],
-        targets: &'a [f64],
-        weights: &'a [f64],
+        fold: &'a NeedleTargets,
         needle_n: &'a [Complex64],
     ) -> NeedlePassInput<'a> {
         NeedlePassInput {
@@ -861,8 +909,7 @@ mod tests {
             n_layers: NL,
             wavls: &TEST_WAVLS,
             sin_theta: &[0.0],
-            targets_r: targets,
-            weights_r: weights,
+            fold,
             needle_n_per_wav: needle_n,
             start_idx: 0,
             end_idx: NL - 1,
@@ -910,8 +957,9 @@ mod tests {
             LayerSpec::constant("L", 1.46, 0.0, 30.0, NW),
             LayerSpec::constant("H", 2.35, 0.0, 50.0, NW),
         ];
+        let fold = fold_r(&targets, &weights);
         let res = run_needle_pass(
-            &pass_input(&cache, &d, &rt, &rv, &targets, &weights, &needle_n),
+            &pass_input(&cache, &d, &rt, &rv, &fold, &needle_n),
             &films,
             2.5,
         )
@@ -955,7 +1003,8 @@ mod tests {
             LayerSpec::constant("H", 2.35, 0.0, 50.0, NW),
         ];
 
-        let mut inp = pass_input(&cache, &d, &rt, &rv, &targets, &weights, &needle_n);
+        let fold = fold_r(&targets, &weights);
+        let mut inp = pass_input(&cache, &d, &rt, &rv, &fold, &needle_n);
         let s_only = run_needle_pass(&inp, &films, 3.0).unwrap();
         inp.calc_s = false;
         inp.calc_p = true;
@@ -982,8 +1031,9 @@ mod tests {
             LayerSpec::constant("L", 1.46, 0.0, 30.0, NW),
             LayerSpec::constant("H", 2.35, 0.0, 50.0, NW),
         ];
+        let fold = fold_r(&targets, &weights);
         let res = run_needle_pass(
-            &pass_input(&cache, &d, &rt, &rv, &targets, &weights, &needle_n),
+            &pass_input(&cache, &d, &rt, &rv, &fold, &needle_n),
             &films,
             2.0,
         )
@@ -1563,13 +1613,15 @@ mod tests {
         let targets = vec![0.0f64; NW];
         let weights = vec![1.0f64; NW];
         let needle_n = nk_const(1.46);
-        let mut inp = pass_input(&cache, &d, &rt, &rv, &targets, &weights, &needle_n);
+        let fold = fold_r(&targets, &weights);
+        let mut inp = pass_input(&cache, &d, &rt, &rv, &fold, &needle_n);
         inp.calc_s = false;
         inp.calc_p = false;
         let films = vec![LayerSpec::constant("H", 2.35, 0.0, 40.0, NW)];
         assert!(run_needle_pass(&inp, &films, 2.0).is_err());
 
-        let inp2 = pass_input(&cache, &d, &rt, &rv, &[0.0], &weights, &needle_n);
+        let bad_fold = fold_r(&[0.0], &weights);
+        let inp2 = pass_input(&cache, &d, &rt, &rv, &bad_fold, &needle_n);
         assert!(run_needle_pass(&inp2, &films, 2.0).is_err()); // bad targets len
     }
 }

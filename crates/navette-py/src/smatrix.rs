@@ -519,9 +519,9 @@ pub fn needle_engine<'py>(
         return Err(pyo3::exceptions::PyValueError::new_err("start_idx out of range"));
     }
     let idx_end = end_idx.unwrap_or(nl - 1);
-    if idx_end <= start_idx + 2 || idx_end >= nl {
+    if idx_end < start_idx + 2 || idx_end >= nl {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "end_idx must leave at least one interior host layer inside [start_idx, end_idx]",
+            "end_idx must leave at least one host layer inside [start_idx, end_idx]",
         ));
     }
     if num_wavs == 0 || num_angles == 0 || nz == 0 {
@@ -1471,6 +1471,13 @@ pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::synthesis_merit::PySimCurves>()?;
     m.add_class::<crate::synthesis_merit::PyMeritSpec>()?;
     m.add_function(wrap_pyfunction!(crate::synthesis_merit::build_needle_targets, m)?)?;
+    m.add_class::<crate::synthesis_pipeline::PyLayerSpec>()?;
+    m.add_class::<crate::synthesis_pipeline::PyDesignStack>()?;
+    m.add_class::<crate::synthesis_pipeline::PySmatrixContext>()?;
+    m.add_class::<crate::synthesis_pipeline::PyLmConfig>()?;
+    m.add_class::<crate::synthesis_pipeline::PyPipelineConfig>()?;
+    m.add_class::<crate::synthesis_pipeline::PyNeedleCycleConfig>()?;
+    m.add_class::<crate::synthesis_pipeline::PyNeedlePipeline>()?;
     m.add("NREQ_P", NREQ_P)?;
     m.add("NREQ_P_MB", NREQ_P_MB)?;
     m.add("NREQ_P_T", NREQ_P_T)?;

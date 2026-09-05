@@ -308,3 +308,32 @@ def sim_curves_from_arrays(angles, wavelengths,
             raise ValueError(f"complex curve {code!r}: {v.size} entries != {n} grid points.")
         sim.set_complex(code, v)
     return sim
+
+
+# Re-export the needle pipeline driver (submodule import kept last: it
+# imports this package's converter, so it must run after the defs above).
+from navette.synthesis.pipeline import (  # noqa: E402,F401
+    DesignStack,
+    LayerSpec,
+    LmConfig,
+    NeedleCycleConfig,
+    NeedlePipeline,
+    PipelineConfig,
+    SmatrixContext,
+    layer_from_material,
+    run_needle,
+    stack_from_layers,
+)
+
+__all__ += [
+    "DesignStack",
+    "LayerSpec",
+    "LmConfig",
+    "NeedleCycleConfig",
+    "NeedlePipeline",
+    "PipelineConfig",
+    "SmatrixContext",
+    "layer_from_material",
+    "run_needle",
+    "stack_from_layers",
+]

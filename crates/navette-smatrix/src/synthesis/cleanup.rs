@@ -131,6 +131,7 @@ pub fn cleanup_design<C: DesignContext + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::synthesis::merit::SimCurves;
     use crate::synthesis::structure::{DesignStack, LayerSpec};
 
     const NW: usize = 4;
@@ -165,6 +166,10 @@ mod tests {
                 .zip(&self.targets)
                 .map(|(l, t)| (l.d_nm - t).powi(2))
                 .sum())
+        }
+
+        fn simulate(&self, _stack: &DesignStack) -> Result<SimCurves, String> {
+            Err("mock context has no simulator".into())
         }
 
         fn optimize_thicknesses(

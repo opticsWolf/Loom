@@ -201,6 +201,7 @@ pub fn round_to_qwot<C: DesignContext + ?Sized>(
 mod tests {
     use super::*;
     use crate::optics_core::cplx;
+    use crate::synthesis::merit::SimCurves;
 
     const NW: usize = 8;
 
@@ -237,6 +238,9 @@ mod tests {
                 .zip(&self.targets)
                 .map(|(l, t)| (l.d_nm - t).powi(2))
                 .sum())
+        }
+        fn simulate(&self, _stack: &DesignStack) -> Result<SimCurves, String> {
+            Err("mock context has no simulator".into())
         }
         fn optimize_thicknesses(
             &mut self,

@@ -159,6 +159,10 @@ impl DesignContext for SmatrixContext {
         Ok(self.spec.merit(&sim, 1e6))
     }
 
+    fn simulate(&self, stack: &DesignStack) -> Result<SimCurves, String> {
+        SmatrixContext::simulate(self, stack)
+    }
+
     fn optimize_thicknesses(
         &mut self,
         stack: &mut DesignStack,

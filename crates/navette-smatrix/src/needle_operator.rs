@@ -452,7 +452,11 @@ pub fn locate_depth(ds: &[f64], z: f64) -> (usize, f64) {
 /// Block-confined variant of [`locate_depth`]: hosts are the interior layers
 /// `start_idx + 1 .. end_idx` of the block `[start_idx, end_idx)`.
 pub fn locate_depth_in(ds: &[f64], start_idx: usize, end_idx: usize, z: f64) -> (usize, f64) {
-    assert!(end_idx >= start_idx + 3, "block has no interior host layer");
+    // Hosts are start_idx+1..end_idx: a single host (end == start+2) is
+    // well-defined (the j == end-1 arm fires immediately); only an empty
+    // range is a caller bug. (The slope kernel's true invariant is
+    // start < j < end — satisfied by every host in a nonempty range.)
+    assert!(end_idx >= start_idx + 2, "block has no host layer");
     let mut cursor = 0.0;
     for j in start_idx + 1..end_idx {
         let bottom = cursor + ds[j];
@@ -873,8 +877,8 @@ pub fn p_function(
     if num_wavs == 0 || num_angles == 0 || n_layers < 3 {
         return Err("empty spectral grid or degenerate stack".into());
     }
-    if end_idx <= start_idx + 2 || end_idx >= n_layers {
-        return Err("block must contain at least one interior host layer".into());
+    if end_idx < start_idx + 2 || end_idx >= n_layers {
+        return Err("block must contain at least one host layer".into());
     }
     let total_points = num_wavs * num_angles;
     if target_r.len() != total_points || weights.len() != total_points
@@ -1249,8 +1253,8 @@ pub fn phase_dispersion_sensitivity(
     if num_wavs == 0 || num_angles == 0 || nl < 3 || nz == 0 {
         return Err("empty spectral grid or degenerate stack".into());
     }
-    if end_idx <= start_idx + 2 || end_idx >= nl {
-        return Err("range must contain at least one interior host layer".into());
+    if end_idx < start_idx + 2 || end_idx >= nl {
+        return Err("range must contain at least one host layer".into());
     }
     if channel > 3 {
         return Err("channel must be one of 0..=3".into());

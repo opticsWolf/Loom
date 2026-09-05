@@ -50,6 +50,12 @@ pub struct PySimCurves {
     inner: SimCurves,
 }
 
+impl PySimCurves {
+    pub(crate) fn wrap(inner: SimCurves) -> Self {
+        PySimCurves { inner }
+    }
+}
+
 #[pymethods]
 impl PySimCurves {
     #[new]
@@ -147,6 +153,12 @@ impl PySimCurves {
 /// Flat optimization targets (see `MeritSpec` in the core).
 pub struct PyMeritSpec {
     inner: MeritSpec,
+}
+
+impl PyMeritSpec {
+    pub(crate) fn inner(&self) -> &MeritSpec {
+        &self.inner
+    }
 }
 
 #[pymethods]
