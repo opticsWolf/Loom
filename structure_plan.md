@@ -337,6 +337,15 @@ forward-predecessor and must travel under reversal.
   naming with provider+group collision skip, layers renamed, n/k reset).
   Groups follow their material through the rename (masks/errors survive).
   73 validation green.
+- 2026-09-05: bridge grid assurance — `.grid` on all three providers
+  (dict arrays length-checked when the grid is known), value-level
+  byte-compare assert in `solve_structure` (structure + architect),
+  gridless warns, mismatch refuses with resample guidance. 78 green,
+  zero warnings.
+- 2026-09-05: weaver strictness — `strict=` flag (off-grid raises instead
+  of interpolating), `target_wavelength` setter (atomic grid swap + cache
+  clear), `is_exact()` probe (fast-path eligibility without serving).
+  82 green.
 - 2026-09-05: group factor baking — `bake_groups()` on structure +
   architect folds thickness/grading/roughness/interface adjustments into
   layers and resets factors (masks/policy untouched); refuses n/k-scaled

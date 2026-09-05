@@ -269,6 +269,127 @@ def test_bake_materials_grid_mismatch_and_film_refusal():
     st2.bake_films()  # n/k side must go through bake_materials
 
 
+# bridge grid assurance ---------------------------------------------------------------
+WL3 = np.array([900., 1000., 1100.])
+MATS3 = {"glass": np.full(3, 1.52 + 0j), "TiO2": np.full(3, 2.35 + 0.01j)}
+
+
+def _three_layer(mats):
+  from navette.structure import Navette_Structure
+  return Navette_Structure(
+    [Layer(0.0, "glass"), Layer(50.0, "TiO2"), Layer(0.0, "glass")], {}, mats)
+
+
+def test_bridge_grid_match_solves_silently():
+  import warnings
+  from navette.structure import solve_structure
+  from navette.structure.materials import DictMaterialProvider
+  with warnings.catch_warnings():
+    warnings.simplefilter("error")  # no warning on exact grid match
+    out = solve_structure(
+      _three_layer(DictMaterialProvider(dict(MATS3), wavelength=WL3)), WL3, 0.0)
+  assert out["Rs"].shape == (3,)
+
+
+def test_bridge_grid_value_mismatch_refused():
+  from navette.structure import solve_structure
+  from navette.structure.materials import DictMaterialProvider
+  bad = DictMaterialProvider(dict(MATS3), wavelength=np.array([800., 900., 1000.]))
+  with pytest.raises(ValueError):
+    solve_structure(_three_layer(bad), WL3, 0.0)  # same length, other values
+
+
+def test_bridge_gridless_warns_and_solves():
+  from navette.structure import solve_structure
+  with pytest.warns(UserWarning, match="grid unknown"):
+    out = solve_structure(_three_layer(dict(MATS3)), WL3, 0.0)
+  assert out["Rs"].shape == (3,)
+
+
+def test_bridge_spec_grid_mismatch_refused():
+  from navette.structure import solve_structure
+  from navette.structure.materials import MaterialObjectProvider
+  from navette.materials import MaterialSpec
+  specs = {"glass": MaterialSpec("Konstant", {"n": 1.52}),
+           "TiO2": MaterialSpec("Konstant", {"n": 2.35, "k": 0.01})}
+  prov = MaterialObjectProvider(dict(specs), np.array([700., 750., 800.]))
+  with pytest.raises(ValueError):
+    solve_structure(_three_layer(prov), WL3, 0.0)
+
+
+def test_dict_provider_refresh_swaps_atomically():
+  from navette.structure.materials import DictMaterialProvider
+  prov = DictMaterialProvider({"TiO2": np.full(3, 2.0 + 0j)}, wavelength=WL3)
+  assert prov.grid.tolist() == WL3.tolist()
+  prov.refresh({"TiO2": np.full(2, 2.0 + 0j)}, np.array([500., 600.]))
+  assert prov.grid.tolist() == [500., 600.]
+  np.testing.assert_allclose(prov.get_nk("TiO2"), np.full(2, 2.0 + 0j))
+
+
+def test_dict_provider_off_grid_array_refused_at_serve():
+  from navette.structure.materials import DictMaterialProvider
+  prov = DictMaterialProvider({"TiO2": np.full(5, 2.0 + 0j)}, wavelength=WL3)
+  with pytest.raises(ValueError):
+    prov.get_nk("TiO2")
+
+
+# weaver provider strictness ----------------------------------------------------------
+class _StubWeaver:
+  """Dict-backed weaver stub: {(prefix, label, pol): (wl, data)}."""
+  def __init__(self, frags):
+    self._frags = dict(frags)
+  def __contains__(self, key):
+    return key in self._frags
+  def get_weaved(self, key):
+    return self._frags[key]
+
+
+def _stub_weaver_provider(wl, strict=False):
+  from navette.structure.materials import WeaverMaterialProvider
+  frags = {(0.0, "n", "Si"): (np.array([400., 500., 600.]), np.array([3.5, 3.6, 3.7])),\
+           (0.0, "k", "Si"): (np.array([400., 500., 600.]), np.array([0.01, 0.02, 0.03]))}
+  return WeaverMaterialProvider(_StubWeaver(frags), np.asarray(wl, dtype=np.float64),
+                                strict=strict)
+
+
+def test_weaver_strict_exact_serves_without_fallback():
+  import navette.structure.materials as matmod
+  prov = _stub_weaver_provider([400., 500., 600.], strict=True)
+  assert prov.is_exact("Si")
+  old, matmod.UniSpline = matmod.UniSpline, None  # fallback unavailable…
+  try:
+    nk = prov.get_nk("Si")  # …yet exact-grid serving works
+  finally:
+    matmod.UniSpline = old
+  np.testing.assert_allclose(nk, [3.5 + 0.01j, 3.6 + 0.02j, 3.7 + 0.03j])
+
+
+def test_weaver_strict_off_grid_refuses():
+  prov = _stub_weaver_provider([450., 550., 650.], strict=True)
+  assert not prov.is_exact("Si")
+  with pytest.raises(ValueError, match="strict"):
+    prov.get_nk("Si")
+
+
+def test_weaver_non_strict_interpolates():
+  prov = _stub_weaver_provider([450., 550., 650.], strict=False)
+  nk = prov.get_nk("Si")  # UniSpline fallback path
+  assert nk.shape == (3,)
+  assert 3.5 < nk[0].real < 3.7
+
+
+def test_weaver_target_reset_clears_cache():
+  prov = _stub_weaver_provider([400., 500., 600.], strict=False)
+  before = prov.get_nk("Si")
+  assert "Si" in prov._cache
+  prov.target_wavelength = np.array([400., 500., 600.])  # identical: no-op
+  assert "Si" in prov._cache
+  prov.target_wavelength = np.array([450., 550., 650.])  # fresh grid: cleared
+  assert "Si" not in prov._cache
+  assert prov.grid.tolist() == [450., 550., 650.]
+  assert not prov.is_exact("Si")
+
+
 # NIT-2: module docstrings live --------------------------------------------------
 def test_module_docstrings_present():
   assert models_mod.__doc__ and "Layer and Group" in models_mod.__doc__

@@ -60,6 +60,41 @@ __all__ = [
 ]
 
 
+def _assert_provider_grids(source: Any, wl: np.ndarray) -> None:
+  """Value-compare every provider grid against the solver grid.
+
+  Length-only agreement is rejected: equal length with different
+  wavelengths is silently unphysical, so grids must match byte-for-byte
+  (same idiom as the provider cache signatures). Providers without a
+  known grid (``grid`` missing or ``None``) keep the length-only assert
+  above, plus a warning nudging the caller to attach the grid. A grid
+  change always re-resolves (new solve call / cache clear), so this
+  single check covers the whole run.
+  """
+  structs = source.unique_structures if isinstance(source, Navette_Architect) else [source]
+  warned = False
+  for struct in structs:
+    provider = struct.materials
+    grid = getattr(provider, "grid", None)
+    if grid is None:
+      if not warned:
+        warnings.warn(
+          "solve_structure: provider grid unknown (gridless dict or custom "
+          "provider); only array lengths are checked — attach the grid "
+          "(wavelength=/target_wavelength=) for value-level assurance.",
+          stacklevel=3,
+        )
+        warned = True
+      continue
+    grid = np.ascontiguousarray(np.asarray(grid, dtype=np.float64)).ravel()
+    if grid.tobytes() != wl.tobytes():
+      raise ValueError(
+        f"solve_structure: provider grid does not match the solver grid "
+        f"({grid.shape[0]} points vs {wl.shape[0]}); resample the material "
+        f"data onto the solver wavelengths first."
+      )
+
+
 def solve_structure(
   source: Union[Navette_Structure, Navette_Architect],
   wavelengths: Sequence[float],
@@ -94,6 +129,7 @@ def solve_structure(
       f"solve_structure: provider grid mismatch: solver arrays "
       f"{sa.indices.shape} vs {sa.thicknesses.shape[0]} layers x {wl.size} wavelengths."
     )
+  _assert_provider_grids(source, wl)
   if sa.thicknesses.shape[0] >= 2:
     if sa.thicknesses[0] != 0.0 or sa.thicknesses[-1] != 0.0:
       warnings.warn(

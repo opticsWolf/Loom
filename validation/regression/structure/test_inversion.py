@@ -156,7 +156,8 @@ def test_partial_inversion_run_edge_clean():
 def test_lossless_reciprocity():
   # Mirror-image stacks give identical R (lossless, same media both sides).
   wl0 = np.array([1000.0])
-  mats = DictMaterialProvider({"glass": np.array([1.52 + 0j]), "TiO2": np.array([2.35 + 0j])})
+  mats = DictMaterialProvider({"glass": np.array([1.52 + 0j]), "TiO2": np.array([2.35 + 0j])},
+                                wavelength=wl0)
   st = Navette_Structure([
     Layer(0.0, "glass"),
     Layer(50.0, "TiO2", interface=True, interface_thickness=5.0),
