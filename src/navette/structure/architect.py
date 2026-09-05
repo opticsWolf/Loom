@@ -53,7 +53,7 @@ import numpy as np
 from .structure import Navette_Structure, gate_validation
 from .models import Layer, Group
 from .materials import MaterialProvider, DictMaterialProvider
-from .types import BlockKind, LayerType, OptMask, SolverArrays
+from .types import BlockKind, LayerType, OptMask, SolverArrays, SCHEMA_VERSION, check_schema_version
 from .expander import _LayerExpander
 
 __all__ = [
@@ -675,6 +675,18 @@ class Navette_Architect:
                 params.append(layer)
         return params
 
+    def bake_films(self) -> int:
+        """Fold every unique structure's film adjustments into its layers."""
+        return sum(struct.bake_films() for struct in self.unique_structures)
+
+    def bake_materials(self, wavelengths) -> Dict[str, str]:
+        """Fold every unique structure's n/k scaling into new materials."""
+        merged: Dict[str, str] = {}
+        for struct in self.unique_structures:
+            for old, new in struct.bake_materials(wavelengths).items():
+                merged[old] = new
+        return merged
+
     def set_optimization_mask(self, group_name: str, mask: List[int]) -> None:
         """Write path for a group's optimization mask (binary, 7 slots).
 
@@ -744,6 +756,7 @@ class Navette_Architect:
         ]
 
         return {
+            "schema_version": SCHEMA_VERSION,
             "structures": struct_states,
             "blocks": block_states,
         }
@@ -755,6 +768,7 @@ class Navette_Architect:
         materials: Optional[Union[MaterialProvider, Dict[str, Any]]] = None,
     ) -> "Navette_Architect":
         """Reconstruct from a serialised dict."""
+        check_schema_version(state, "Navette_Architect")
         arch = cls(materials=materials)
 
         # Rebuild structures

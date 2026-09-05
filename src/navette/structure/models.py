@@ -11,7 +11,7 @@ import copy
 import warnings
 import numpy as np
 
-from .types import INT_TYPE, ErrorType, LayerType, OptMask, RoughnessType, ErrorMask, LayerMask
+from .types import INT_TYPE, ErrorType, LayerType, OptMask, RoughnessType, ErrorMask, LayerMask, SCHEMA_VERSION, check_schema_version
 
 class Layer:
     """One physical film: material, thickness [nm], coherence/roughness flags.
@@ -113,6 +113,7 @@ class Layer:
     def get_state(self) -> Dict[str, Any]:
         """Serialize all layer properties to a plain dict (config files)."""
         return {
+            "schema_version": SCHEMA_VERSION,
             "thickness": self._thickness,
             "material_name": self.material,
             "coherent": self.coherent,
@@ -130,6 +131,7 @@ class Layer:
     @classmethod
     def from_state(cls, state: Dict[str, Any]) -> "Layer":
         """Rebuild a layer from :meth:`get_state` output (unknown keys ignored)."""
+        check_schema_version(state, "Layer")
         return cls(**{k: v for k, v in state.items() if k in cls.__init__.__code__.co_varnames})
         
     get_properties = get_state
@@ -277,12 +279,14 @@ class Group:
 
     def get_state(self) -> Dict[str, Any]:
         """Serialize all slots to a plain dict (config files)."""
-        return {attr: getattr(self, attr) for attr in self.__slots__}
+        return {"schema_version": SCHEMA_VERSION,
+                **{attr: getattr(self, attr) for attr in self.__slots__}}
     get_properties = get_state
 
     @classmethod
     def from_state(cls, state: Dict[str, Any]) -> "Group":
         """Rebuild a group from :meth:`get_state` output (deep-copied)."""
+        check_schema_version(state, "Group")
         obj = cls(state.get("group_name", "default"))
         for key, value in state.items():
             if hasattr(obj, key):

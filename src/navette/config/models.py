@@ -10,6 +10,8 @@ from typing import Literal, Optional, Dict, Any, List, Union
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 import numpy as np
 
+from navette.structure.types import SCHEMA_VERSION
+
 # -------------------------------------------------------------------------
 # Material parameter models
 # -------------------------------------------------------------------------
@@ -125,6 +127,8 @@ class MaterialDefinition(BaseModel):
 # -------------------------------------------------------------------------
 class LayerConfig(BaseModel):
     """One stack layer: material code, thickness and solver flags."""
+    model_config = ConfigDict(extra="forbid")
+
     material_code: str
     thickness_nm: float = Field(gt=0)
     coherent: bool = True
@@ -154,6 +158,8 @@ class ErrorParams(BaseModel):
 
 class GroupConfig(BaseModel):
     """Group scaling factors plus per-channel error configs."""
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     thick_factor: float = 1.0
     thick_summand: float = 0.0
@@ -189,10 +195,26 @@ class GroupConfig(BaseModel):
 # -------------------------------------------------------------------------
 class StructureState(BaseModel):
     """Serializable stack: layers, groups and material references."""
+    schema_version: int = Field(description=f"Must equal SCHEMA_VERSION ({SCHEMA_VERSION})")
     layers: List[Dict[str, Any]]   # from Layer.get_state()
     groups: Dict[str, Dict[str, Any]]  # from Group.get_state()
 
+    @field_validator("schema_version")
+    @classmethod
+    def _check_version(cls, v):
+        if v != SCHEMA_VERSION:
+            raise ValueError(f"StructureState schema_version {v} unsupported (code reads {SCHEMA_VERSION}).")
+        return v
+
 class ArchitectState(BaseModel):
     """Serializable multi-structure chain for node-graph persistence."""
+    schema_version: int = Field(description=f"Must equal SCHEMA_VERSION ({SCHEMA_VERSION})")
     structures: List[StructureState]
-    blocks: List[Dict[str, Any]]   # structure_ref, inverted, repeat_count, label
+    blocks: List[Dict[str, Any]]   # structure_ref, inverted, repeat_count, label, kind
+
+    @field_validator("schema_version")
+    @classmethod
+    def _check_version(cls, v):
+        if v != SCHEMA_VERSION:
+            raise ValueError(f"ArchitectState schema_version {v} unsupported (code reads {SCHEMA_VERSION}).")
+        return v

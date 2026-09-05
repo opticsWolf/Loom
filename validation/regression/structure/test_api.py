@@ -155,6 +155,120 @@ def test_apply_error_is_systematic_across_wl():
   assert np.ptp(out1) == 0.0  # one offset across lambda, not per-lambda noise
 
 
+# bake_films -------------------------------------------------------------------------
+def test_bake_is_expansion_identical():
+  g = Group("TiO2", thick_factor=1.1, thick_summand=2.0, inh_delta_summand=0.1,
+              roughness_summand=1.0, interface_summand=2.0)
+  st = Navette_Structure(
+    [Layer(100.0, "glass"),
+     Layer(50.0, "TiO2", roughness=3.0, inh_delta=0.2, inhomogen=True,
+           interface=True, interface_thickness=5.0)],
+    {"TiO2": g}, MATS)
+  before = st.get_solver_inputs()
+  assert st.bake_films() == 1
+  assert (g.thick_factor, g.thick_summand, g.inh_delta_summand,
+          g.roughness_summand, g.interface_summand) == (1.0, 0.0, 0.0, 0.0, 0.0)
+  assert st[1].thickness == pytest.approx(57.0)
+  assert st[1].inh_delta == pytest.approx(0.3)
+  assert st[1].roughness == pytest.approx(4.0)
+  assert st[1].interface_thickness == pytest.approx(7.0)
+  after = st.get_solver_inputs()
+  # Same totals, same slice, same grading endpoints; graded row count
+  # re-follows the refinement rule at the new thickness (rediscretized).
+  assert after.thicknesses.sum() == pytest.approx(before.thicknesses.sum())
+  assert after.thicknesses[1] == pytest.approx(before.thicknesses[1])
+  n_b, n_a = before.thicknesses.shape[0], after.thicknesses.shape[0]
+  np.testing.assert_allclose(after.indices[2], before.indices[2])
+  np.testing.assert_allclose(after.indices[n_a - 1], before.indices[n_b - 1])
+  fresh = Layer(57.0, "TiO2", inhomogen=True, inh_delta=0.3)
+  assert st[1].sub_layer_count == fresh.sub_layer_count
+
+
+def test_bake_flat_stack_is_bit_identical():
+  g = Group("TiO2", thick_factor=1.1, thick_summand=2.0,
+              roughness_summand=1.0, interface_summand=2.0)
+  st = Navette_Structure(
+    [Layer(100.0, "glass"),
+     Layer(50.0, "TiO2", roughness=3.0, interface=True, interface_thickness=5.0)],
+    {"TiO2": g}, MATS)
+  before = st.get_solver_inputs()
+  st.bake_films()
+  after = st.get_solver_inputs()
+  np.testing.assert_allclose(after.thicknesses, before.thicknesses)
+  np.testing.assert_allclose(after.indices, before.indices)
+
+
+def test_bake_refuses_nk_scaling_atomically():
+  g = Group("TiO2", thick_factor=2.0, n_factor=1.1)
+  st = Navette_Structure([Layer(50.0, "TiO2"), Layer(60.0, "TiO2")], {"TiO2": g}, MATS)
+  with pytest.raises(ValueError):
+    st.bake_films()
+  assert st[0].thickness == 50.0 and st[1].thickness == 60.0  # untouched
+  assert g.thick_factor == 2.0  # not reset either
+
+
+def test_bake_leaves_orphans_alone():
+  orphan = Group("Nobody", thick_factor=3.0)
+  st = Navette_Structure([Layer(50.0, "TiO2")],
+                         {"TiO2": Group("TiO2", thick_factor=2.0), "Nobody": orphan}, MATS)
+  assert st.bake_films() == 1
+  assert st[0].thickness == 100.0
+  assert orphan.thick_factor == 3.0
+
+
+# bake_materials --------------------------------------------------------------------
+def test_bake_materials_creates_table_and_renames():
+  wl = np.array([900., 1000., 1100.])
+  mats = {"TiO2": np.full(3, 2.35 + 0.01j), "glass": np.full(3, 1.52 + 0j)}
+  st = Navette_Structure(
+    [Layer(0.0, "glass"), Layer(50.0, "TiO2"), Layer(0.0, "glass")],
+    {"TiO2": Group("TiO2", n_factor=1.1, k_factor=0.5)}, dict(mats))
+  before = st.get_solver_inputs()
+  mapping = st.bake_materials(wl)
+  assert mapping == {"TiO2": "TiO2_table"}
+  assert [l.material for l in st] == ["glass", "TiO2_table", "glass"]
+  assert (st.group_dict["TiO2_table"].n_factor, st.group_dict["TiO2_table"].k_factor) == (1.0, 1.0)
+  spec = st.materials._dict["TiO2_table"]
+  assert spec.model == "Table"
+  after = st.get_solver_inputs()
+  np.testing.assert_allclose(after.thicknesses, before.thicknesses)
+  np.testing.assert_allclose(after.indices, before.indices)
+
+
+def test_bake_materials_group_collision_skipped():
+  wl = np.array([1000.])
+  mats = {"TiO2": np.full(1, 2.35 + 0.01j)}
+  st = Navette_Structure([Layer(50.0, "TiO2")],
+                         {"TiO2": Group("TiO2", n_factor=2.0),
+                          "TiO2_table": Group("TiO2_table")},
+                         dict(mats))
+  assert st.bake_materials(wl) == {"TiO2": "TiO2_table2"}
+  assert "TiO2_table" in st.group_dict  # orphan preserved
+  assert st.group_dict["TiO2_table2"].group_name == "TiO2_table2"
+
+
+def test_bake_materials_version_chain():
+  wl = np.array([1000.])
+  mats = {"TiO2": np.full(1, 2.35 + 0.01j), "TiO2_table": np.full(1, 9.0 + 0j)}
+  st = Navette_Structure([Layer(50.0, "TiO2")], {"TiO2": Group("TiO2", n_factor=2.0)}, dict(mats))
+  assert st.bake_materials(wl) == {"TiO2": "TiO2_table2"}
+  st2 = Navette_Structure([Layer(50.0, "Xtable")],
+                          {"Xtable": Group("Xtable", k_factor=3.0)},
+                          dict({"Xtable": np.full(1, 1.5 + 0.02j)}))
+  assert st2.bake_materials(wl) == {"Xtable": "Xtable2"}
+
+
+def test_bake_materials_grid_mismatch_and_film_refusal():
+  st = Navette_Structure([Layer(50.0, "TiO2")], {"TiO2": Group("TiO2", n_factor=2.0)},
+                         dict({"TiO2": np.full(5, 2.35 + 0j)}))
+  with pytest.raises(ValueError):
+    st.bake_materials(np.array([900., 1000.]))
+  st2 = Navette_Structure([Layer(50.0, "TiO2")], {"TiO2": Group("TiO2", n_factor=2.0)},
+                          dict({"TiO2": np.full(1, 2.35 + 0j)}))
+  with pytest.raises(ValueError):
+    st2.bake_films()  # n/k side must go through bake_materials
+
+
 # NIT-2: module docstrings live --------------------------------------------------
 def test_module_docstrings_present():
   assert models_mod.__doc__ and "Layer and Group" in models_mod.__doc__

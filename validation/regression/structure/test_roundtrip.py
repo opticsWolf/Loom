@@ -8,6 +8,7 @@ BUG-2: `validate()` never crashes; missing materials are reported.
 """
 
 import numpy as np
+import pytest
 
 from navette.structure import (
   DictMaterialProvider,
@@ -44,6 +45,64 @@ def test_layer_roundtrip_minimal():
   original = Layer(thickness=10.0, material_name="glass")
   back = Layer.from_state(original.get_state())
   assert (back.material, back.thickness) == ("glass", 10.0)
+
+
+def test_stale_schema_versions_refused():
+  from navette.structure.types import SCHEMA_VERSION
+  layer_state = _full_layer().get_state()
+  assert layer_state["schema_version"] == SCHEMA_VERSION
+  untagged = dict(layer_state)
+  del untagged["schema_version"]  # no past: untagged is malformed
+  with pytest.raises(ValueError):
+    Layer.from_state(untagged)
+  arch = Navette_Architect(materials=MATS)
+  arch.add_structure(Navette_Structure([Layer(10.0, "glass")], {}, None))
+  stale = arch.get_state()
+  stale["schema_version"] = SCHEMA_VERSION - 1
+  with pytest.raises(ValueError):
+    Navette_Architect.from_state(stale, materials=MATS)
+  future = arch.get_state()
+  future["schema_version"] = SCHEMA_VERSION + 999
+  with pytest.raises(ValueError):
+    Navette_Architect.from_state(future, materials=MATS)
+
+
+# Fingerprint: the exact serialized key set per entity, at the version it
+# was recorded at. If this fails, the key set changed — classify FIRST:
+# removed/renamed key or changed meaning  -> breaking: bump SCHEMA_VERSION,
+#   then update the fingerprint below;
+# purely additive key (unknown keys are ignored by every from_state, so old
+#   readers stay safe)                    -> update the fingerprint only.
+FINGERPRINT = {
+  "version": 1,
+  "Layer": ["coherent", "inh_delta", "inhomogen", "interface",
+              "interface_thickness", "layer_type", "material_name",
+              "needle", "optimize", "rough_type", "roughness",
+              "schema_version", "thickness"],
+  "Group": ["group_name", "inh_delta_summand", "inh_delta_error_params",
+              "inh_delta_error_type", "interface_error_params",
+              "interface_error_type", "interface_summand", "k_error_params",
+              "k_error_type", "k_factor", "n_error_params", "n_error_type",
+              "n_factor", "roughness_error_params", "roughness_error_type",
+              "roughness_summand", "schema_version", "thick_factor",
+              "thick_summand", "thickness_error_params",
+              "thickness_error_type", "error_mask", "optimization_mask"],
+  "Navette_Structure": ["groups", "layers", "schema_version"],
+  "Navette_Architect": ["blocks", "schema_version", "structures"],
+}
+
+
+def test_state_fingerprint():
+  from navette.structure.types import SCHEMA_VERSION
+  assert FINGERPRINT["version"] == SCHEMA_VERSION, \
+    "fingerprint recorded at a different version — re-classify (see comment)"
+  assert sorted(_full_layer().get_state()) == sorted(FINGERPRINT["Layer"])
+  assert sorted(Group("g").get_state()) == sorted(FINGERPRINT["Group"])
+  st = Navette_Structure([Layer(10.0, "glass")], {"glass": Group("glass")}, MATS)
+  assert sorted(st.get_state()) == sorted(FINGERPRINT["Navette_Structure"])
+  arch = Navette_Architect(materials=MATS)
+  arch.add_structure(st)
+  assert sorted(arch.get_state()) == sorted(FINGERPRINT["Navette_Architect"])
 
 
 def test_group_roundtrip():
