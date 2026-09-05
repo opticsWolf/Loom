@@ -46,6 +46,29 @@ class ErrorMask(IntEnum):
     INH_DELTA = 4
     INTERFACE = 5
 
+# State-schema version (structure get_state dicts + config states).
+# v1 = the current baseline. There is no past: untagged states are
+# malformed, not legacy. Bump on any breaking change (removed/renamed
+# keys, changed meaning of an existing key); purely additive keys are
+# safe without a bump (readers ignore unknown keys) — the fingerprint
+# test in validation/regression/structure/test_roundtrip.py enforces
+# this decision on every key-set change. Readers refuse anything but
+# the current version (no silent misreads).
+SCHEMA_VERSION = 1
+
+
+def check_schema_version(state, what: str) -> None:
+    """Refuse states not written at the current schema version."""
+    if "schema_version" not in state:
+        raise ValueError(f"{what}: missing schema_version tag (malformed state).")
+    found = state["schema_version"]
+    if found != SCHEMA_VERSION:
+        raise ValueError(
+            f"{what}: schema_version {found} unsupported "
+            f"(this code reads {SCHEMA_VERSION}); refusing a stale state."
+        )
+
+
 WARNING_PREFIX = "warning: "
 
 

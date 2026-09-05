@@ -12,9 +12,10 @@ convention — files authored when roughness was recorded in Angstrom
 read 10x too small; there is no auto-detection, convert old files.
 """
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+import re
 import numpy as np
 
-from .types import OptMask, RoughnessType, SolverArrays, WARNING_PREFIX, is_warning
+from .types import OptMask, RoughnessType, SolverArrays, WARNING_PREFIX, is_warning, SCHEMA_VERSION, check_schema_version
 from .materials import DictMaterialProvider, MaterialProvider
 from .models import Group, Layer
 from .expander import _DEFAULT_GROUP, _LayerExpander
@@ -191,6 +192,7 @@ class Navette_Structure:
     def get_state(self) -> Dict[str, Any]:
         """Serialize layers, groups and materials to a plain dict."""
         return {
+            "schema_version": SCHEMA_VERSION,
             "layers": [layer.get_state() for layer in self.layer_list],
             "groups": {name: group.get_state() for name, group in self.group_dict.items()},
         }
@@ -198,6 +200,7 @@ class Navette_Structure:
     @classmethod
     def from_state(cls, state: Dict[str, Any], materials: Optional[Union[MaterialProvider, Dict[str, Any]]] = None) -> "Navette_Structure":
         """Rebuild a structure from :meth:`get_state` output."""
+        check_schema_version(state, "Navette_Structure")
         layers = [Layer.from_state(ls) for ls in state.get("layers", [])]
         groups = {name: Group.from_state(gs) for name, gs in state.get("groups", {}).items()}
         return cls(layer_list=layers, group_dict=groups, materials=materials)
@@ -296,9 +299,126 @@ class Navette_Structure:
                 new.group_dict[name] = group
         return new
 
+    @staticmethod
+    def _next_table_name(name: str, taken) -> str:
+        """Baked-material name: `X` -> `X_table`; `X_table[N]` -> `X_table[N+1]`.
+
+        Appends `_table` unless the name already ends in `table` (any case)
+        with an optional version number, which is then incremented
+        (`TiO2_table` -> `TiO2_table2`). Skips taken names by iterating.
+        """
+        candidate = name
+        while True:
+            m = re.search(r"table(\d*)$", candidate, re.IGNORECASE)
+            if not m:
+                candidate = f"{candidate}_table"
+            else:
+                stem, num = candidate[:m.start()], m.group(1)
+                candidate = f"{stem}table{(int(num) + 1) if num else 2}"
+            if candidate not in taken:
+                return candidate
+
+    def bake_materials(self, wavelengths) -> Dict[str, str]:
+        """Fold group n/k scaling into new Table materials (material baking).
+
+        For every governed material with scaling active: evaluate the base
+        nk, apply independent scaling, and register a grid-carrying `Table`
+        spec under a fresh `_table[N]` name; governed layers are renamed
+        and the group's n/k factors reset to (1, 1). `wavelengths` must be
+        the grid the provider's arrays live on (arrays are grid-implicit;
+        the Table spec replays them exactly there and interpolates
+        elsewhere). Registers into the structure's own DictMaterialProvider
+        (establishing its grid when unset); anything else raises.
+        Returns the old->new material-name mapping.
+        """
+        from navette.materials import MaterialSpec
+        if self._materials is None:
+            raise ValueError("bake_materials: no material provider set.")
+        if not isinstance(self._materials, DictMaterialProvider):
+            raise ValueError("bake_materials: needs a DictMaterialProvider to register into.")
+        wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64)).ravel()
+        if wl.size == 0:
+            raise ValueError("bake_materials: wavelengths must be non-empty.")
+        mapping: Dict[str, str] = {}
+        for material in sorted({layer.material for layer in self.layer_list}):
+            group = self.group_dict.get(material)
+            if group is None or (group.n_factor == 1.0 and group.k_factor == 1.0):
+                continue
+            base = np.asarray(self._materials.get_nk(material), dtype=np.complex128).ravel()
+            if base.shape[0] != wl.shape[0]:
+                raise ValueError(f"bake_materials: '{material}' has {base.shape[0]} points, grid has {wl.shape[0]}.")
+            nk = base.real * group.n_factor + 1j * (base.imag * group.k_factor)
+            taken = set(self._materials._dict) | set(self.group_dict)
+            new_name = self._next_table_name(material, taken)
+            self._materials._dict[new_name] = MaterialSpec("Table", {
+                "n_data": (wl.copy(), np.ascontiguousarray(nk.real)),
+                "k_data": (wl.copy(), np.ascontiguousarray(nk.imag)),
+            })
+            mapping[material] = new_name
+        if self._materials._wavelength is None:
+            # Establish the provider grid so the new specs resolve. Arrays
+            # already served need no grid; other spec entries gain one.
+            self._materials._wavelength = wl.copy()
+        for old, new in mapping.items():
+            # The group follows its material: masks and error models keep
+            # governing the baked table under the new name (convention:
+            # group name equals governed material).
+            group = self.group_dict.pop(old)
+            group.n_factor, group.k_factor = 1.0, 1.0
+            group.group_name = new
+            self.group_dict[new] = group
+            self.replace_material(old, new)
+        return mapping
+
     def get_group_for_material(self, material_name: str) -> Group:
         """Group governing a material (independent copy — safe to mutate)."""
         return self.group_dict.get(material_name, _DEFAULT_GROUP).clone()
+
+    def bake_films(self) -> int:
+        """Fold group film adjustments into the layers (film baking).
+
+        Per governed layer: `thickness = max(0, t*thick_factor + thick_summand)`
+        (property setter, so graded sub-layer counts follow the refinement
+        rule), `inh_delta += summand`, `roughness = max(0, roughness +
+        summand)`, `interface_thickness += summand` — the nominal expansion
+        math, so re-expanding is bit-identical except for graded films,
+        whose discretization re-follows the new thickness (same totals,
+        same grading endpoints). Consumed summands/factors
+        reset (`thick_factor = 1`, summands = 0); masks and error models
+        are policy and stay untouched. Groups governing no layer are left
+        alone. Raises when a governing group has n/k scaling active: bake
+        those via `bake_materials()` first (material baking has a home for
+        them; film baking does not).
+        Returns the number of layers baked.
+        """
+        used: Dict[int, Group] = {}
+        for layer in self.layer_list:
+            group = self.group_dict.get(layer.material)
+            if group is not None:
+                used[id(group)] = group
+        for group in used.values():
+            if group.n_factor != 1.0 or group.k_factor != 1.0:
+                raise ValueError(
+                    f"bake_films: group '{group.group_name}' has n/k scaling "
+                    f"({group.n_factor}, {group.k_factor}); "
+                    f"run bake_materials() first.")
+        baked = 0
+        for layer in self.layer_list:
+            group = self.group_dict.get(layer.material)
+            if group is None:
+                continue
+            layer.thickness = max(0.0, layer.thickness * group.thick_factor + group.thick_summand)
+            layer.inh_delta = layer.inh_delta + group.inh_delta_summand
+            layer.roughness = max(0.0, layer.roughness + group.roughness_summand)
+            layer.interface_thickness = layer.interface_thickness + group.interface_summand
+            used[id(group)] = group
+            baked += 1
+        for group in used.values():
+            group.thick_factor, group.thick_summand = 1.0, 0.0
+            group.inh_delta_summand = 0.0
+            group.roughness_summand = 0.0
+            group.interface_summand = 0.0
+        return baked
 
     def __contains__(self, material_name: str) -> bool:
         return any(layer.material == material_name for layer in self.layer_list)

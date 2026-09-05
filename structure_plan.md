@@ -326,6 +326,26 @@ forward-predecessor and must travel under reversal.
   implemented: overhang legalized (NIT-3 `>=` error dropped, clamp is THE
   policy), carve-explained zero rows exempted from the dry-run check via
   spans. 32 regression tests green.
+- 2026-09-05: schema version tag — `SCHEMA_VERSION = 1` (clean slate, no
+  past: untagged states are malformed, not legacy) in `types.py`; carried
+  by all four state dicts + both pydantic states and refused on read
+  (missing/stale/future all raise). Fingerprint test pins per-entity key
+  sets with classify-first guidance (breaking→bump, additive→update).
+  65 green.
+- 2026-09-05: bake split — `bake_films()` (renamed, no compat) +
+  `bake_materials(wavelengths)` (grid-carrying Table specs, `_table[N]`
+  naming with provider+group collision skip, layers renamed, n/k reset).
+  Groups follow their material through the rename (masks/errors survive).
+  73 validation green.
+- 2026-09-05: group factor baking — `bake_groups()` on structure +
+  architect folds thickness/grading/roughness/interface adjustments into
+  layers and resets factors (masks/policy untouched); refuses n/k-scaled
+  groups atomically (pre-check, nothing half-baked). Graded films
+  rediscretize at the new thickness (totals/endpoints identical, counts
+  follow the rule) — flat stacks bit-identical. 41 regression green.
+- 2026-09-05: no backward compatibility required (user) — migration shims
+  dropped from scope; `LayerConfig`/`GroupConfig` set `extra="forbid"` so
+  stale/typo keys raise instead of silently dropping (63 green).
 - 2026-09-05: severity channel — `validate()` entries starting with
   `warning:` (overhang, orphan groups) are advisory: `gate_validation`
   re-emits them via `warnings.warn` and only raises on errors. Applies
