@@ -36,6 +36,7 @@ Phase 5 improvements:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 from typing import (
     Any,
     Dict,
@@ -49,7 +50,7 @@ from typing import (
 
 import numpy as np
 
-from .structure import Navette_Structure
+from .structure import Navette_Structure, gate_validation
 from .models import Layer, Group
 from .materials import MaterialProvider, DictMaterialProvider
 from .types import BlockKind, LayerType, OptMask, SolverArrays
@@ -142,8 +143,11 @@ class Navette_Architect:
             self._materials = materials
 
     def __len__(self) -> int:
-        """Return the total number of logical layers (sum over blocks)."""
-        return self.get_global_layer_count()
+        """Number of blocks (matches `__getitem__`/`__iter__`/`block_count`).
+
+        Use :meth:`get_global_layer_count` for the logical-layer total.
+        """
+        return len(self._blocks)
 
     def __getitem__(self, index: int) -> StructureBlock:
         return self._blocks[index]
@@ -217,6 +221,12 @@ class Navette_Architect:
             self._materials = value
         # Propagate to all structures
         for block in self._blocks:
+            if block.structure.materials is not None and block.structure.materials is not self._materials:
+                warnings.warn(
+                    "Navette_Architect.materials: overwriting a structure's distinct provider; "
+                    "same names may now resolve differently.",
+                    stacklevel=2,
+                )
             block.structure.materials = self._materials
 
     # Backward compat
@@ -482,9 +492,7 @@ class Navette_Architect:
         """
         if not self._blocks:
             raise ValueError("Navette_Architect is empty.")
-        issues = self.validate()
-        if issues:
-            raise ValueError("Navette_Architect invalid:\n" + "\n".join(issues))
+        gate_validation(self.validate(), "Navette_Architect")
         if self._materials is None:
             raise ValueError("No material provider set.")
 
@@ -509,9 +517,7 @@ class Navette_Architect:
         """
         if not self._blocks:
             raise ValueError("Navette_Architect is empty.")
-        issues = self.validate()
-        if issues:
-            raise ValueError("Navette_Architect invalid:\n" + "\n".join(issues))
+        gate_validation(self.validate(), "Navette_Architect")
         if self._materials is None:
             raise ValueError("No material provider set.")
 
@@ -528,8 +534,11 @@ class Navette_Architect:
         self, global_idx: int
     ) -> Tuple[Navette_Structure, int]:
         """
-        Map a global simulation layer index to the specific Navette_Structure
-        and its internal layer index.
+        Map a global *logical* layer index to the specific
+        Navette_Structure and its internal layer index (logical space:
+        one slot per Layer, repeat-aware; sub-layer expansion and
+        interface slices do NOT shift it — see
+        :meth:`map_solver_index_to_layer` for solver rows).
 
         Returns
         -------
@@ -559,6 +568,30 @@ class Navette_Architect:
             f"(total logical layers: {current})"
         )
 
+    def map_solver_index_to_layer(
+        self, solver_idx: int
+    ) -> Tuple[Navette_Structure, int]:
+        """Map a solver row index (post-expansion) to its logical layer.
+
+        Expands nominally once and binary-locates the row's span, then
+        delegates to :meth:`map_global_index_to_layer`. Interface slices
+        resolve to their carrier's logical layer.
+        """
+        if self._materials is None:
+            raise ValueError("No material provider set.")
+        _, spans = _LayerExpander.expand(
+            self._iter_layers(),
+            self._materials,
+            self._merged_group_dict(),
+            return_spans=True,
+        )
+        for start, end, logical in spans:
+            if start <= solver_idx < end:
+                return self.map_global_index_to_layer(logical)
+        raise IndexError(
+            f"Solver index {solver_idx} out of bounds."
+        )
+
 
     # -- layer manipulation at global indices ------------------------------
     def get_layer_at_global(self, global_idx: int) -> Layer:
@@ -581,7 +614,16 @@ class Navette_Architect:
     def split_layer_at_global(
         self, global_idx: int, split_ratio: float = 0.5
     ) -> None:
-        """Split the layer at global_idx into two layers of the same material."""
+        """Split the layer at global_idx into two layers of the same material.
+
+        Only the thickness splits by ratio; `interface_thickness` (like
+        roughness and grading) is a process parameter of the film and is
+        preserved verbatim on both halves, so re-growing a half restores
+        the intended boundary (e.g. 3 nm half + 5 nm interface expands to
+        a 3 nm slice + 0 nm bulk via the expander clamp, and growing back
+        to 8 nm gives 3 nm bulk + 5 nm slice). Contrast
+        `duplicate_layer_at_global`, which clones everything verbatim.
+        """
         struct, local = self.map_global_index_to_layer(global_idx)
         original = struct.layer_list[local]
 
@@ -594,7 +636,7 @@ class Navette_Architect:
         struct.layer_list.insert(local + 1, l2)
 
     def duplicate_layer_at_global(self, global_idx: int) -> None:
-        """Duplicate the layer at the global index."""
+        """Duplicate the layer at the global index (verbatim clone)."""
         struct, local = self.map_global_index_to_layer(global_idx)
         struct.layer_list.insert(local, struct.layer_list[local].clone())
 
@@ -722,7 +764,7 @@ class Navette_Architect:
         ]
 
         # Rebuild blocks with structure references
-        for bs in state.get("blocks", []):
+        for bi, bs in enumerate(state.get("blocks", [])):
             ref = bs.get("structure_ref", 0)
             if 0 <= ref < len(structs):
                 arch.add_structure(
@@ -732,4 +774,6 @@ class Navette_Architect:
                     label=bs.get("label", ""),
                     kind=bs.get("kind", BlockKind.STACK),
                 )
+            else:
+                raise ValueError(f"from_state: block {bi} has out-of-range structure_ref {ref}.")
         return arch

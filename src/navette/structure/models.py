@@ -1,10 +1,4 @@
 # -*- coding: utf-8 -*-
-from typing import Any, Dict, List, Optional, Tuple, Union
-import warnings
-import numpy as np
-
-from .types import INT_TYPE, ErrorType, LayerType, OptMask, RoughnessType, ErrorMask, LayerMask
-
 """Layer and Group: the Python-side thin-film stack model.
 
 A :class:`Layer` is one physical film (material name, thickness, coherence
@@ -12,6 +6,12 @@ and roughness flags); a :class:`Group` scales/couples layers for optimization
 and error analysis. Both serialize via ``get_state``/``from_state`` for
 config files, and the expander flattens them into solver arrays.
 """
+from typing import Any, Dict, List, Optional, Tuple, Union
+import copy
+import warnings
+import numpy as np
+
+from .types import INT_TYPE, ErrorType, LayerType, OptMask, RoughnessType, ErrorMask, LayerMask
 
 class Layer:
     """One physical film: material, thickness [nm], coherence/roughness flags.
@@ -240,7 +240,10 @@ class Group:
 
     @staticmethod
     def _apply_error(value: Any, error_type: int, error_params: Dict[str, float], rng: Optional[np.random.Generator] = None) -> Any:
-        rng = rng or np.random
+        # NOTE: scalar RNG draws apply ONE perturbation across the whole nk
+        # array — a systematic fabrication offset, not per-wavelength noise.
+        if rng is None:
+            rng = np.random
         if error_type == ErrorType.GAUSSIAN:
             return value + rng.normal(error_params["abs_mean_delta_g"], error_params["abs_std_dev"]) + \
                    rng.normal(error_params["rel_mean_delta_g"], error_params["rel_std_dev"]) * value
@@ -279,10 +282,11 @@ class Group:
 
     @classmethod
     def from_state(cls, state: Dict[str, Any]) -> "Group":
-        """Rebuild a group from :meth:`get_state` output."""
+        """Rebuild a group from :meth:`get_state` output (deep-copied)."""
         obj = cls(state.get("group_name", "default"))
         for key, value in state.items():
-            if hasattr(obj, key): setattr(obj, key, value)
+            if hasattr(obj, key):
+                setattr(obj, key, copy.deepcopy(value) if isinstance(value, (list, dict)) else value)
         return obj
 
     def set_properties(self, properties: Dict[str, Any]) -> None:

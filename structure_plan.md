@@ -311,3 +311,23 @@ forward-predecessor and must travel under reversal.
   live THICKNESS consumer, orphan-group flag, schema nm/enum fixes),
   smell fixes (exact total_sub_layers, enum coercion in set_properties).
   Full workspace: 249 cargo + 28 pytest + 11/11 parity ALL OK.
+- 2026-09-05: bug_fix_plan sweep [V] — BUG-D (solver→logical resolver via
+  expander return_spans + docstring contract), BUG-E (10 committed
+  inversion tests), WART-1/2/3/5/6/7, NIT-1/2/3/5/6/7 (NIT-6 caught live
+  by the new round-trip test). Two span-tracking bugs caught by the new
+  tests during implementation: slices excluded from resolution spans
+  (fixed: span starts before the slice) and donor carve rescaling the
+  slice row (fixed: separate bulk_spans for carves). Commit layers:
+  `validation/regression/structure/` (31 tests) now pins the whole
+  plan. Full workspace: 249 cargo + 59 pytest + 11/11 parity ALL OK.
+- 2026-09-05: WART-5 direction reversed on review — interface_thickness is a
+  process parameter (preserved verbatim on split, like roughness), not a
+  divisible budget; ratio-splitting would corrupt re-growth. Consequences
+  implemented: overhang legalized (NIT-3 `>=` error dropped, clamp is THE
+  policy), carve-explained zero rows exempted from the dry-run check via
+  spans. 32 regression tests green.
+- 2026-09-05: severity channel — `validate()` entries starting with
+  `warning:` (overhang, orphan groups) are advisory: `gate_validation`
+  re-emits them via `warnings.warn` and only raises on errors. Applies
+  to structure/architect getters and the bridge. 35 regression tests,
+  63 validation green.
