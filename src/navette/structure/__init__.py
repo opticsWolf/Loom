@@ -23,7 +23,7 @@ from .types import (
 )
 from .materials import MaterialProvider, DictMaterialProvider, MaterialObjectProvider
 from .models import Layer, Group
-from .structure import Navette_Structure
+from .structure import Navette_Structure, gate_validation
 from .architect import Navette_Architect, StructureBlock
 from .expander import _LayerExpander
 
@@ -81,9 +81,7 @@ def solve_structure(
   from navette.smatrix.smatrix import ScatterMatrix  # lazy: needs native
 
   if isinstance(source, Navette_Structure):
-    issues = source.validate()
-    if issues:
-      raise ValueError("solve_structure: invalid structure:\n" + "\n".join(issues))
+    gate_validation(source.validate(), "solve_structure")
   sa = source.get_error_solver_inputs(rng=rng) if errors \
     else source.get_solver_inputs()
   wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64)).ravel()

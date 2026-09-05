@@ -1,25 +1,4 @@
 # -*- coding: utf-8 -*-
-from typing import Dict, Iterator, List, Optional, Tuple, Union
-import numpy as np
-
-try:
-  from navette._materials import ema_looyenga as _looyenga_eps
-  from navette._materials import eps_to_nk as _eps_to_nk
-  _NATIVE_EMA = True
-except ImportError:  # pragma: no cover - native not built; numpy fallback below
-  _looyenga_eps = None  # type: ignore[assignment]
-  _eps_to_nk = None  # type: ignore[assignment]
-  _NATIVE_EMA = False
-
-
-def _looyenga_fallback(
-  n_i: np.ndarray, n_h: np.ndarray, f: float
-) -> np.ndarray:
-  """Landau-Lifshitz-Looyenga mixing (pure numpy; elementwise)."""
-  cbrt = (n_i * n_i) ** (1.0 / 3.0) * f + (n_h * n_h) ** (1.0 / 3.0) * (1.0 - f)
-  return cbrt ** 3.0
-
-
 """Flatten layers/groups/materials into engine :class:`SolverArrays`.
 
 The single (:class:`_LayerExpander`) traversal applies group scaling,
@@ -41,6 +20,25 @@ deterministic path and identically-distributed draws under Monte-Carlo.
 Forward (non-inverted) output is bit-identical to the legacy
 single-pass traversal.
 """
+from typing import Dict, Iterator, List, Optional, Tuple, Union
+import numpy as np
+
+try:
+  from navette._materials import ema_looyenga as _looyenga_eps
+  from navette._materials import eps_to_nk as _eps_to_nk
+  _NATIVE_EMA = True
+except ImportError:  # pragma: no cover - native not built; numpy fallback below
+  _looyenga_eps = None  # type: ignore[assignment]
+  _eps_to_nk = None  # type: ignore[assignment]
+  _NATIVE_EMA = False
+
+
+def _looyenga_fallback(
+  n_i: np.ndarray, n_h: np.ndarray, f: float
+) -> np.ndarray:
+  """Landau-Lifshitz-Looyenga mixing (pure numpy; elementwise)."""
+  cbrt = (n_i * n_i) ** (1.0 / 3.0) * f + (n_h * n_h) ** (1.0 / 3.0) * (1.0 - f)
+  return cbrt ** 3.0
 
 
 def looyenga_n(
@@ -90,7 +88,8 @@ class _LayerExpander:
         *,
         apply_errors: bool = False,
         rng: Optional[np.random.Generator] = None,
-    ) -> SolverArrays:
+        return_spans: bool = False,
+    ) -> Union[SolverArrays, Tuple[SolverArrays, List[Tuple[int, int, int]]]]:
         seq = list(layers)
         if not seq:
             raise ValueError("_LayerExpander.expand: No layers to expand. Empty layer sequence provided.")
@@ -127,6 +126,7 @@ class _LayerExpander:
         col_r_val: List[float] = []
         col_r_type: List[int] = []
         spans: List[Tuple[int, int]] = []
+        bulk_spans: List[Tuple[int, int]] = []  # carve ranges (bulk rows only)
         err_nk: List[np.ndarray] = []  # post-error ungraded bulk nk
         err_t: List[float] = []  # post-error bulk totals (pre-carve)
         prev_eff_nk: Optional[np.ndarray] = None
@@ -174,6 +174,10 @@ class _LayerExpander:
                 if apply_errors and group.error_mask[ErrorMask.ROUGHNESS]:
                     current_roughness = group.sr_roughness_error(current_roughness, layer_thickness, rng=rng)
 
+            # Entry span starts here so a leading interface slice resolves
+            # to its carrier's logical layer (see return_spans contract).
+            start = len(col_thick)
+
             # Plane slice (flag owner's group governs summand + draws).
             t_interface = 0.0
             if o is not None:
@@ -194,7 +198,7 @@ class _LayerExpander:
                         layer_thickness -= t_interface
                         interface_nk = looyenga_n(layer_nk, prev_eff_nk, 0.5)
                     else:
-                        start_o, end_o = spans[o]
+                        start_o, end_o = bulk_spans[o]
                         if carve_total > 0.0 and end_o > start_o:
                             scale = (carve_total - t_interface) / carve_total
                             for j in range(start_o, end_o):
@@ -207,7 +211,7 @@ class _LayerExpander:
                     col_r_val.append(0.0)
                     col_r_type.append(_NO_ROUGHNESS)
 
-            start = len(col_thick)
+            bulk_start = len(col_thick)
             if layer.inhomogen and layer.sub_layer_count > 1:
                 sub_div = layer.sub_layer_count
                 current_delta = (layer.inh_delta + group.inh_delta_summand) * 0.5
@@ -232,13 +236,21 @@ class _LayerExpander:
                 col_r_val.append(current_roughness)
                 col_r_type.append(rtype)
             spans.append((start, len(col_thick)))
+            bulk_spans.append((bulk_start, len(col_thick)))
 
             prev_eff_nk = layer_nk
 
-        return SolverArrays(
+        sa = SolverArrays(
             indices=np.vstack(col_nk).astype(COMPLEX_TYPE),
             thicknesses=np.array(col_thick, dtype=FLOAT_TYPE),
             incoherent_flags=np.array([not c for c in col_coh], dtype=np.bool_),
             rough_types=np.array(col_r_type, dtype=INT_TYPE),
             rough_vals=np.array(col_r_val, dtype=FLOAT_TYPE),
         )
+        if return_spans:
+            # (row_start, row_end, logical_index): interface slices belong
+            # to their carrier entry; logical indices count _iter_layers
+            # order (repeat-aware), matching map_global_index_to_layer.
+            spans_out = [(s, e, k) for k, (s, e) in enumerate(spans)]
+            return sa, spans_out
+        return sa

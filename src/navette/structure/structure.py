@@ -11,13 +11,26 @@ roughness sigma). State files store unitless numbers under this
 convention — files authored when roughness was recorded in Angstrom
 read 10x too small; there is no auto-detection, convert old files.
 """
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 import numpy as np
 
-from .types import OptMask, RoughnessType, SolverArrays
+from .types import OptMask, RoughnessType, SolverArrays, WARNING_PREFIX, is_warning
 from .materials import DictMaterialProvider, MaterialProvider
 from .models import Group, Layer
 from .expander import _DEFAULT_GROUP, _LayerExpander
+import warnings
+
+
+def gate_validation(issues: List[str], what: str) -> None:
+    """Solve gate shared by structures and architects: re-emit advisory
+    warnings via `warnings.warn` (flow continues), raise `ValueError` on
+    errors. See `Navette_Structure.validate` for the severity contract."""
+    for issue in issues:
+        if is_warning(issue):
+            warnings.warn(f"{what}: {issue}", stacklevel=3)
+    errs = [i for i in issues if not is_warning(i)]
+    if errs:
+        raise ValueError(f"{what} invalid:\n" + "\n".join(errs))
 
 class Navette_Structure:
     """Ordered stack of :class:`Layer` with groups and a material provider."""
@@ -54,7 +67,7 @@ class Navette_Structure:
     @active_material_dict.setter
     def active_material_dict(self, value: Any) -> None: self.materials = value
 
-    def validate(self) -> List[str]:
+    def _validate_impl(self) -> List[str]:
         """Check thicknesses, roughness and material coverage; returns error strings."""
         errors: List[str] = []
         if not self.layer_list:
@@ -70,8 +83,15 @@ class Navette_Structure:
                 RoughnessType(int(layer.rough_type))
             except (ValueError, TypeError):
                 errors.append(f"Layer {i} ({layer.material}): Unknown rough_type {layer.rough_type!r}.")
+            # Overhang (interface >= thickness) is LEGAL but suspicious:
+            # split transients deliberately keep the full definition on thin
+            # halves (clamped at expansion), while elsewhere it usually
+            # means a typo — advisory warning, never solve-blocking.
             if layer.interface and layer.interface_thickness >= layer.thickness:
-                errors.append(f"Layer {i} ({layer.material}): Interface thickness ({layer.interface_thickness}) >= layer thickness ({layer.thickness}).")
+                errors.append(f"{WARNING_PREFIX}Layer {i} ({layer.material}): Interface thickness "
+                              f"({layer.interface_thickness}) >= layer thickness ({layer.thickness}); clamped at expansion.")
+            if layer.interface_thickness < 0:
+                errors.append(f"Layer {i} ({layer.material}): Negative interface thickness {layer.interface_thickness} nm.")
             if self._materials and not self._materials.contains(layer.material):
                 errors.append(f"Layer {i}: Material '{layer.material}' not found in material provider.")
 
@@ -85,11 +105,13 @@ class Navette_Structure:
                 errors.extend(group.validate())
         for name in self.group_dict:
             if name not in governed:
-                errors.append(f"Group '{name}' governs no layer material (lookup is by material name; silent _DEFAULT_GROUP applies).")
+                errors.append(f"{WARNING_PREFIX}Group '{name}' governs no layer material (lookup is by material name; silent _DEFAULT_GROUP applies).")
 
         if self._materials and not any("not found in material provider" in e for e in errors):
             try:
-                sa = self._expand_arrays()
+                sa, spans = _LayerExpander.expand(
+                    ((layer, False) for layer in self.layer_list),
+                    self._materials, self.group_dict, return_spans=True)
             except Exception as exc:
                 errors.append(f"Nominal expansion failed: {exc}")
                 return errors
@@ -99,11 +121,47 @@ class Navette_Structure:
                 errors.append("Nominal expansion produced n < 0 (check provider data / group n_factor).")
             if np.any(sa.indices.imag < 0.0):
                 errors.append("Nominal expansion produced k < 0 (check provider data / group k_factor).")
-            interior = sa.thicknesses[1:-1] if sa.thicknesses.shape[0] > 2 else np.empty(0)
-            if interior.size and np.any(interior <= 0.0):
+            n_rows = sa.thicknesses.shape[0]
+            for j in range(1, max(n_rows - 1, 1)):
+                if sa.thicknesses[j] > 0.0:
+                    continue
+                if self._carve_explained(j, spans, sa.thicknesses):
+                    continue
                 errors.append("Nominal expansion produced interior zero-thickness rows "
                               "(group factors floored a film away; ambient/substrate may be 0).")
+                break
         return errors
+
+    def _carve_explained(self, row: int, spans, thicknesses) -> bool:
+        """True when a zero row is a clamped interface carve, not a floored film.
+
+        Split transients (thin half + full interface definition) legitimately
+        expand to a slice plus a 0 nm bulk: the slice row itself, or a bulk
+        block whose rows are all zero under an active interface flag.
+        """
+        for s, e, k in spans:
+            if not (s <= row < e) or k >= len(self.layer_list):
+                continue
+            if not self.layer_list[k].interface:
+                return False
+            if row == s:
+                return True  # degenerate zero-width slice row
+            return bool(np.all(thicknesses[s + 1:e] <= 0.0))
+        return False
+
+    def validate(self) -> List[str]:
+        """Collect every issue (empty if all good); never raises.
+
+        Entries starting with `WARNING_PREFIX` are advisory (typo signals,
+        legal transients): reported to the caller and re-emitted via
+        `warnings.warn` at solve time, but they never block solving.
+        Anything else is an error and fail-closed at the solve gate.
+        """
+        return self._validate_impl()
+
+    def _raise_if_errors(self, issues: List[str], what: str) -> None:
+        """Solve gate: re-emit warnings, raise on the error batch."""
+        gate_validation(issues, what)
 
     def _expand_arrays(self, *, apply_errors: bool = False, rng: Optional[np.random.Generator] = None) -> SolverArrays:
         """Unvalidated expansion core (validation lives in the callers)."""
@@ -113,16 +171,12 @@ class Navette_Structure:
 
     def get_solver_inputs(self) -> SolverArrays:
         """Flatten the stack to engine arrays (nominal values, no errors)."""
-        issues = self.validate()
-        if issues:
-            raise ValueError("Navette_Structure invalid:\n" + "\n".join(issues))
+        self._raise_if_errors(self.validate(), "Navette_Structure")
         return self._expand_arrays()
 
     def get_error_solver_inputs(self, rng: Optional[np.random.Generator] = None) -> SolverArrays:
         """Flatten the stack with group fabrication errors drawn (see Group)."""
-        issues = self.validate()
-        if issues:
-            raise ValueError("Navette_Structure invalid:\n" + "\n".join(issues))
+        self._raise_if_errors(self.validate(), "Navette_Structure")
         return self._expand_arrays(apply_errors=True, rng=rng)
 
     def generate_simple_layer_list(self) -> List[List[Any]]:
@@ -149,7 +203,9 @@ class Navette_Structure:
         return cls(layer_list=layers, group_dict=groups, materials=materials)
 
     def clone(self) -> "Navette_Structure":
-        """Deep copy (layers, groups and provider state)."""
+        """Deep copy of layers and groups; the material provider is shared
+        by reference (one source of truth — contrast the architect's loud
+        aliasing warnings for structures)."""
         return Navette_Structure(
             layer_list=[layer.clone() for layer in self.layer_list],
             group_dict={name: group.clone() for name, group in self.group_dict.items()},
@@ -223,10 +279,13 @@ class Navette_Structure:
     def count_material(self, material_name: str) -> int:
         return sum(1 for layer in self.layer_list if layer.material == material_name)
 
-    def apply_to_all_layers(self, func: callable) -> None:
+    def apply_to_all_layers(self, func: Callable[[Layer], None]) -> None:
         for layer in self.layer_list: func(layer)
 
     def __add__(self, other: "Navette_Structure") -> "Navette_Structure":
+        if self._materials is not None and other._materials is not None \
+                and self._materials is not other._materials:
+            raise ValueError("Cannot merge structures with different material providers (same name could resolve differently).")
         new = self.clone()
         new.layer_list.extend(other.clone().layer_list)
         for name, group in other.group_dict.items():
@@ -238,7 +297,8 @@ class Navette_Structure:
         return new
 
     def get_group_for_material(self, material_name: str) -> Group:
-        return self.group_dict.get(material_name, _DEFAULT_GROUP)
+        """Group governing a material (independent copy — safe to mutate)."""
+        return self.group_dict.get(material_name, _DEFAULT_GROUP).clone()
 
     def __contains__(self, material_name: str) -> bool:
         return any(layer.material == material_name for layer in self.layer_list)

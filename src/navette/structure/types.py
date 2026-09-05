@@ -46,6 +46,14 @@ class ErrorMask(IntEnum):
     INH_DELTA = 4
     INTERFACE = 5
 
+WARNING_PREFIX = "warning: "
+
+
+def is_warning(issue: str) -> bool:
+    """True for advisory validation issues (reported, never solve-blocking)."""
+    return isinstance(issue, str) and issue.startswith(WARNING_PREFIX)
+
+
 class LayerMask(IntEnum):
     """Slots of the per-layer status mask produced by :meth:`Layer.mask`."""
     ACTIVE = 0
