@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import warnings
 import numpy as np
 
-from .types import INT_TYPE, ErrorType, RoughnessType, ErrorMask, LayerMask
+from .types import INT_TYPE, ErrorType, LayerType, OptMask, RoughnessType, ErrorMask, LayerMask
 
 """Layer and Group: the Python-side thin-film stack model.
 
@@ -16,13 +16,16 @@ config files, and the expander flattens them into solver arrays.
 class Layer:
     """One physical film: material, thickness [nm], coherence/roughness flags.
 
-    ``thickness``/``inhomogen``/``inh_delta`` setters keep the solver
-    sub-layer count in sync. Call the layer to get ``(material, thickness)``.
+    Length units are nanometres everywhere: ``thickness``,
+    ``interface_thickness`` and ``roughness`` (rms sigma, same unit as the
+    solver wavelengths) are all [nm]. ``thickness``/``inhomogen``/
+    ``inh_delta`` setters keep the solver sub-layer count in sync. Call
+    the layer to get ``(material, thickness)``.
     """
     __slots__ = (
         "material", "coherent", "_inhomogen", "rough_type", "_inh_delta",
         "roughness", "interface", "interface_thickness", "_thickness",
-        "optimize", "needle", "layer_typ", "sub_layer_count",
+        "optimize", "needle", "layer_type", "sub_layer_count",
     )
 
     def __init__(
@@ -38,12 +41,15 @@ class Layer:
         interface_thickness: float = 0.0,
         optimize: bool = True,
         needle: bool = True,
-        layer_typ: int = 1,
+        layer_type: Union[int, LayerType] = LayerType.FILM,
     ) -> None:
         self.material = material_name
         self.coherent = coherent
         self._inhomogen = inhomogen
-        self.rough_type = rough_type
+        try:
+            self.rough_type = RoughnessType(rough_type)
+        except ValueError:
+            raise ValueError(f"Layer: unknown rough_type {rough_type!r} (see RoughnessType).") from None
         self._inh_delta = inh_delta
         self.roughness = roughness
         self.interface = interface
@@ -51,7 +57,10 @@ class Layer:
         self._thickness = float(thickness)
         self.optimize = optimize
         self.needle = needle
-        self.layer_typ = layer_typ
+        try:
+            self.layer_type = LayerType(layer_type)
+        except ValueError:
+            raise ValueError(f"Layer: unknown layer_type {layer_type!r} (see LayerType).") from None
         self._refine_layer_count()
 
     def __call__(self) -> Tuple[str, float]:
@@ -105,7 +114,7 @@ class Layer:
         """Serialize all layer properties to a plain dict (config files)."""
         return {
             "thickness": self._thickness,
-            "material": self.material,
+            "material_name": self.material,
             "coherent": self.coherent,
             "inhomogen": self._inhomogen,
             "inh_delta": self._inh_delta,
@@ -115,7 +124,7 @@ class Layer:
             "interface_thickness": self.interface_thickness,
             "optimize": self.optimize,
             "needle": self.needle,
-            "layer_typ": self.layer_typ,
+            "layer_type": int(self.layer_type),
         }
 
     @classmethod
@@ -131,6 +140,13 @@ class Layer:
             if not hasattr(self, key):
                 warnings.warn(f"Layer.set_properties: ignoring unknown attribute '{key}'.", stacklevel=2)
                 continue
+            if key in ("rough_type", "layer_type"):
+                enum = RoughnessType if key == "rough_type" else LayerType
+                try:
+                    value = enum(value)
+                except ValueError:
+                    warnings.warn(f"Layer.set_properties: unknown {key} {value!r}; ignoring.", stacklevel=2)
+                    continue
             try:
                 setattr(self, key, value)
             except AttributeError:
@@ -146,7 +162,7 @@ class Layer:
         return obj
 
     def __repr__(self) -> str:
-        return f"Layer(mat='{self.material}', d={self._thickness:.2f}nm, rough={self.roughness:.2f}A, opt={self.optimize})"
+        return f"Layer(mat='{self.material}', d={self._thickness:.2f}nm, rough={self.roughness:.2f}nm, opt={self.optimize})"
 
 
 class Group:
@@ -173,10 +189,19 @@ class Group:
         "abs_mean_delta_h": 0.0, "abs_variance": 0.01,
         "rel_mean_delta_h": 0.0, "rel_variance": 1.0,
     }
+    # Roughness-channel defaults: identical shape, `abs_*` values x0.1 so
+    # the physical error magnitude is unchanged by the A -> nm switch
+    # (0.01 A == 0.001 nm). `rel_*` params are dimensionless: untouched.
+    _DEFAULT_ROUGHNESS_ERROR_PARAMS: Dict[str, float] = {
+        "abs_mean_delta_g": 0.0, "abs_std_dev": 0.001,
+        "rel_mean_delta_g": 0.0, "rel_std_dev": 1.0,
+        "abs_mean_delta_h": 0.0, "abs_variance": 0.001,
+        "rel_mean_delta_h": 0.0, "rel_variance": 1.0,
+    }
 
     def __init__(
         self, group_name: str, thick_factor: float = 1.0, thick_summand: float = 0.0,
-        n_factor: float = 1.0, k_factor: float = 0.0, inh_delta_summand: float = 0.0,
+        n_factor: float = 1.0, k_factor: float = 1.0, inh_delta_summand: float = 0.0,
         roughness_summand: float = 0.0, interface_summand: float = 0.0,
     ) -> None:
         self.group_name = group_name
@@ -187,15 +212,31 @@ class Group:
         self.interface_summand = interface_summand
 
         self.error_mask = [0] * len(ErrorMask)
-        self.optimization_mask = [0] * 7
+        self.optimization_mask = [1] * len(OptMask)
         
         for err_attr in ["thickness", "n", "k", "inh_delta", "roughness", "interface"]:
             setattr(self, f"{err_attr}_error_type", ErrorType.GAUSSIAN)
-            setattr(self, f"{err_attr}_error_params", self._DEFAULT_ERROR_PARAMS.copy())
+            if err_attr == "roughness":
+                setattr(self, f"{err_attr}_error_params", self._DEFAULT_ROUGHNESS_ERROR_PARAMS.copy())
+            else:
+                setattr(self, f"{err_attr}_error_params", self._DEFAULT_ERROR_PARAMS.copy())
 
     @property
     def nk_factor(self) -> complex:
         return complex(self.n_factor, self.k_factor)
+
+    def validate(self) -> List[str]:
+        """Check factor domains (identity (1, 1); negatives unphysical)."""
+        issues: List[str] = []
+        if not (self.thick_factor >= 0.0):
+            issues.append(f"Group '{self.group_name}': thick_factor {self.thick_factor} < 0 (NaN counts as invalid).")
+        if not (self.n_factor >= 0.0):
+            issues.append(f"Group '{self.group_name}': n_factor {self.n_factor} < 0 (no negative-index media).")
+        if not (self.k_factor >= 0.0):
+            issues.append(f"Group '{self.group_name}': k_factor {self.k_factor} < 0 (no gain media).")
+        if len(self.optimization_mask) != len(OptMask) or any(v not in (0, 1) for v in self.optimization_mask):
+            issues.append(f"Group '{self.group_name}': optimization_mask must be {len(OptMask)} binary entries (see OptMask).")
+        return issues
 
     @staticmethod
     def _apply_error(value: Any, error_type: int, error_params: Dict[str, float], rng: Optional[np.random.Generator] = None) -> Any:
@@ -220,10 +261,10 @@ class Group:
         """Perturbed grading strength."""
         return self._apply_error(value, self.inh_delta_error_type, self.inh_delta_error_params, rng=rng)
     def sr_roughness_error(self, value: float, thickness: float, rng: Optional[np.random.Generator] = None) -> float:
-        """Perturbed surface roughness (floored at 0)."""
+        """Perturbed surface roughness [nm] (floored at 0)."""
         return max(0.0, self._apply_error(value, self.roughness_error_type, self.roughness_error_params, rng=rng))
     def interface_error(self, value: float, thickness: float, rng: Optional[np.random.Generator] = None) -> float:
-        """Perturbed interface width (floored at 0)."""
+        """Perturbed interface width [nm] (floored at 0)."""
         return max(0.0, self._apply_error(value, self.interface_error_type, self.interface_error_params, rng=rng))
     def nk_error(self, nk_value: complex, rng: Optional[np.random.Generator] = None) -> complex:
         """Perturbed index with n floored at 0 (k untouched by the floor)."""

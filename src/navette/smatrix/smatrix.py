@@ -157,18 +157,9 @@ class Pol(IntEnum):
     P = 1
 
 
-class RoughnessType(IntEnum):
-    """Interface roughness form factor W(q) (see native ``w_function``).
-
-    NONE: ideal interface. LINEAR/STEP/EXPONENTIAL/GAUSSIAN: analytic
-    graded-index profiles. NEVOT_CROCE: Névot-Croce X-ray form factor.
-    """
-    NONE = 0
-    LINEAR = 1
-    STEP = 2
-    EXPONENTIAL = 3
-    GAUSSIAN = 4
-    NEVOT_CROCE = 5
+# Canonical definition lives in navette.structure.types (pure-Python home);
+# re-exported here so the engine-side API is unchanged.
+from navette.structure.types import RoughnessType
 
 
 # Maps each request bit to the output dict key(s) the engine emits for it. Used

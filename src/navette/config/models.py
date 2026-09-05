@@ -128,15 +128,15 @@ class LayerConfig(BaseModel):
     material_code: str
     thickness_nm: float = Field(gt=0)
     coherent: bool = True
-    roughness_angstrom: float = Field(default=0.0, ge=0)
-    rough_type: int = Field(default=0, ge=0, le=3)
+    roughness_nm: float = Field(default=0.0, ge=0)
+    rough_type: int = Field(default=0, ge=0, le=5)
     inhomogen: bool = False
     inh_delta: float = Field(default=0.1, ge=0, le=1)
     interface: bool = False
     interface_thickness_nm: float = Field(default=0.0, ge=0)
     optimize: bool = True
     needle: bool = True
-    layer_type: int = Field(default=1, ge=0)
+    layer_type: int = Field(default=1, ge=0, le=2, description="LayerType: 0=AMBIENT, 1=FILM, 2=SUBSTRATE")
 
 # -------------------------------------------------------------------------
 # Group model (error parameters)
@@ -158,12 +158,19 @@ class GroupConfig(BaseModel):
     thick_factor: float = 1.0
     thick_summand: float = 0.0
     n_factor: float = 1.0
-    k_factor: float = 0.0
+    k_factor: float = 1.0
     inh_delta_summand: float = 0.0
     roughness_summand: float = 0.0
     interface_summand: float = 0.0
     error_mask: List[int] = Field(default_factory=lambda: [0]*6)
-    optimization_mask: List[int] = Field(default_factory=lambda: [0]*7)
+    optimization_mask: List[int] = Field(default_factory=lambda: [1]*7)
+
+    @field_validator("optimization_mask")
+    @classmethod
+    def _check_opt_mask(cls, v):
+        if len(v) != 7 or any(x not in (0, 1) for x in v):
+            raise ValueError("optimization_mask must be 7 binary entries (see OptMask).")
+        return v
     thickness_error_type: int = 0
     n_error_type: int = 0
     k_error_type: int = 0
