@@ -88,8 +88,8 @@ pub fn solve_coherent_block_fields(
     ))
 }
 
-// ---- shared solution emit (used by core_engine + PySolver) ----
-fn solution_to_dict(
+// ---- shared solution emit (used by core_engine + PySolver + structure) ----
+pub(crate) fn solution_to_dict(
     py: Python<'_>,
     sol: &navette::smatrix::solver::Solution,
 ) -> PyResult<Py<PyDict>> {

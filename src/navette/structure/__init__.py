@@ -121,36 +121,31 @@ def solve_structure(
   ``request=None`` returns reflectance/transmittance; pass a
   ``Request`` mask for :meth:`compute` output instead.
   """
-  from navette.smatrix.smatrix import ScatterMatrix  # lazy: needs native
+  # Thin over the native solve: expansion + provider snapshot stay
+  # Python-side (providers port in R2); grid check, half-space warning
+  # and the solve itself run in Rust via `_structure.solve_arrays_fn`.
+  from navette._structure import solve_arrays_fn as _solve_arrays  # lazy: needs native
+  from navette._smatrix import solver_rt_request as _rt_request  # lazy: needs native
 
   if isinstance(source, Navette_Structure):
     gate_validation(source.validate(), "solve_structure")
   sa = source.get_error_solver_inputs(rng=rng) if errors \
     else source.get_solver_inputs()
   wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64)).ravel()
-  if sa.indices.shape != (sa.thicknesses.shape[0], wl.size):
-    raise ValueError(
-      f"solve_structure: provider grid mismatch: solver arrays "
-      f"{sa.indices.shape} vs {sa.thicknesses.shape[0]} layers x {wl.size} wavelengths."
-    )
   _assert_provider_grids(source, wl)
-  if sa.thicknesses.shape[0] >= 2:
-    if sa.thicknesses[0] != 0.0 or sa.thicknesses[-1] != 0.0:
-      warnings.warn(
-        "solve_structure: first/last thickness is not 0 (ambient/substrate "
-        "convention); the engine treats row 0/last as half-spaces.",
-        stacklevel=2,
-      )
-  sm = ScatterMatrix(
-    sa.indices,
-    sa.thicknesses,
-    wavelengths=wl,
-    angles=angles,
-    incoherent_flags=np.asarray(sa.incoherent_flags, dtype=np.int32),
-    roughness_types=np.asarray(sa.rough_types, dtype=np.int32),
-    roughness_values=np.asarray(sa.rough_vals, dtype=np.float64),
-    **solver_opts,
+  angles_arr = np.ascontiguousarray(np.atleast_1d(np.asarray(angles, dtype=np.float64))).ravel()
+  known = {"coherence_mode", "angles_in_radians"}
+  unknown = set(solver_opts) - known
+  if unknown:
+    raise TypeError(f"solve_structure: unknown solver options {sorted(unknown)}.")
+  mask = _rt_request("u") if request is None else int(request)
+  out, warns = _solve_arrays(
+    sa, wl, angles_arr, mask,
+    radians=bool(solver_opts.get("angles_in_radians", False)),
+    coherence_mode=int(solver_opts.get("coherence_mode", 0)),
   )
-  if request is None:
-    return sm.reflectance_transmittance()
-  return sm.compute(request)
+  for w in warns:
+    warnings.warn(f"solve_structure: {w}", stacklevel=2)
+  if angles_arr.size != 1:
+    return dict(out)
+  return {k: v[0] for k, v in out.items()}

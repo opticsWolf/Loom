@@ -636,6 +636,53 @@ pub struct Solution {
 pub const DISP_SUFFIXES: [(&str, usize); 4] =
   [("GD", 0), ("GDD", 1), ("TOD", 2), ("FOD", 3)];
 
+/// Solve pre-expanded arrays (native `solve_structure` core): grid check,
+/// half-space convention warning, one solve. `indices` is `(n_rows,
+/// n_wavs)` row-major complex; returns `(solution, warnings)`.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_arrays(
+  indices: &[Complex64],
+  thicknesses: &[f64],
+  incoherent: &[bool],
+  rough_types: &[i32],
+  rough_vals: &[f64],
+  wavelengths: &[f64],
+  angles: &[f64],
+  radians: bool,
+  requested: u64,
+  coherence_mode: i32,
+) -> Result<(Solution, Vec<String>), String> {
+  let n_rows = thicknesses.len();
+  if indices.len() != n_rows * wavelengths.len() {
+    return Err(format!(
+      "solve_arrays: provider grid mismatch: solver arrays vs {n_rows} layers x {} wavelengths.",
+      wavelengths.len()
+    ));
+  }
+  let mut warnings = Vec::new();
+  if n_rows >= 2 && (thicknesses[0] != 0.0 || thicknesses[n_rows - 1] != 0.0) {
+    warnings.push(
+      "solve_arrays: first/last thickness is not 0 (ambient/substrate convention); \
+       the engine treats row 0/last as half-spaces."
+        .to_string(),
+    );
+  }
+  let inc: Vec<i32> = incoherent.iter().map(|b| i32::from(*b)).collect();
+  let solver = Solver::from_raw(
+    wavelengths,
+    angles,
+    radians,
+    indices,
+    n_rows,
+    Some(thicknesses),
+    Some(&inc),
+    Some(rough_types),
+    Some(rough_vals),
+    coherence_mode,
+  )?;
+  Ok((solver.solve(requested)?, warnings))
+}
+
 // ---------------------------------------------------------------------------
 // Needle gradients (moved verbatim from the PyO3 binding)
 // ---------------------------------------------------------------------------
@@ -1920,6 +1967,29 @@ mod tests {
     let (z, e, _, _, _) = prof.unwrap();
     assert_eq!(z.len(), e.len());
     assert!(!z.is_empty());
+  }
+
+  #[test]
+  fn solve_arrays_contract() {
+    use super::super::core_engine::REQ_RS;
+    let wl = vec![500.0, 600.0];
+    let idx = vec![
+      Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0),
+      Complex64::new(1.5, 0.0), Complex64::new(1.5, 0.0),
+    ];
+    // Grid mismatch refused.
+    assert!(super::solve_arrays(&idx, &[0.0, 0.0], &[false, false], &[0, 0], &[0.0, 0.0],
+      &[500.0], &[0.0], false, REQ_RS, 2).is_err());
+    // Clean half-spaces: no warnings, Rs = 0.04.
+    let (sol, warns) = super::solve_arrays(&idx, &[0.0, 0.0], &[false, false], &[0, 0], &[0.0, 0.0],
+      &wl, &[0.0], false, REQ_RS, 2).unwrap();
+    assert!(warns.is_empty());
+    let rs = sol.f64maps.iter().find(|(k, _)| k == "Rs").unwrap().1.clone();
+    assert!((rs[0] - 0.04).abs() < 1e-15);
+    // Nonzero half-spaces: warned, not refused.
+    let (_, warns) = super::solve_arrays(&idx, &[5.0, 0.0], &[false, false], &[0, 0], &[0.0, 0.0],
+      &wl, &[0.0], false, REQ_RS, 2).unwrap();
+    assert_eq!(warns.len(), 1);
   }
 
   #[test]

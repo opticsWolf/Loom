@@ -829,6 +829,35 @@ impl PySolverArrays {
   }
 }
 
+/// Solve pre-expanded arrays (thin over `solver::solve_arrays`).
+/// Returns `(result_dict, warnings)`; warnings re-emit as Python warnings.
+#[pyfunction]
+#[pyo3(signature = (sa, wavelengths, angles, requested, radians=false, coherence_mode=0))]
+fn solve_arrays_fn(
+  py: Python<'_>,
+  sa: &PySolverArrays,
+  wavelengths: numpy::PyReadonlyArray1<f64>,
+  angles: numpy::PyReadonlyArray1<f64>,
+  requested: u64,
+  radians: bool,
+  coherence_mode: i32,
+) -> pyo3::PyResult<(pyo3::Py<pyo3::types::PyDict>, Vec<String>)> {
+  let (sol, warnings) = navette::smatrix::solver::solve_arrays(
+    &sa.inner.indices,
+    &sa.inner.thicknesses,
+    &sa.inner.incoherent,
+    &sa.inner.rough_types,
+    &sa.inner.rough_vals,
+    wavelengths.as_slice()?,
+    angles.as_slice()?,
+    radians,
+    requested,
+    coherence_mode,
+  )
+  .map_err(pyo3::exceptions::PyValueError::new_err)?;
+  Ok((crate::smatrix::solution_to_dict(py, &sol)?, warnings))
+}
+
 // ---- Structure ----
 
 impl MaterialProvider for PyDictProvider {
@@ -1724,6 +1753,7 @@ fn rng_for(seed: Option<u64>) -> SeedRng {
 #[pymodule]
 pub fn _structure(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_function(wrap_pyfunction!(apply_error_fn, m)?)?;
+  m.add_function(wrap_pyfunction!(solve_arrays_fn, m)?)?;
   m.add_class::<PyLayer>()?;
   m.add_class::<PyGroup>()?;
   m.add_class::<PyDictProvider>()?;
