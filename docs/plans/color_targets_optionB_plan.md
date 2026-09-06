@@ -314,7 +314,18 @@ kernel first) would touch every arm twice.
     k rounding — asserted 1e-15); Δλ is forward-difference (uniform grid ⇒
     op-for-op `func_13` summation); kernel dead_code warnings live until
     0.4.24 wires D3/D4 consumers.
-  - 0.4.24: D3+D4 schema/compile/merit (Lab|xyY) + R2/R3 tests.
+  - 0.4.24: D3+D4 schema/compile/merit (Lab|xyY) + R2/R3 tests. DONE
+    2026-09-06 (dev): `ColorTargetJson` (+`IllumJson`/`CmfJson` name|table,
+    `ReferenceJson` catch-all for named non-3 refusals), compile arm
+    (front-R/T only, back refused, Exact+linear only, integral/count_norm/
+    phase/band refused, shared key registry), `MeritSpec.color` +
+    `add_color_demand` + key-grouped `color_residual_into` (missing/overlap
+    → `Err(key.curve)` = standard penalty path; pointwise grid-miss still
+    skips — documented divergence). R2: 4 tests (compile+dedupe, 16
+    refusals, JSON-shape loudness, embedded-name white bitwise). R3: 5
+    twins incl. xyY-Channels HEX vs pure-Python-loop oracle (1-ulp-strict).
+    LM smoke lives in Rust (`lm_drives_color_residual_to_zero`, cost →4e-16
+    = 1-ulp chromaticity floor). 312+22+15 Rust, exposure 204/90, 334 green.
   - 0.4.25: D5 needle-B (R/T buckets, U-½) + R4 tests.
   - 0.4.26: D6+D7 Python surface + docs + R5 tests.
 - **P2 — extended quantities (0.4.27):** LCh + Oklab + Y-scalar through

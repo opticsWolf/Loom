@@ -8,6 +8,8 @@
 //! needle fold) lives in-crate; the PyO3 surface binds those arms, never
 //! this kernel directly (exposure lint stays green by construction).
 
+use serde::{Deserialize, Serialize};
+
 use crate::color::common::xyz_to_lab;
 use crate::color::func_01::xyz_to_xyy;
 use crate::color::func_09::delta_e_76_single;
@@ -32,8 +34,11 @@ pub enum ColorDistance {
 }
 
 /// Triple reference — or scalar for `Y` (luminance-only, P2).
-/// Untagged; validated against the quantity in `new`.
-#[derive(Clone, Debug, PartialEq)]
+/// Untagged (`[62, 18, -34]` vs `12.5`); validated against the quantity
+/// in `new`. Malformed shapes never reach this type: the compile arm
+/// catches them via `ReferenceJson::Other` with a named refusal.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
 pub enum ColorReference {
   Triple([f64; 3]),
   Scalar(f64),
@@ -45,6 +50,9 @@ pub enum ColorReference {
 /// (never adapt foreign-white numbers).
 #[derive(Clone, Debug)]
 pub struct ColorDemand {
+  /// Index into `MeritSpec::keys` (set at compile; groups the demand for
+  /// missing-penalty + residual ordering, exactly like pointwise targets).
+  pub key_idx: u32,
   pub cmf: Vec<[f64; 3]>,
   pub cmf_wl: Vec<f64>,
   pub illuminant: Vec<f64>,
@@ -74,6 +82,7 @@ fn check_grid(name: &str, wl: &[f64], cols: usize) -> Result<(), String> {
 
 impl ColorDemand {
   pub(crate) fn new(
+    key_idx: u32,
     cmf: Vec<[f64; 3]>,
     cmf_wl: Vec<f64>,
     illuminant: Vec<f64>,
@@ -138,6 +147,7 @@ impl ColorDemand {
       return Err("color: degenerate illuminant (non-finite white point).".to_string());
     }
     Ok(ColorDemand {
+      key_idx,
       cmf,
       cmf_wl,
       illuminant,
@@ -364,6 +374,7 @@ mod tests {
   fn toy_demand() -> ColorDemand {
     let (cmf_wl, cmf, illum_wl, illuminant) = toy();
     ColorDemand::new(
+      0,
       cmf,
       cmf_wl,
       illuminant,
@@ -475,7 +486,7 @@ mod tests {
     let (cmf_wl, cmf, illum_wl, illuminant) = toy();
     let mk = |q, r, dist| {
       ColorDemand::new(
-        cmf.clone(), cmf_wl.clone(), illuminant.clone(), illum_wl.clone(), q, r, dist, 1.0,
+        0, cmf.clone(), cmf_wl.clone(), illuminant.clone(), illum_wl.clone(), q, r, dist, 1.0,
       )
     };
     assert!(mk(ColorQuantity::XyY, ColorReference::Triple([0.3, 0.3, 0.5]), ColorDistance::DeltaE2000)

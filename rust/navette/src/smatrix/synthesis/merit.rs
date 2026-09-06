@@ -31,6 +31,8 @@ use std::sync::Arc;
 
 use num_complex::Complex64;
 
+use super::color_merit::{eval_color, ColorDemand};
+
 // ---------------------------------------------------------------------------
 // Vocabulary types
 // ---------------------------------------------------------------------------
@@ -547,6 +549,7 @@ pub struct MeritTarget {
 pub struct MeritSpec {
     keys: Vec<MeritKey>,
     targets: Vec<MeritTarget>,
+    color: Vec<ColorDemand>,
 }
 
 impl MeritSpec {
@@ -658,11 +661,30 @@ impl MeritSpec {
         &self.targets
     }
 
+    /// Append one compiled color demand (1 residual). `key_idx` range is
+    /// checked like `add_target` — the demand groups with its key for
+    /// missing-penalty + residual ordering.
+    pub fn add_color_demand(&mut self, demand: ColorDemand) -> Result<(), String> {
+        if demand.key_idx as usize >= self.keys.len() {
+            return Err(format!(
+                "key_idx {} out of range ({} keys registered)",
+                demand.key_idx,
+                self.keys.len()
+            ));
+        }
+        self.color.push(demand);
+        Ok(())
+    }
+
+    pub fn color_demands(&self) -> &[ColorDemand] {
+        &self.color
+    }
+
     /// Total number of residual components (all target points, active or
     /// not — inactive ones contribute zeros so the residual vector length
     /// stays fixed for the optimizer).
     pub fn n_residuals(&self) -> usize {
-        self.targets.iter().map(|t| t.wavelengths.len()).sum()
+        self.targets.iter().map(|t| t.wavelengths.len()).sum::<usize>() + self.color.len()
     }
 
     /// Scalar merit function: Σ residual² + missing-key penalties.
@@ -903,7 +925,38 @@ impl MeritSpec {
                 out.push(kind_residual(t.kind, acc_d / n, tol_bar, acc_bw / n) * rscale);
             }
         }
+        // Color demands of this key group, in demand insertion order
+        // (deterministic; documented). One residual each (see `n_residuals`).
+        for d in self.color.iter().filter(|d| d.key_idx as usize == key_idx) {
+            out.push(self.color_residual_into(sim, d)?);
+        }
         Ok(())
+    }
+
+    /// One color residual (√F, weight inside F — applied once, at the
+    /// objective level, unlike the pointwise `rscale`).
+    ///
+    /// Failure policy (documented divergence from pointwise grid-miss
+    /// skips): a missing curve fails the whole key group (`Err(key.curve)`
+    /// → missing-penalty in `merit()`, hard error in `residuals()`/LM —
+    /// parity with pointwise missing-curve handling). An empty table/sim
+    /// overlap likewise errors instead of skipping: a color demand that
+    /// sees nothing is a spec bug, never a silent zero.
+    fn color_residual_into(&self, sim: &SimCurves, d: &ColorDemand) -> Result<f64, CurveId> {
+        let key = &self.keys[d.key_idx as usize];
+        // Compile refused back curves; the kernel never sees them.
+        if key.curve.is_back() {
+            return Err(key.curve);
+        }
+        let ang_row = sim.angle_row(key.angle);
+        let n_wav = sim.wavelengths.len();
+        let row = sim.curve(key.curve).ok_or(key.curve)?;
+        let sim_row = row
+            .get(ang_row * n_wav..(ang_row + 1) * n_wav)
+            .ok_or(key.curve)?;
+        eval_color(d, sim_row, &sim.wavelengths)
+            .map(|(r, _)| r)
+            .map_err(|_| key.curve)
     }
 }
 
@@ -1770,5 +1823,109 @@ mod tests {
             ConstraintKind::Exact, SimTransform::Linear, 1.0)).is_err());
         assert!(spec.add_target(entry(7, vec![400.0], vec![0.0], vec![1.0],
             ConstraintKind::Exact, SimTransform::Linear, 1.0)).is_err());
+    }
+
+    /// Toy native tables on the sim grid (node-exact resample).
+    fn color_toy() -> (Vec<f64>, Vec<[f64; 3]>, Vec<f64>, Vec<f64>) {
+      let wl: Vec<f64> = (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect();
+      let cmf: Vec<[f64; 3]> = (0..NW)
+        .map(|i| [0.10 + 0.01 * i as f64, 0.20 + 0.01 * i as f64, 0.05 + 0.005 * i as f64])
+        .collect();
+      (wl.clone(), cmf, wl, vec![1.0; NW])
+    }
+
+    fn color_spec_xyy(target_y: f64) -> MeritSpec {
+      use crate::smatrix::synthesis::color_merit::{
+        ColorDemand, ColorDistance, ColorQuantity, ColorReference,
+      };
+      let (cmf_wl, cmf, illum_wl, illuminant) = color_toy();
+      // Achromatic reference: white chromaticity + target luminance.
+      let ones = vec![1.0; NW];
+      let white = crate::smatrix::synthesis::color_merit::xyz_of_spectrum(
+        &ones, &illum_wl, &cmf, &cmf_wl, &illuminant, &illum_wl,
+      )
+      .unwrap();
+      let s = white[0] + white[1] + white[2];
+      let mut spec = MeritSpec::new();
+      let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+      spec
+        .add_color_demand(
+          ColorDemand::new(
+            k as u32,
+            cmf,
+            cmf_wl,
+            illuminant,
+            illum_wl,
+            ColorQuantity::XyY,
+            ColorReference::Triple([white[0] / s, white[1] / s, target_y]),
+            ColorDistance::Channels,
+            1.0,
+          )
+          .unwrap(),
+        )
+        .unwrap();
+      spec
+    }
+
+    #[test]
+    fn color_missing_curve_takes_one_penalty() {
+      // Shared key: color + spectral demands fail as ONE group (no double
+      // penalty) — parity with pointwise missing-curve handling.
+      let mut spec = color_spec_xyy(0.5);
+      spec
+        .add_target(entry(
+          0,
+          vec![400.0],
+          vec![0.5],
+          vec![0.01],
+          ConstraintKind::Exact,
+          SimTransform::Linear,
+          1.0,
+        ))
+        .unwrap();
+      assert_eq!(spec.n_residuals(), 1 + 1);
+      let full = sim_one_angle(&[0.5; NW]);
+      assert!(spec.merit(&full, 1e6).is_finite());
+      let mut out = Vec::new();
+      assert!(spec.residuals(&full, &mut out).is_ok());
+      assert_eq!(out.len(), 2);
+      let empty = SimCurves {
+        angles: vec![0.0].into(),
+        wavelengths: (0..NW).map(|i| 400.0 + 100.0 * i as f64).collect::<Vec<_>>().into(),
+        ..Default::default()
+      };
+      assert_eq!(spec.merit(&empty, 1e6), 1e6);
+      assert_eq!(spec.residuals(&empty, &mut out).unwrap_err(), CurveId::Rs);
+    }
+
+    #[test]
+    fn lm_drives_color_residual_to_zero() {
+      // Thick-opt consumes color residuals with zero further changes: a
+      // 1-param uniform-reflector problem (Y(R) = R by k-normalization)
+      // converges from 0.2 to the 0.5 target.
+      use crate::smatrix::synthesis::thick_opt::{levenberg_marquardt, LmConfig};
+      let spec = color_spec_xyy(0.5);
+      let r0 = {
+        let mut out = Vec::new();
+        spec.residuals(&sim_one_angle(&[0.2; NW]), &mut out).unwrap();
+        out.iter().map(|r| r * r).sum::<f64>()
+      };
+      let res = levenberg_marquardt(
+        &|x: &[f64], out: &mut Vec<f64>| {
+          let row = [x[0]; NW];
+          spec.residuals(&sim_one_angle(&row), out).map_err(|id| format!("{id:?}"))
+        },
+        &[0.2],
+        &[0.01],
+        &[1.0],
+        &LmConfig::default(),
+      )
+      .unwrap();
+      assert!(res.cost < r0);
+      assert!((res.x[0] - 0.5).abs() < 1e-6, "x={}", res.x[0]);
+      // Floor is 1-ulp chromaticity noise (x/y of a uniform spectrum
+      // reproduce white to rounding), not optimizer failure.
+      assert!(res.cost < 1e-14, "cost={}", res.cost);
+      assert!(res.x[0].is_finite());
     }
 }

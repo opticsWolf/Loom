@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+use super::color_merit::{ColorDemand, ColorDistance, ColorQuantity, ColorReference};
 use super::merit::{ConstraintKind, CurveId, MeritKey, MeritSpec, MeritTarget, SimTransform};
+use crate::color::tables::default_tables;
 use crate::spectralweave::opticalweaver::{OpticalKey, SpectralData};
 use crate::spectralweave::targetweaver::{TargetKind, TargetWeaver};
 
@@ -91,6 +93,87 @@ fn d_norm() -> String {
   "auto".to_string()
 }
 
+/// Explicit illuminant table (wavelengths + values).
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IllumTable {
+  pub wavelengths: Vec<f64>,
+  pub values: Vec<f64>,
+}
+
+/// Illuminant: "D65" (embedded default) or an explicit table. Anything
+/// else is refused (no registry to drift — the explicit-grid rule).
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum IllumJson {
+  Name(String),
+  Table(IllumTable),
+}
+
+/// Explicit CMF table (wavelengths + xyz triplets).
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CmfTable {
+  pub wavelengths: Vec<f64>,
+  pub xyz: Vec<[f64; 3]>,
+}
+
+/// Observer: "1931_2deg" (embedded default) or an explicit table.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum CmfJson {
+  Name(String),
+  Table(CmfTable),
+}
+
+/// Reference shape that survives JSON: valid triple/scalar, or the raw
+/// value for a named refusal (a non-3 array never reaches ColorReference).
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum ReferenceJson {
+  Valid(ColorReference),
+  Other(serde_json::Value),
+}
+
+/// One colorimetric demand (front R/T curve x angle x illuminant x
+/// observer x quantity x distance x weight).
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColorTargetJson {
+  pub curve: String,
+  pub angle: f64,
+  pub illuminant: IllumJson,
+  pub observer: CmfJson,
+  pub quantity: String,
+  pub reference: ReferenceJson,
+  pub distance: String,
+  #[serde(default = "d_weight")]
+  pub weight: f64,
+  /// v1: Exact only (other kinds refused at compile).
+  #[serde(default = "d_color_kind")]
+  pub kind: String,
+  /// v1: linear only (color IS integral; no transform layer).
+  #[serde(default = "d_color_transform")]
+  pub transform: String,
+  /// All refused when set (color is integral; no double counting).
+  #[serde(default)]
+  pub integral: bool,
+  #[serde(default)]
+  pub count_norm: Option<f64>,
+  #[serde(default)]
+  pub phase: bool,
+  #[serde(default)]
+  pub band: Option<Band>,
+}
+
+fn d_color_kind() -> String {
+  "Exact".to_string()
+}
+
+fn d_color_transform() -> String {
+  "linear".to_string()
+}
+
 /// Full target set: spectral + angular curves and weaver tuning.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +182,8 @@ pub struct TargetSet {
   pub spectral: Vec<SpectralTarget>,
   #[serde(default)]
   pub angular: Vec<AngularTarget>,
+  #[serde(default)]
+  pub color: Vec<ColorTargetJson>,
   #[serde(default = "d_cache")]
   pub cache_size: usize,
   #[serde(default = "d_floor")]
@@ -487,6 +572,104 @@ pub fn compile_merit_spec(set: &TargetSet) -> Result<MeritSpec, String> {
       })
       .map_err(|e| format!("compile_merit_spec: {e}"))?;
   }
+  // Color demands (after spectral/angular — same key registry, so a color
+  // demand on a shared (angle, curve) group dedupes by content).
+  for t in &set.color {
+    match CurveId::from_str(&t.curve) {
+      Some(id) if id.is_back() => {
+        return Err(format!(
+          "color: back-incidence color is not supported yet (got {:?}).",
+          t.curve
+        ))
+      }
+      Some(id) if !id.is_absorption() => {}
+      _ => {
+        return Err(format!(
+          "color: color needs a front R/T intensity curve, got {:?}.",
+          t.curve
+        ))
+      }
+    };
+    if t.kind != "Exact" {
+      return Err(format!("color: only kind 'Exact' in v1, got {:?}.", t.kind));
+    }
+    if t.transform != "linear" {
+      return Err(format!(
+        "color: only transform 'linear' in v1, got {:?}.",
+        t.transform
+      ));
+    }
+    if t.integral {
+      return Err("color: 'integral' is refused (a color demand already is integral).".to_string());
+    }
+    if t.count_norm.is_some() {
+      return Err("color: 'count_norm' is refused (no double counting).".to_string());
+    }
+    if t.phase {
+      return Err("color: 'phase' is refused (intensity curves only).".to_string());
+    }
+    if t.band.is_some() {
+      return Err("color: 'band' is refused (no sub-range in a demand).".to_string());
+    }
+    check_weight(t.weight, "ColorTarget")?;
+    let quantity = match t.quantity.as_str() {
+      "Lab" => ColorQuantity::Lab,
+      "XyY" => ColorQuantity::XyY,
+      q => {
+        return Err(format!(
+          "color: unknown quantity {q:?} (P1 serves 'Lab'|'XyY')."
+        ))
+      }
+    };
+    let distance = match t.distance.as_str() {
+      "DeltaE2000" => ColorDistance::DeltaE2000,
+      "DeltaE76" => ColorDistance::DeltaE76,
+      "Channels" => ColorDistance::Channels,
+      d => {
+        return Err(format!(
+          "color: unknown distance {d:?} (one of 'DeltaE2000'|'DeltaE76'|'Channels')."
+        ))
+      }
+    };
+    let reference = match &t.reference {
+      ReferenceJson::Valid(r) => r.clone(),
+      ReferenceJson::Other(v) => {
+        return Err(format!(
+          "color: reference must be a [3] triple (scalar for 'Y'), got {v}."
+        ))
+      }
+    };
+    let (illum_wl, illum) = match &t.illuminant {
+      IllumJson::Name(n) if n == "D65" => {
+        let d = default_tables();
+        (d.illum_wl.clone(), d.illum.clone())
+      }
+      IllumJson::Name(n) => {
+        return Err(format!(
+          "color: unknown illuminant {n:?} (supported names: 'D65'; or pass an explicit table)."
+        ))
+      }
+      IllumJson::Table(tab) => (tab.wavelengths.clone(), tab.values.clone()),
+    };
+    let (cmf_wl, cmf) = match &t.observer {
+      CmfJson::Name(n) if n == "1931_2deg" => {
+        let d = default_tables();
+        (d.cmf_wl.clone(), d.cmf_xyz.clone())
+      }
+      CmfJson::Name(n) => {
+        return Err(format!(
+          "color: unknown observer {n:?} (supported names: '1931_2deg'; or pass an explicit table)."
+        ))
+      }
+      CmfJson::Table(tab) => (tab.wavelengths.clone(), tab.xyz.clone()),
+    };
+    let ki = get_key(&mut spec, t.angle, &t.curve);
+    let demand =
+      ColorDemand::new(ki, cmf, cmf_wl, illum, illum_wl, quantity, reference, distance, t.weight)?;
+    spec
+      .add_color_demand(demand)
+      .map_err(|e| format!("compile_merit_spec: {e}"))?;
+  }
   Ok(spec)
 }
 
@@ -521,6 +704,7 @@ mod tests {
     let set = TargetSet {
       spectral: vec![spec_target()],
       angular: vec![],
+      color: vec![],
       cache_size: 128,
       tolerance_floor: 1e-12,
     };
@@ -534,6 +718,7 @@ mod tests {
     let mut set = TargetSet {
       spectral: vec![spec_target()],
       angular: vec![],
+      color: vec![],
       cache_size: 128,
       tolerance_floor: 1e-12,
     };
@@ -555,5 +740,128 @@ mod tests {
     assert_eq!(curve_id("PDts", "s").unwrap(), "Ts");
     assert!(curve_id("PDts", "p").is_err());
     assert!(curve_id("Nope", "s").is_err());
+  }
+
+  fn color_target() -> ColorTargetJson {
+    ColorTargetJson {
+      curve: "Ru".to_string(),
+      angle: 0.0,
+      illuminant: IllumJson::Table(IllumTable {
+        wavelengths: vec![500.0, 600.0],
+        values: vec![1.0, 1.0],
+      }),
+      observer: CmfJson::Table(CmfTable {
+        wavelengths: vec![500.0, 600.0],
+        xyz: vec![[0.10, 0.20, 0.05], [0.11, 0.21, 0.055]],
+      }),
+      quantity: "Lab".to_string(),
+      reference: ReferenceJson::Valid(ColorReference::Triple([60.0, 10.0, -20.0])),
+      distance: "DeltaE2000".to_string(),
+      weight: 1.0,
+      kind: "Exact".to_string(),
+      transform: "linear".to_string(),
+      integral: false,
+      count_norm: None,
+      phase: false,
+      band: None,
+    }
+  }
+
+  fn color_set() -> TargetSet {
+    TargetSet {
+      spectral: vec![],
+      angular: vec![],
+      color: vec![color_target()],
+      cache_size: 128,
+      tolerance_floor: 1e-12,
+    }
+  }
+
+  #[test]
+  fn compiles_color_demand_and_dedupes_keys() {
+    let mut set = color_set();
+    // Same (angle, curve) group as the color demand (R/u -> Ru): one key.
+    let mut st = spec_target();
+    st.polarization = "u".to_string();
+    set.spectral.push(st);
+    let spec = compile_merit_spec(&set).unwrap();
+    assert_eq!(spec.key_count(), 1);
+    assert_eq!(spec.target_count(), 1);
+    assert_eq!(spec.color_demands().len(), 1);
+    assert_eq!(spec.n_residuals(), 2 + 1);
+  }
+
+  #[test]
+  fn color_refusals_name_both_sides() {
+    let bad = |f: &dyn Fn(&mut ColorTargetJson)| {
+      let mut set = color_set();
+      f(&mut set.color[0]);
+      compile_merit_spec(&set).unwrap_err()
+    };
+    assert!(bad(&|t| t.curve = "Nope".to_string()).contains("front R/T"));
+    assert!(bad(&|t| t.curve = "As".to_string()).contains("front R/T"));
+    assert!(bad(&|t| t.curve = "RBs".to_string()).contains("back-incidence"));
+    assert!(bad(&|t| t.kind = "e".to_string()).contains("Exact"));
+    assert!(bad(&|t| t.transform = "log".to_string()).contains("linear"));
+    assert!(bad(&|t| t.integral = true).contains("integral"));
+    assert!(bad(&|t| t.count_norm = Some(2.0)).contains("count_norm"));
+    assert!(bad(&|t| t.phase = true).contains("phase"));
+    assert!(bad(&|t| t.band = Some(Band::Scalar(0.1))).contains("band"));
+    assert!(bad(&|t| t.quantity = "LCh".to_string()).contains("unknown quantity"));
+    assert!(bad(&|t| t.distance = "DIN99".to_string()).contains("unknown distance"));
+    assert!(bad(&|t| t.quantity = "XyY".to_string()).contains("XyY"));
+    assert!(bad(&|t| t.illuminant = IllumJson::Name("F2".to_string())).contains("unknown illuminant"));
+    assert!(bad(&|t| t.observer = CmfJson::Name("1964_10deg".to_string())).contains("unknown observer"));
+    assert!(bad(&|t| t.reference = ReferenceJson::Valid(ColorReference::Scalar(1.0)))
+      .contains("scalar reference"));
+    assert!(bad(&|t| t.weight = -1.0).contains("weight"));
+  }
+
+  #[test]
+  fn color_json_shapes_refuse_loud() {
+    // A non-3 reference array parses (Other catch-all) and refuses at
+    // compile with the specified message — never a serde riddle.
+    let doc = serde_json::json!({
+      "spectral": [], "angular": [],
+      "color": [{
+        "curve": "Ru", "angle": 0.0,
+        "illuminant": "D65", "observer": "1931_2deg",
+        "quantity": "Lab", "reference": [1.0, 2.0],
+        "distance": "DeltaE2000",
+      }],
+    });
+    let set: TargetSet = serde_json::from_value(doc).unwrap();
+    assert!(compile_merit_spec(&set).unwrap_err().contains("[3] triple"));
+    // Unknown top-level keys still denied.
+    assert!(serde_json::from_value::<TargetSet>(
+      serde_json::json!({"color": [], "bogus": 1})
+    )
+    .is_err());
+  }
+
+  #[test]
+  fn embedded_names_resolve_and_white_is_own() {
+    use crate::smatrix::synthesis::color_merit::xyz_of_spectrum;
+    let mut t = color_target();
+    t.illuminant = IllumJson::Name("D65".to_string());
+    t.observer = CmfJson::Name("1931_2deg".to_string());
+    let set = TargetSet {
+      spectral: vec![],
+      angular: vec![],
+      color: vec![t],
+      cache_size: 128,
+      tolerance_floor: 1e-12,
+    };
+    let spec = compile_merit_spec(&set).unwrap();
+    let d = &spec.color_demands()[0];
+    // Own-white rule: demand white == direct integration of the
+    // illuminant on its native grid (bitwise — same inputs, same order).
+    let dt = default_tables();
+    let ones = vec![1.0; dt.illum_wl.len()];
+    let white = xyz_of_spectrum(
+      &ones, &dt.illum_wl, &dt.cmf_xyz, &dt.cmf_wl, &dt.illum, &dt.illum_wl,
+    )
+    .unwrap();
+    assert_eq!(d.white, white);
   }
 }
