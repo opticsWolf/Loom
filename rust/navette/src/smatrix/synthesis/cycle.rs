@@ -328,6 +328,8 @@ mod tests {
             ab: zero(),
             phi: [zero(), zero(), zero(), zero()],
             phi_gain_shift: [0.0; 4],
+            grad_r: vec![0.0f64; 1],
+            grad_t: vec![0.0f64; 1],
         }
     }
 

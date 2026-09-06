@@ -186,6 +186,8 @@ fn resample(tbl_wl: &[f64], tbl: &[f64], x: f64) -> Option<f64> {
 /// weights are a constant interval and the sums below reproduce
 /// `func_13` summation op-for-op (R1 pins this).
 struct XyzWorkspace {
+  /// Covered sim indices (ascending) parallel to dw/e_res/cmf_res.
+  idx: Vec<usize>,
   xyz: [f64; 3],
   k: f64,
   dw: Vec<f64>,
@@ -252,7 +254,7 @@ fn xyz_workspace(
     xyz[1] += w * cmf_res[i][1];
     xyz[2] += w * cmf_res[i][2];
   }
-  Ok(XyzWorkspace { xyz, k, dw, e_res, cmf_res })
+  Ok(XyzWorkspace { idx, xyz, k, dw, e_res, cmf_res })
 }
 
 /// `XYZ = Σ R·E·cmf·k·Δλ`, `k = 1/ΣE·ȳ·Δλ` (perfect diffuser ⇒ Y ≡ 1).
@@ -322,11 +324,14 @@ fn objective_of_xyz(demand: &ColorDemand, xyz: &[f64; 3]) -> Result<f64, String>
 /// `(residual = √F, grad = ∂F/∂R(λ))`: analytic `dXYZ/dR` (exact, linear)
 /// chained with a central 3-pt FD of the XYZ→objective map
 /// (`h = 1e-6·(1+|XYZ|)`). Cost: 1 XYZ + 6 tiny map evals.
-pub(crate) fn eval_color(
+/// `(residual = √F, covered)` with covered sim indices: the needle fold
+/// deposits each gradient value at its own sim point (solver-mapped).
+/// `eval_color` is the dense projection (covered order = ascending).
+pub(crate) fn eval_color_covered(
   demand: &ColorDemand,
   sim_row: &[f64],
   sim_wl: &[f64],
-) -> Result<(f64, Vec<f64>), String> {
+) -> Result<(f64, Vec<(usize, f64)>), String> {
   let ws = xyz_workspace(sim_row, sim_wl, &demand.cmf, &demand.cmf_wl, &demand.illuminant, &demand.illum_wl)?;
   let f0 = objective_of_xyz(demand, &ws.xyz)?;
   if !f0.is_finite() {
@@ -348,12 +353,22 @@ pub(crate) fn eval_color(
     df[j] = (fp - fm) / (2.0 * h);
   }
   // Chain with analytic dXYZ/dR(λᵢ) = E·cmf·k·Δλ.
-  let mut grad = vec![0.0; ws.dw.len()];
-  for (i, g) in grad.iter_mut().enumerate() {
-    let s = ws.e_res[i] * ws.k * ws.dw[i];
-    *g = s * (df[0] * ws.cmf_res[i][0] + df[1] * ws.cmf_res[i][1] + df[2] * ws.cmf_res[i][2]);
+  let mut grad = Vec::with_capacity(ws.dw.len());
+  for (j, &sim_idx) in ws.idx.iter().enumerate() {
+    let s = ws.e_res[j] * ws.k * ws.dw[j];
+    let g = s * (df[0] * ws.cmf_res[j][0] + df[1] * ws.cmf_res[j][1] + df[2] * ws.cmf_res[j][2]);
+    grad.push((sim_idx, g));
   }
   Ok((f0.sqrt(), grad))
+}
+
+pub(crate) fn eval_color(
+  demand: &ColorDemand,
+  sim_row: &[f64],
+  sim_wl: &[f64],
+) -> Result<(f64, Vec<f64>), String> {
+  eval_color_covered(demand, sim_row, sim_wl)
+    .map(|(r, v)| (r, v.into_iter().map(|(_, g)| g).collect()))
 }
 
 #[cfg(test)]

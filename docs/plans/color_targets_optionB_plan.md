@@ -326,7 +326,21 @@ kernel first) would touch every arm twice.
     twins incl. xyY-Channels HEX vs pure-Python-loop oracle (1-ulp-strict).
     LM smoke lives in Rust (`lm_drives_color_residual_to_zero`, cost →4e-16
     = 1-ulp chromaticity floor). 312+22+15 Rust, exposure 204/90, 334 green.
-  - 0.4.25: D5 needle-B (R/T buckets, U-½) + R4 tests.
+  - 0.4.25: D5 needle-B (R/T buckets, U-½) + R4 tests. DONE 2026-09-06
+    (dev): `NeedleTargets.grad_r/grad_t` + 4 construction sites,
+    `p_coherent_grad_r/t_from_fields` (mirror bodies, flux kept) allowlisted
+    (D7-lint-half early), fold arm (op-sim eval, U-½ at deposit, no-sim /
+    missing-curve skip, overlap-Err propagates), hot-pass nonzero-skip arms
+    + shape validation. R4: 6 Rust tests (deposit-half bitwise, fold-level
+    central-FD chain rule 1e-6, U-curve BITWISE, branch additivity bitwise,
+    grad-free inertness bitwise, kernel-mirror ratio constancy). CORRECTION
+    vs draft: the U-identity needs single-branch Rs/Rp references —
+    `P_Ru(both) == (P_Rs(s-only)+P_Rp(p-only))/2` (the draft's unqualified
+    form is off by 2x; s/p deposit FULL g mirroring pointwise, so both-
+    branch single-pol runs inherit the engine's existing cross-term
+    convention — no new error class). The planned s-only-branch test was
+    replaced by branch-additivity (branch gating is out of scope).
+    318+22+15 Rust, exposure 206/92, 334 green, refold bench OK.
   - 0.4.26: D6+D7 Python surface + docs + R5 tests.
 - **P2 — extended quantities (0.4.27):** LCh + Oklab + Y-scalar through
   all arms in one patch: scalar-`reference` JSON shape, §D2 compat

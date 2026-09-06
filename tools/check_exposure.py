@@ -28,6 +28,8 @@ ALLOWLIST = {
     "needle_slopes4_ddz", "p_coherent_a_from_fields",
     "p_coherent_ab_from_fields", "p_coherent_from_fields",
     "p_coherent_phi_from_fields", "p_coherent_rb_from_fields",
+    # Option-B color gradient buckets (via run_needle_pass hot pass)
+    "p_coherent_grad_r_from_fields", "p_coherent_grad_t_from_fields",
     "p_coherent_t_from_fields", "p_coherent_tb_from_fields",
     "p_function", "p_function_multiblock", "p_multiblock_point",
     "partition_blocks", "phase_dispersion_sensitivity", "spacer_tau",

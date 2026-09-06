@@ -532,6 +532,60 @@ pub fn p_coherent_t_from_fields(
     out
 }
 
+/// Gradient-bucket R kernel (Option B color): identical loop to
+/// [`p_coherent_from_fields`] with the residual line replaced by the
+/// fold-deposited chain-rule factor `grad` (weight, residual, and U-curve
+/// half applied at deposit). No new request kind: rides the R channel.
+pub fn p_coherent_grad_r_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    grad: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    let r_k = fields.s_left[end_idx].0;
+    let rc = r_k.conj();
+    let mut out = vec![0.0; z_grid.len()];
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let dr = needle_dr_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam);
+        out[zi] = grad * (rc * dr).re;
+    }
+    out
+}
+
+/// Gradient-bucket T kernel (Option B color): identical loop to
+/// [`p_coherent_t_from_fields`] with the residual line replaced by `grad`.
+/// The flux factor is KEPT (boundary-invariant, same as the R/T kernels).
+pub fn p_coherent_grad_t_from_fields(
+    fields: &StackFields,
+    nsin_fi: Complex64,
+    lam: f64,
+    pol: i32,
+    needle_n: Complex64,
+    grad: f64,
+    thicknesses: &[f64],
+    start_idx: usize,
+    end_idx: usize,
+    z_grid: &[f64],
+) -> Vec<f64> {
+    let t_k = fields.s_left[end_idx].2;
+    let f = block_flux_factors(fields, pol)[2];
+    let tc = t_k.conj();
+    let mut out = vec![0.0; z_grid.len()];
+    for (zi, &z) in z_grid.iter().enumerate() {
+        let (j, xi) = locate_depth_in(thicknesses, start_idx, end_idx, z);
+        let dt = needle_slopes4_ddz(fields, nsin_fi, j, xi, needle_n, pol, lam)[2];
+        out[zi] = grad * f * (tc * dt).re;
+    }
+    out
+}
+
 /// Absorption-merit needle gradient for front incidence.
 ///
 /// A = 1 − R − T with R = |r|² and flux-corrected T = |t_fwd|²·f.
