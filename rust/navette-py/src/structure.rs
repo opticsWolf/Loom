@@ -838,6 +838,93 @@ impl PySpecProvider {
   }
 }
 
+/// Live n/k curves woven from a native `OpticalWeaver` backend (mirrors
+/// `WeaverMaterialProvider` on the native path). Holds RefCell cache →
+/// unsendable. Duck-typed (non-native) backends stay on the Python adapter.
+#[pyclass(name = "WeaverProvider", unsendable)]
+pub struct PyWeaverProvider {
+  inner: navette::structure::WeaverProvider<std::sync::Arc<navette::spectralweave::opticalweaver::OpticalWeaver>>,
+}
+
+#[pymethods]
+impl PyWeaverProvider {
+  #[new]
+  #[pyo3(signature = (weaver, target_wavelength, key_prefix=0.0, n_label="n", k_label="k", method="linear", robust=false, fh_d=3, strict=false))]
+  #[allow(clippy::too_many_arguments)]
+  fn new(
+    weaver: &crate::spectralweave_optical::PyOpticalWeaver,
+    target_wavelength: PyReadonlyArray1<f64>,
+    key_prefix: f64,
+    n_label: &str,
+    k_label: &str,
+    method: &str,
+    robust: bool,
+    fh_d: usize,
+    strict: bool,
+  ) -> PyResult<Self> {
+    let inner = navette::structure::WeaverProvider::new(
+      weaver.inner.clone(),
+      target_wavelength.as_slice()?.to_vec(),
+      key_prefix,
+      n_label,
+      k_label,
+      navette::structure::InterpSettings {
+        method: method.to_string(),
+        robust,
+        fh_d,
+      },
+      strict,
+    );
+    Ok(Self { inner })
+  }
+
+  fn get_nk<'py>(
+    &self,
+    py: Python<'py>,
+    material_name: &str,
+    wavelengths: PyReadonlyArray1<f64>,
+  ) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
+    use navette::structure::MaterialProvider as _MP;
+    let nk = ver(self.inner.nk(material_name, wavelengths.as_slice()?))?;
+    Ok(PyArray1::from_vec(py, nk))
+  }
+
+  fn contains(&self, material_name: &str) -> bool {
+    use navette::structure::MaterialProvider as _MP;
+    self.inner.contains(material_name)
+  }
+
+  fn grid<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+    use navette::structure::MaterialProvider as _MP;
+    PyArray1::from_vec(py, self.inner.grid().unwrap_or(&[]).to_vec())
+  }
+
+  fn set_target(&mut self, wavelength: PyReadonlyArray1<f64>) -> PyResult<()> {
+    self.inner.set_target(wavelength.as_slice()?.to_vec());
+    Ok(())
+  }
+
+  fn is_exact(&self, material_name: &str) -> bool {
+    self.inner.is_exact(material_name)
+  }
+
+  #[pyo3(signature = (material_name=None))]
+  fn invalidate(&self, material_name: Option<String>) -> PyResult<()> {
+    self.inner.invalidate(material_name.as_deref());
+    Ok(())
+  }
+
+  #[getter]
+  fn strict(&self) -> bool {
+    self.inner.strict()
+  }
+
+  #[setter]
+  fn set_strict(&mut self, value: bool) {
+    self.inner.set_strict(value);
+  }
+}
+
 /// Python value → shelf entry: complex/float arrays, or spec dicts.
 fn py_entry(value: &Bound<'_, PyAny>) -> PyResult<Entry> {
   if let Ok(a) = value.extract::<PyReadonlyArray1<Complex64>>() {
@@ -1825,6 +1912,7 @@ pub fn _structure(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<PyGroup>()?;
   m.add_class::<PyDictProvider>()?;
   m.add_class::<PySpecProvider>()?;
+  m.add_class::<PyWeaverProvider>()?;
   m.add_class::<PySolverArrays>()?;
   m.add_class::<PyStructure>()?;
   m.add_class::<PyArchitect>()?;

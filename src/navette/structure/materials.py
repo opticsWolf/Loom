@@ -280,7 +280,7 @@ class WeaverMaterialProvider:
   __slots__ = (
     "_weaver", "_target_wl", "_cache",
     "_key_prefix", "_n_label", "_k_label",
-    "_interp_settings", "_strict",
+    "_interp_settings", "_strict", "_native",
   )
 
   @property
@@ -288,6 +288,9 @@ class WeaverMaterialProvider:
     """Target grid the weaves are resampled onto (always known)."""
     return self._target_wl
 
+  # Native-backed path delegates everything to the Rust WeaverProvider
+  # (same semantics, same errors); duck-typed backends keep the Python
+  # adapter below (foreign-object probing is presentation, not physics).
   def __init__(
     self,
     weaver: Any,
@@ -306,6 +309,16 @@ class WeaverMaterialProvider:
     self._k_label = k_label
     self._interp_settings = interp
     self._strict = bool(strict)
+    self._native = None
+    try:
+      from navette._spectralweave import OpticalWeaver as _NativeWeaver
+      from navette._structure import WeaverProvider as _NativeProvider
+    except ImportError:
+      _NativeWeaver = None  # type: ignore[assignment]
+    if _NativeWeaver is not None and isinstance(weaver, _NativeWeaver):
+      self._native = _NativeProvider(
+        weaver, self._target_wl, key_prefix, n_label, k_label,
+        interp.method, interp.robust, interp.floater_hormann_d, bool(strict))
 
   @property
   def strict(self) -> bool:
@@ -317,6 +330,8 @@ class WeaverMaterialProvider:
   @strict.setter
   def strict(self, value: bool) -> None:
     self._strict = bool(value)
+    if self._native is not None:
+      self._native.strict = bool(value)
 
   @property
   def target_wavelength(self) -> np.ndarray:
@@ -335,6 +350,8 @@ class WeaverMaterialProvider:
     if wl.tobytes() != self._target_wl.tobytes():
       self._target_wl = wl
       self._cache.clear()
+      if self._native is not None:
+        self._native.set_target(wl)
 
   def is_exact(self, material_name: str) -> bool:
     """True when the weave sits exactly on the target grid (no fallback).
@@ -344,6 +361,8 @@ class WeaverMaterialProvider:
     verify freshness after re-weaving — in ``strict`` mode this is what
     ``get_nk`` enforces per fragment (n AND k).
     """
+    if self._native is not None:
+      return bool(self._native.is_exact(material_name))
     n_key = (self._key_prefix, self._n_label, material_name)
     if n_key not in self._weaver:
       return False
@@ -363,6 +382,10 @@ class WeaverMaterialProvider:
     cached = self._cache.get(material_name)
     if cached is not None:
       return cached
+    if self._native is not None:
+      nk = self._native.get_nk(material_name, self._target_wl)
+      self._cache[material_name] = nk
+      return nk
     n_key = (self._key_prefix, self._n_label, material_name)
     k_key = (self._key_prefix, self._k_label, material_name)
     n_arr = self._fetch_and_interpolate(n_key)
@@ -381,6 +404,8 @@ class WeaverMaterialProvider:
     Note: only the ``n`` key is probed — a material with n-but-no-k
     reports True and serves zeros for k (see ``get_nk``).
     """
+    if self._native is not None:
+      return bool(self._native.contains(material_name))
     n_key = (self._key_prefix, self._n_label, material_name)
     return n_key in self._weaver
 
@@ -394,6 +419,9 @@ class WeaverMaterialProvider:
       self._cache.clear()
     else:
       self._cache.pop(material_name, None)
+    if self._native is not None:
+      self._native.invalidate(material_name)
+  
 
   def _fetch_and_interpolate(self, key: tuple) -> Optional[np.ndarray]:
     """Woven fragment resampled to the target grid.

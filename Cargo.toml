@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.7"
+version = "0.4.8"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 authors = ["opticsWolf"]
@@ -21,7 +21,7 @@ num-complex = "0.4"
 rayon = "1"
 ndarray = "0.15"
 # Single Rust crate (pure engine + modules); bindings take it by path.
-navette = { version = "0.4.7", path = "rust/navette" }
+navette = { version = "0.4.8", path = "rust/navette" }
 
 [profile.release]
 opt-level = 3

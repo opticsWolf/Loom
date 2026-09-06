@@ -43,6 +43,12 @@ pub fn norm_prefix(prefix: f64) -> Option<f64> {
   }
 }
 
+impl WovenBackend for std::sync::Arc<crate::spectralweave::opticalweaver::OpticalWeaver> {
+  fn weaved(&self, prefix: f64, label: &str, material: &str) -> Option<(Vec<f64>, Vec<f64>)> {
+    (**self).weaved(prefix, label, material)
+  }
+}
+
 impl WovenBackend for crate::spectralweave::opticalweaver::OpticalWeaver {
   fn weaved(&self, prefix: f64, label: &str, material: &str) -> Option<(Vec<f64>, Vec<f64>)> {
     let p = norm_prefix(prefix)?;
