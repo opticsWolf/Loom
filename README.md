@@ -1,5 +1,3 @@
-<img width="280" height="280" alt="loom_logo" src="https://github.com/user-attachments/assets/e08705cf-d221-4aeb-bfe2-56ef9f23bf17" />
-
 # Navette - Weaving the mathematics of light in thin film systems
 
 **Navette** is a high-performance, physically rigorous 1D optical engine designed for the simulation of light propagation in stratified media. Built on a modern **Scattering Matrix (S-matrix)** architecture, it offers a numerically stable and vectorized alternative to traditional Transfer Matrix Methods (TMM).
@@ -62,15 +60,17 @@ Navette/
 │   ├── spectralweave/        # weavers + merit (native `navette._spectralweave`)
 │   ├── materials/            # dispersion models (native `navette._materials`)
 │   ├── _*.py                 # shims re-exporting the `navette._navette` submodules
-│   ├── structure/            # stacks, architect, solver arrays (pure Python)
-│   ├── config/               # YAML/JSON libraries and stack configs
+│   ├── structure/            # stacks, architect (native model + thin wrappers)
+│   ├── synthesis/            # needle pipeline driver (native DesignStack)
+│   ├── config/               # YAML/JSON libraries, stacks, program documents
 │   └── data/CIE/             # bundled reference spectra
-├── crates/                   # Rust sources: five pure cores + umbrella + bindings
+├── crates/                   # Rust sources: six pure cores + umbrella + bindings
 │   ├── navette-color/        # pure-Rust color core
 │   ├── navette-interpolate/  # pure-Rust interpolation core
-│   ├── navette-smatrix/      # pure-Rust S-matrix core
+│   ├── navette-smatrix/      # pure-Rust S-matrix core (incl. synthesis)
 │   ├── navette-spectralweave/# pure-Rust weaving core
 │   ├── navette-materials/    # pure-Rust dispersion core
+│   ├── navette-structure/    # pure-Rust stack model (layers/groups/expansion)
 │   ├── navette/              # umbrella rlib (published as `navette` on crates.io)
 │   └── navette-py/           # PyO3 aggregator -> navette._navette (one wheel)
 ├── validation/               # tests, parity, benches, goldens + references (see validation/README.md)
@@ -80,17 +80,18 @@ Navette/
 ### Install & build
 
 ```powershell
-# Single aggregated native extension (navette._navette, all five engines):
+# Single aggregated native extension (navette._navette, all engines):
 maturin develop
 # checks
 cargo check --workspace
-cargo test --workspace
+cargo test --workspace     # everything (needs Python for binding crates)
+cargo test-pure            # pure-Rust gate (no Python needed)
 pytest validation
 ```
 
 ### Layout notes
 
-- `crates/` holds the Cargo workspace (five pure-Rust engine cores, the
+- `crates/` holds the Cargo workspace (six pure-Rust engine cores, the
   `navette` umbrella rlib, and the `navette-py` PyO3 aggregator) — the
   idiomatic Rust layout, publishable to crates.io.
 - `src/navette/` is the Python package in src-layout — the idiomatic
@@ -98,12 +99,15 @@ pytest validation
 
 ### Release & publish
 
+Release automation: tag `vX.Y.Z` (must match `pyproject.toml`, workspace
+`Cargo.toml`, `__about__.py` — enforced by CI) → `.github/workflows/release.yml`
+builds wheels (Linux/Windows/macOS) and publishes to PyPI (trusted
+publisher) + crates.io (token), leaf crates first.
+
 ```powershell
-maturin build --release   # -> target/wheels/navette-0.3.0-*.whl (single wheel, all engines)
+maturin build --release   # -> target/wheels/navette-0.4.0-*.whl (single wheel, all engines)
 ```
 
-- crates.io (`navette` + the five engine crates): publish the engine
-  crates first, then the umbrella —
-  `cargo publish -p navette-color -p navette-interpolate -p navette-materials -p navette-smatrix -p navette-spectralweave`,
-  then `cargo publish -p navette` (all pass `cargo publish --dry-run`).
-- PyPI (`navette`): `maturin upload target/wheels/navette-0.3.0-*.whl`.
+Manual fallback (same order the workflow uses):
+`cargo publish -p navette-interpolate -p navette-materials -p navette-color -p navette-spectralweave -p navette-structure -p navette-smatrix`,
+then `cargo publish -p navette`; `maturin upload target/wheels/navette-0.4.0-*.whl`.

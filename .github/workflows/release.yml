@@ -1,0 +1,94 @@
+# Release: tag `vX.Y.Z` (must match pyproject + workspace Cargo versions).
+#
+# One-time setup (owner actions, not in this file):
+# 1. PyPI: register project `navette`, add a trusted publisher
+#    (this repo + workflow `release.yml` + environment `pypi`).
+#    No token needed afterwards.
+# 2. GitHub: create environment `pypi` (optional reviewers) and secret
+#    `CARGO_REGISTRY_TOKEN` (crates.io API token, scope: publish).
+#
+# Flow: check tag↔versions → build wheels (3 OS, abi3) → PyPI (OIDC) →
+# crates.io (token), leaf crates first with index-settle sleeps.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag matches package versions
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PY=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          RS=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          PYABOUT=$(grep -m1 '__version__' src/navette/__about__.py | cut -d'"' -f2)
+          echo "tag=$TAG pyproject=$PY workspace=$RS about=$PYABOUT"
+          test "$TAG" = "$PY" -a "$TAG" = "$RS" -a "$TAG" = "$PYABOUT" \
+            || { echo "version mismatch"; exit 1; }
+
+  build-wheels:
+    needs: check-versions
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
+
+  publish-pypi:
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing (no token)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-crates:
+    needs: check-versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: publish leaf → root (index needs settle time between)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          for c in navette-interpolate navette-materials navette-color \
+                   navette-spectralweave navette-structure navette-smatrix navette; do
+            echo "=== $c ==="
+            cargo publish -p "$c" --no-verify
+            sleep 45
+          done
