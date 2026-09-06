@@ -300,8 +300,11 @@ dependencies = [
 name = "navette-structure"
 version = "0.3.0"
 dependencies = [
+ "navette-interpolate",
  "navette-materials",
+ "navette-spectralweave",
  "ndarray 0.15.6",
+ "ndarray 0.17.2",
  "num-complex",
  "rand",
  "rand_distr",

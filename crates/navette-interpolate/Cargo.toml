@@ -3,9 +3,9 @@ name = "navette-interpolate"
 version = "0.3.0"
 edition = "2024"
 authors = ["opticswolf"]
-description = "Pure-Rust univariate interpolation core (no Python).."
-license = "LGPL-3.0"
-repository = "https://github.com/opticswolf/navette-interpolator"
+description = "Pure-Rust univariate interpolation core (no Python)."
+license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "navette_interpolate"

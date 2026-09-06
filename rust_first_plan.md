@@ -1,7 +1,35 @@
 # Rust-first implementation plan — structure model in Rust, Python follows
 
-Status: [P]roposed throughout. Workflow per phase: propose → review →
-implement → verify. This file is the tracker (log at the bottom).
+Status (2026-09-06): THE live tracker. Phases A–D1 DONE and verified
+(86 validation incl. 58 structure regression + differentials, full
+workspace green, 11/11 parity). Deferred: D2 (span-aware graded
+optimization), Phase E (weaver port, contract tags). Prior Python-side
+work STRUCT-1..10 (all [V]) is summarized in §0.1; `structure_plan.md`
+is archived history (superseded). Workflow per phase: propose → review
+→ implement → verify. Log at the bottom.
+
+## 0.1 Prior work — STRUCT-1..10, all [V] (detail: git history +
+`structure_plan.md`, archived)
+
+- STRUCT-1: nm canonical everywhere (roughness Å→nm; roughness error
+  defaults ×0.1; states unitless — old Å files read 10× small, by design).
+- STRUCT-2: `material_name` state key (round-trips by construction).
+- STRUCT-3: interface slice converts ε→n at insertion (`eps_to_nk`;
+  native ε-contract untouched).
+- STRUCT-4: independent n/k group scaling (`n*nf + i(k*kf)`, identity
+  (1,1); old `k_factor=0.0` default was complex-rotation garbage).
+- STRUCT-5: group summands wired (roughness/interface) + two-level
+  validators (factor domains + dry-run result checks).
+- STRUCT-6: architect validation (collect at authoring time, raise at
+  the solve gate; recursion-safe split).
+- STRUCT-7: `LayerType` (AMBIENT/FILM/SUBSTRATE) + `BlockKind`
+  (STACK/FILMS) enums, chain rules, int-serialized strict rehydration.
+- STRUCT-8: inversion transport (plane props move, bulk/policy stay;
+  two-phase expander with owner carve + donor rescale; 10 committed
+  mirror tests).
+- STRUCT-9: roughness-type unification (solver's six forms canonical).
+- STRUCT-10: `solve_structure` bridge (validate-gate + unit/ambient
+  contract + bit-identity with hand-wired path).
 
 Direction: the canonical thin-film stack model (`Layer`, `Group`,
 expansion, validation, `Structure`, `Architect`, providers) moves to Rust.
@@ -183,29 +211,35 @@ possible flip proof — kept honest by the `rng_for` helper from A2).
 Acceptance C: full validation suite green with zero Python model code
 left (grep for class/method bodies); probes + parity unaffected.
 
-## 6. Phase D — Pipeline migration (size: L, last for a reason)
+## 6. Phase D — Pipeline migration (DONE as D1, bounded; D2 future)
 
-`DesignStack.films: Vec<LayerSpec>` (pre-evaluated, solver-grid-bound)
-becomes design `Vec<Layer>` + provider + grid at expansion points:
-`SmatrixContext::simulate` expands via `navette-structure`, then solves.
-`LayerSpec` survives as the *expanded-slice* type for needle internals
-(seed insertion keeps constructing it from grid data it already holds).
-`SpectralInputs::from_spec` untouched (MeritSpec side). Python driver
-(`stack_from_layers`) builds bound `Layer`s; expansion (grading,
-interfaces, groups) finally reaches pipeline runs — the silent-drop
-limitation dies here. BLAST RADIUS (re-review): `cycle.rs`,
-`evaluator.rs`, `pipeline.rs`, the `synthesis_pipeline.rs` binding, and
-`validation/parity/synthesis/test_pipeline.py` all change signature-
-level; port them in one commit. Re-run ALL synthesis parity + benches (no
-accuracy/speed regression gate, as before).
+AS BUILT (D1, 2026-09-05): the full live-design-layers refactor was cut
+to a construction-time expansion — `DesignStack::from_design` (design
+films + nk table + groups + grid → expansion → solver rows, once).
+Physics from rows, identity/flags from carriers; interface-slice rows
+are derived (optimize/needle false, never free, never hosts); graded
+profiles refuse loudly. Rationale: per-`simulate()` re-expansion would
+tax every merit eval for zero accuracy gain, and row-wise optimization
+of sublayers would silently un-grade profiles (see D2). The silent-drop
+limitation (groups/interfaces/nk-scaling never reached pipeline runs)
+dies here; flat stacks reproduce the parity merit trajectory
+bit-identically. `groups=` surfaces via `run_needle` kwargs; film names
+must be unique (they key the nk table).
 
-Acceptance D: `cargo test --workspace`, 73 regression, 11 parity,
-bench deltas ~0; pipeline mixed-target run reproduces its merit
-trajectory.
+D2 (FUTURE): span-aware graded optimization — expand once, record
+spans, optimizer moves carriers and re-derives rows as profiled units.
+Needs thickness/needle/cleanup to understand spans (all assume free
+rows today). Trigger: someone actually wants graded needle synthesis.
+Until then, graded pipeline input refuses with a clear error.
 
 ## 7. Phase E — Deferred (only if needed)
 
-- `WeaverProvider` port. Contract tags if versions ever feel too coarse.
+- `WeaverProvider` port. Trigger: a second Rust consumer of woven
+  grids, or measurable snapshot-callback overhead. NOT triggered by
+  principle — the weaver wraps live Python workflow state
+  (re-woven grids, `target_wavelength`, strict mode), and porting it
+  means porting spectralweave's weave machinery for one consumer.
+- Contract tags if versions ever feel too coarse (see §9.6).
 (Spec dispatch + `bake_materials` moved into A3/A6 per §9.3B.)
 
 ## 8. Verification: every behavior tested in Rust AND Python
@@ -244,6 +278,11 @@ determinism per side, NEVER cross-value equality (A2).
 Performance gate (re-review): an expansion bench (Python vs Rust,
 flat + graded + grouped stacks) — Rust must be ≤ Python wall time;
 tracked alongside, not gamed after.
+AS BUILT: 86 validation (58 structure regression incl. randomized
+differentials: 300 stacks validity-agreed + bit-identical, 100 mixed
+chains, error moments ±5%) + full workspace green + 11/11 parity.
+Pipeline construction bench still open (D1 adds one expansion at
+stack build; per-simulate cost unchanged by construction).
 
 ## 9. Decisions needed (yours)
 
@@ -284,7 +323,8 @@ tracked alongside, not gamed after.
    Option B: dual maintenance (Python fallback + Rust fast path).
    Rejected in advance: two implementations of the trickiest algorithm
    we own is how silent divergence is born; the whole point of
-   Rust-first is one home. → Recommend A.
+   Rust-first is one home. → DECIDED: A (flip done 2026-09-05; ~15
+   zero-caller helpers intentionally not re-bound — re-add on demand).
 
 5. `sub_layer_count` as a derived method, not stored state?
    Option A (recommend): `fn sub_layer_count(&self) -> u32` computed from
@@ -301,6 +341,16 @@ tracked alongside, not gamed after.
    unrepresentable — an undocumented escape hatch nothing uses (states
    don't carry it; only the bypass smell wrote it). Its removal is the
    point, not a cost.
+
+6. Contract tags vs `SCHEMA_VERSION`? Informative, no decision owed.
+   `SCHEMA_VERSION` is the COMPAT gate — bump = old states refuse to
+   load (coarse, breaking, reader-enforced). Contract tags would be
+   BEHAVIOR fingerprints — per-subsystem meaning versions (expansion
+   algorithm, draw order, roughness convention) STAMPED INTO OUTPUTS
+   so a result can say what it meant without breaking readability.
+   Rule of thumb: schema = "can I read this"; contracts = "did this
+   mean the same thing". The FINGERPRINT test is a build-time contract
+   tag; emitting tags into result dicts is the deferred half (Phase E).
 
 - 2026-09-05: Phase B done: `_structure` submodule (Layer/Group/
 DictProvider/SolverArrays/Structure/Architect + warnings re-emit, seed
@@ -333,6 +383,27 @@ Layers + nk table (`groups=` surfaces via `run_needle` kwargs; names must
 be unique). Flat parity trajectory bit-identical; groups/interfaces now
 expand (were silently dropped). 86 validation + workspace green.
 D2 (span-aware graded optimization) stays future.
+
+- 2026-09-06: plans unified — `rust_first_plan.md` is THE tracker
+(§0.1 folds STRUCT-1..10; `structure_plan.md` superseded, kept as
+history). §6 records D1-as-built + D2; §7 triggers explicit; §8 counts
+current; §9.4 → DECIDED A, §9.6 tags-vs-schema noted. Pure-Rust gate
+`cargo test-pure` (.cargo alias; verified with Python scrubbed from
+PATH). Publish path proven: `cargo publish --dry-run -p
+navette-interpolate` packages+verifies; wheel metadata PyPI-ready;
+version still triple-synced by hand (pyproject/Cargo/__about__).
+
+- 2026-09-06: Phase E (weaver) TRIGGERED by request: Rust-only woven
+runs. `WeaverProvider<B: WovenBackend>` in `navette-structure`
+(`weaver.rs`) + impl for the native `OpticalWeaver`; same
+`UniInterpolator` kernel → bit-identity by construction, pinned by HEX
+frozen oracles (numpy repr truncates to 8 dp — oracles must be
+`tobytes`, lesson learned the hard way: one-ulp false alarm). Faithful
+quirks: n-required/k-zeros, strict refuse, memo + invalidate, target
+setter clears, `is_exact`, caller-grid refusal, NaN/-0.0 key
+normalization. 6 Rust tests (incl. real-weaver→expansion end to end)
++ 4-test Python twin. 47 structure / 90 validation / workspace green,
+clippy clean.
 
 ## 10. Order of work
 
