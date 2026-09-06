@@ -67,19 +67,26 @@ class DictMaterialProvider:
   lengths, never wavelength values.
   """
 
-  __slots__ = ("_dict", "_wavelength")
+  # Thin over the native DictProvider: serving, length checks and spec
+  # evaluation live in Rust. `_dict` stays as the live shelf (snapshotter
+  # + pour-back write it); writes go through to the native mirror, so
+  # external raw-dict mutation is no longer visible — use refresh().
+  __slots__ = ("_dict", "_wavelength", "_native")
 
   def __init__(
     self,
     mat_dict: Dict[str, Any],
     wavelength: Optional[np.ndarray] = None,
   ) -> None:
+    from navette._structure import DictProvider as _NativeDict
     self._dict = mat_dict
     self._wavelength = (
       np.ascontiguousarray(np.asarray(wavelength, dtype=np.float64))
       if wavelength is not None
       else None
     )
+    self._native = _NativeDict(
+      {k: _native_value(v) for k, v in dict(mat_dict).items()}, self._wavelength)
 
   def refresh(self, mat_dict: Dict[str, Any],
               wavelength: Optional[np.ndarray] = None) -> None:
@@ -94,6 +101,8 @@ class DictMaterialProvider:
       if wavelength is not None
       else None
     )
+    self._native.refresh(
+      {k: _native_value(v) for k, v in dict(mat_dict).items()}, self._wavelength)
 
   @property
   def grid(self) -> Optional[np.ndarray]:
@@ -121,27 +130,26 @@ class DictMaterialProvider:
     arrays off the known grid, ``AttributeError`` for spec values without
     a grid or for unrecognized value types.
     """
+    if material_name not in self._dict:
+      raise KeyError(material_name)
     mat = self._dict[material_name]
-    if isinstance(mat, np.ndarray):
-      if self._wavelength is not None and mat.shape[0] != self._wavelength.shape[0]:
-        raise ValueError(
-          f"DictMaterialProvider: '{material_name}' has {mat.shape[0]} points, "
-          f"provider grid has {self._wavelength.shape[0]}.")
-      return mat
     if isinstance(mat, (MaterialSpec, dict)) and self._wavelength is None:
       raise AttributeError(
         f"DictMaterialProvider: material '{material_name}' is a spec but "
         "no wavelength was given; pass wavelength= to evaluate specs."
       )
-    if isinstance(mat, (MaterialSpec, dict)):
-      return evaluate(mat, self._wavelength)
-    nk = getattr(mat, "nk", None)
-    if nk is not None:
-      return nk
-    raise AttributeError(
-      f"DictMaterialProvider: material '{material_name}' is not an array, "
-      "a MaterialSpec, or an object with .nk."
-    )
+    if self._wavelength is None and not isinstance(mat, np.ndarray):
+      nk = getattr(mat, "nk", None)
+      if nk is not None:
+        return nk
+      raise AttributeError(
+        f"DictMaterialProvider: material '{material_name}' is not an array, "
+        "a MaterialSpec, or an object with .nk."
+      )
+    if not self._native.contains(material_name):
+      self._native.insert(material_name, _native_value(self._dict[material_name]))
+    grid = self._wavelength if self._wavelength is not None else np.zeros(0)
+    return self._native.get_nk(material_name, grid)
 
   def contains(self, material_name: str) -> bool:
     """True when the dict holds ``material_name`` (no evaluation)."""
@@ -454,6 +462,13 @@ class WeaverMaterialProvider:
       d=self._interp_settings.floater_hormann_d,
     )
     return spline(self._target_wl).astype(np.float64)
+
+
+def _native_value(value: Any) -> Any:
+  """Coerce list/tuple shelves to arrays at the native sync boundary."""
+  if isinstance(value, (list, tuple)):
+    return np.ascontiguousarray(np.asarray(value, dtype=np.complex128))
+  return value
 
 
 def wrap_material_source(source: Any, **kwargs: Any) -> MaterialProvider:

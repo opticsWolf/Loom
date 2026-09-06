@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "navette"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "ahash",
  "approx",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "navette-py"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "ahash",
  "mimalloc",

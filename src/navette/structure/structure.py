@@ -48,11 +48,13 @@ def _pour_back(mapping: Dict[str, str], target: Any, carried: Any, wavelengths: 
     )
   for _old, new in mapping.items():
     payload = target.export_entry(new)
-    if isinstance(payload, dict):
-      shelf[new] = MaterialSpec(model=payload["model"], params=payload["params"])
-    else:
-      shelf[new] = payload
-    if hasattr(carried, "invalidate"):
+    obj = (MaterialSpec(model=payload["model"], params=payload["params"])
+           if isinstance(payload, dict) else payload)
+    shelf[new] = obj
+    nat = None if gridless else getattr(carried, "_native", None)
+    if nat is not None and hasattr(nat, "insert"):
+      nat.insert(new, obj)  # dict-backed native mirror (write-through)
+    elif hasattr(carried, "invalidate"):
       try:
         carried.invalidate(new)
       except Exception:
@@ -60,6 +62,9 @@ def _pour_back(mapping: Dict[str, str], target: Any, carried: Any, wavelengths: 
   # Bare dicts stay gridless (bridge warns); Dict providers gain the grid.
   if not gridless and getattr(carried, "_wavelength", "sentinel") is None:
     carried._wavelength = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
+    nat = getattr(carried, "_native", None)
+    if nat is not None and hasattr(nat, "set_grid"):
+      nat.set_grid(carried._wavelength)
 
 
 class Navette_Structure:

@@ -720,7 +720,7 @@ impl PyDictProvider {
     let mut entries = HashMap::new();
     for (k, v) in mat_dict.iter() {
       let name = k.extract::<String>()?;
-      entries.insert(name, py_entry(&v)?);
+      entries.insert(name.clone(), py_named_entry(&v, &name)?);
     }
     let grid = wavelength.map(|w| w.as_slice().map(|s| s.to_vec())).transpose()?;
     let mut inner = DictProvider::new();
@@ -760,10 +760,29 @@ impl PyDictProvider {
     }
   }
 
+  /// Upsert one entry (arrays, spec dicts). Arrays are length-checked
+  /// against the known grid; specs are grid-agnostic until served.
+  fn insert(&mut self, name: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    match py_named_entry(value, &name)? {
+      Entry::Array(nk) => ver(self.inner.insert_array(name, nk)),
+      Entry::Spec(spec) => {
+        self.inner.insert_spec(name, spec);
+        Ok(())
+      }
+    }
+  }
+
+  /// Establish the grid when unset (specs need it to resolve).
+  fn set_grid(&mut self, wavelength: PyReadonlyArray1<f64>) -> PyResult<()> {
+    self.inner.set_grid(wavelength.as_slice()?.to_vec());
+    Ok(())
+  }
+
   fn refresh(&mut self, mat_dict: &Bound<'_, PyDict>, wavelength: Option<PyReadonlyArray1<f64>>) -> PyResult<()> {
     let mut entries = HashMap::new();
     for (k, v) in mat_dict.iter() {
-      entries.insert(k.extract::<String>()?, py_entry(&v)?);
+      let name = k.extract::<String>()?;
+      entries.insert(name.clone(), py_named_entry(&v, &name)?);
     }
     let grid = wavelength.map(|w| w.as_slice().map(|s| s.to_vec())).transpose()?;
     self.inner.refresh(entries, grid);
