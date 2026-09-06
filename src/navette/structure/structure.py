@@ -67,13 +67,12 @@ class Navette_Structure:
 
   Thin wrapper over the bound ``Structure`` (first-class Rust model).
   ``materials`` accepts any provider-like object (provider, dict, None);
-  it is snapshotted at solve time. Dropped surface vs the legacy Python
-  class (re-add on demand): ``find_layers_by_material``,
-  ``count_material``, ``apply_to_all_layers``, ``generate_simple_layer_list``,
-  ``total_physical_thickness``, ``insert/remove/replace_layer``,
-  ``prune_thin_layers``, ``get_optimization_parameters``,
-  ``set_optimization_mask`` (architect-level covers the live paths),
-  ``__add__`` merging, ``active_material_dict`` alias.
+  it is snapshotted at solve time. Still dropped vs the legacy Python
+  class: ``generate_simple_layer_list`` (legacy row adapter —
+  ``get_solver_inputs()`` is the clean source), structure-level
+  ``prune_thin_layers`` and ``get_optimization_parameters``,
+  ``set_optimization_mask`` (bound-only, unwrapped — architect-level
+  covers the live paths).
   """
 
   def __init__(self, layer_list=None, group_dict=None, materials=None) -> None:
@@ -171,3 +170,43 @@ class Navette_Structure:
     obj = self.__class__.__new__(self.__class__)
     obj._inner = self._inner.clone()
     return obj
+
+  # -- GUI conveniences (restored) --------------------------------------
+  @property
+  def active_material_dict(self) -> Any:
+    """Alias of :attr:`materials` (legacy name)."""
+    return self.materials
+
+  @active_material_dict.setter
+  def active_material_dict(self, value: Any) -> None:
+    self.materials = value
+
+  def find_layers_by_material(self, material_name: str) -> List[int]:
+    return [i for i, layer in enumerate(self._inner.layer_list)
+            if layer.material == material_name]
+
+  def count_material(self, material_name: str) -> int:
+    return len(self.find_layers_by_material(material_name))
+
+  def apply_to_all_layers(self, func) -> None:
+    """Call ``func(layer)`` on every layer, writing mutations back."""
+    for i in range(len(self._inner)):
+      layer = self._inner[i]
+      func(layer)
+      self._inner.replace_layer(i, layer)
+
+  def insert_layer(self, index: int, layer: Any) -> None:
+    self._inner.insert_layer(index, layer)
+
+  def remove_layer(self, index: int) -> Any:
+    return self._inner.remove_layer(index)
+
+  def replace_layer(self, index: int, new_layer: Any) -> None:
+    self._inner.replace_layer(index, new_layer)
+
+  def total_physical_thickness(self) -> float:
+    return sum(layer.thickness for layer in self._inner.layer_list)
+
+  def __contains__(self, material_name: str) -> bool:
+    return any(layer.material == material_name
+               for layer in self._inner.layer_list)
