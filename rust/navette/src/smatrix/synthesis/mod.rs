@@ -34,3 +34,4 @@ pub mod cycle;
 pub mod design_config;
 pub mod driver;
 pub mod pipeline;
+pub mod targets;

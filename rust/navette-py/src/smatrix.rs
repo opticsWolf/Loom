@@ -680,6 +680,7 @@ pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::synthesis_merit::PyMeritSpec>()?;
     m.add_function(wrap_pyfunction!(crate::synthesis_merit::build_needle_targets, m)?)?;
     m.add_function(wrap_pyfunction!(crate::synthesis_merit::reference_rotation, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::synthesis_merit::compile_merit_spec, m)?)?;
     m.add_function(wrap_pyfunction!(crate::synthesis_pipeline::run_design, m)?)?;
     m.add_function(wrap_pyfunction!(crate::synthesis_pipeline::assemble_design, m)?)?;
     m.add_class::<crate::synthesis_pipeline::PyLayerSpec>()?;

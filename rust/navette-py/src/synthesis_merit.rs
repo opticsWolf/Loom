@@ -129,6 +129,22 @@ impl PyMeritSpec {
     pub(crate) fn inner(&self) -> &MeritSpec {
         &self.inner
     }
+
+    pub(crate) fn from_inner(inner: MeritSpec) -> Self {
+        PyMeritSpec { inner }
+    }
+}
+
+/// Compile a target set (JSON) into a native `MeritSpec` (thin over
+/// `targets::compile_merit_spec`): the `build_merit_spec` path.
+#[pyfunction]
+pub(crate) fn compile_merit_spec(request_json: &str) -> PyResult<PyMeritSpec> {
+    let set: navette::smatrix::synthesis::targets::TargetSet =
+        serde_json::from_str(request_json)
+            .map_err(|e| PyValueError::new_err(format!("compile_merit_spec: invalid request: {e}")))?;
+    navette::smatrix::synthesis::targets::compile_merit_spec(&set)
+        .map(PyMeritSpec::from_inner)
+        .map_err(PyValueError::new_err)
 }
 
 #[pymethods]

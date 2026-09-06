@@ -333,6 +333,16 @@ impl Default for SimCurves {
     }
 }
 
+impl MeritSpec {
+    /// Key-group / target-frame counts (tests + converters).
+    pub fn key_count(&self) -> usize {
+        self.keys.len()
+    }
+    pub fn target_count(&self) -> usize {
+        self.targets.len()
+    }
+}
+
 impl SimCurves {
     /// Grid points covered by one row (`n_angles × n_wavs`).
     pub fn grid_points(&self) -> usize {
