@@ -27,7 +27,7 @@ use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyComplex, PyDict, PyList};
 use serde_json::Value;
 
-use navette_structure::{
+use navette::structure::{
   expand,
   Architect, BlockKind, DictProvider, Entry, ExpandOptions, Group, Layer, LayerType, MaterialProvider,
   MaterialSpec, RoughnessType, SharedGroup, SharedStructure, SolverArrays, Structure,
@@ -451,7 +451,7 @@ impl PyGroup {
   }
 
   fn set_error_type(&mut self, channel: &str, value: i32) -> PyResult<()> {
-    let e = ver(navette_structure::ErrorType::try_from_i32(value))?;
+    let e = ver(navette::structure::ErrorType::try_from_i32(value))?;
     match channel {
       "thickness" => self.inner.borrow_mut().thickness_error_type = e,
       "n" => self.inner.borrow_mut().n_error_type = e,
@@ -466,7 +466,7 @@ impl PyGroup {
 
   fn set_error_params(&mut self, channel: &str, params: &Bound<'_, PyDict>) -> PyResult<()> {
     let v = py_to_json(params.as_any())?;
-    let p: navette_structure::ErrorParams =
+    let p: navette::structure::ErrorParams =
       ver(serde_json::from_value(v).map_err(|e| format!("set_error_params: malformed params ({e})")))?;
     match channel {
       "thickness" => self.inner.borrow_mut().thickness_error_params = p,
@@ -539,7 +539,7 @@ impl PyGroup {
   }
   #[setter]
   fn set_thickness_error_type(&mut self, v: i32) -> PyResult<()> {
-    self.inner.borrow_mut().thickness_error_type = ver(navette_structure::ErrorType::try_from_i32(v))?;
+    self.inner.borrow_mut().thickness_error_type = ver(navette::structure::ErrorType::try_from_i32(v))?;
     Ok(())
   }
   #[getter]
@@ -554,7 +554,7 @@ impl PyGroup {
   }
   #[setter]
   fn set_n_error_type(&mut self, v: i32) -> PyResult<()> {
-    self.inner.borrow_mut().n_error_type = ver(navette_structure::ErrorType::try_from_i32(v))?;
+    self.inner.borrow_mut().n_error_type = ver(navette::structure::ErrorType::try_from_i32(v))?;
     Ok(())
   }
   #[getter]
@@ -569,7 +569,7 @@ impl PyGroup {
   }
   #[setter]
   fn set_k_error_type(&mut self, v: i32) -> PyResult<()> {
-    self.inner.borrow_mut().k_error_type = ver(navette_structure::ErrorType::try_from_i32(v))?;
+    self.inner.borrow_mut().k_error_type = ver(navette::structure::ErrorType::try_from_i32(v))?;
     Ok(())
   }
   #[getter]
@@ -584,7 +584,7 @@ impl PyGroup {
   }
   #[setter]
   fn set_inh_delta_error_type(&mut self, v: i32) -> PyResult<()> {
-    self.inner.borrow_mut().inh_delta_error_type = ver(navette_structure::ErrorType::try_from_i32(v))?;
+    self.inner.borrow_mut().inh_delta_error_type = ver(navette::structure::ErrorType::try_from_i32(v))?;
     Ok(())
   }
   #[getter]
@@ -599,7 +599,7 @@ impl PyGroup {
   }
   #[setter]
   fn set_roughness_error_type(&mut self, v: i32) -> PyResult<()> {
-    self.inner.borrow_mut().roughness_error_type = ver(navette_structure::ErrorType::try_from_i32(v))?;
+    self.inner.borrow_mut().roughness_error_type = ver(navette::structure::ErrorType::try_from_i32(v))?;
     Ok(())
   }
   #[getter]
@@ -614,7 +614,7 @@ impl PyGroup {
   }
   #[setter]
   fn set_interface_error_type(&mut self, v: i32) -> PyResult<()> {
-    self.inner.borrow_mut().interface_error_type = ver(navette_structure::ErrorType::try_from_i32(v))?;
+    self.inner.borrow_mut().interface_error_type = ver(navette::structure::ErrorType::try_from_i32(v))?;
     Ok(())
   }
   #[getter]
@@ -695,7 +695,7 @@ impl PyGroup {
   }
 }
 
-fn prefixed(issue: &navette_structure::ValidationIssue) -> String {
+fn prefixed(issue: &navette::structure::ValidationIssue) -> String {
   if issue.is_error() {
     issue.message.clone()
   } else {
@@ -782,7 +782,7 @@ fn py_entry(value: &Bound<'_, PyAny>) -> PyResult<Entry> {
   if let Ok(d) = value.cast::<PyDict>() {
     let v = py_to_json(d.as_any())?;
     let spec: MaterialSpec = ver(serde_json::from_value(v).map_err(|e| e.to_string()))?;
-    if !navette_structure::MODELS.contains(&spec.model.as_str()) {
+    if !navette::structure::MODELS.contains(&spec.model.as_str()) {
       return Err(PyValueError::new_err(format!("Unknown material model {:?}", spec.model)));
     }
     return Ok(Entry::Spec(spec));
@@ -1114,7 +1114,7 @@ impl PyStructure {
       }
     };
     let borrowed = self.inner.borrow();
-    let p = snapshot.as_ref().map(|s| s as &dyn navette_structure::MaterialProvider);
+    let p = snapshot.as_ref().map(|s| s as &dyn navette::structure::MaterialProvider);
     Ok(borrowed.validate(p).iter().map(prefixed).collect())
   }
 
@@ -1415,7 +1415,7 @@ impl PyArchitect {
         Some(snapshot_provider(py, m.bind(py), &needed)?)
       }
     };
-    let p = snapshot.as_ref().map(|s| s as &dyn navette_structure::MaterialProvider);
+    let p = snapshot.as_ref().map(|s| s as &dyn navette::structure::MaterialProvider);
     Ok(self.inner.validate(p).iter().map(prefixed).collect())
   }
 
@@ -1611,7 +1611,7 @@ impl PyArchitect {
 
 
 
-fn gate_arch_issues(issues: &[navette_structure::ValidationIssue]) -> PyResult<Vec<String>> {
+fn gate_arch_issues(issues: &[navette::structure::ValidationIssue]) -> PyResult<Vec<String>> {
   let (errors, warnings): (Vec<_>, Vec<_>) = issues.iter().partition(|i| i.is_error());
   if !errors.is_empty() {
     return Err(PyValueError::new_err(format!(
@@ -1661,7 +1661,7 @@ fn apply_error_fn(
   params: &Bound<'_, PyDict>,
   seed: Option<u64>,
 ) -> PyResult<f64> {
-  use navette_structure::{ErrorParams, ErrorType};
+  use navette::structure::{ErrorParams, ErrorType};
   use rand::SeedableRng;
   let et = ver(ErrorType::try_from_i32(error_type))?;
   let v = py_to_json(params.as_any())?;

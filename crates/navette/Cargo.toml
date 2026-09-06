@@ -1,11 +1,11 @@
 [package]
 name = "navette"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Unified optical thin-film engine: color, interpolation, S-matrix, spectral weaving, materials."
+description = "Unified optical thin-film engine: color, interpolation, S-matrix, spectral weaving, materials, stack model."
 keywords = ["optics", "thin-film", "color", "interpolation", "spectral"]
 categories = ["science"]
 
@@ -14,9 +14,25 @@ name = "navette"
 crate-type = ["rlib"]
 
 [dependencies]
-navette-color = { workspace = true }
-navette-interpolate = { workspace = true }
-navette-materials = { workspace = true }
-navette-smatrix = { workspace = true }
-navette-structure = { workspace = true }
-navette-spectralweave = { workspace = true }
+rayon = { workspace = true }
+num-complex = { workspace = true }
+ndarray = { workspace = true }
+# Must match numpy 0.28's ndarray (0.17) so core arrays convert to Python.
+ndarray017 = { package = "ndarray", version = "0.17" }
+realfft = "3.3"
+parking_lot = "0.12"
+lru = "0.12"
+bytemuck = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+ahash = "0.8"
+smallvec = "1.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+rand_distr = "0.5"
+
+[dev-dependencies]
+# .npy reading for golden-parity tests. default-features=false avoids the
+# npz/flate2 stack so the dev build stays clean on older toolchains.
+ndarray-npy = { version = "0.8", default-features = false }
+approx = "0.5"

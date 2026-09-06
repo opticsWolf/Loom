@@ -212,7 +212,7 @@ impl PyDesignStack {
     ) -> PyResult<Self> {
         let a = ambient.bind(py).borrow().inner.clone();
         let s = substrate.bind(py).borrow().inner.clone();
-        let design: Vec<navette_structure::Layer> =
+        let design: Vec<navette::structure::Layer> =
             films.iter().map(|l| l.inner_clone()).collect();
         let nk_map: HashMap<std::sync::Arc<str>, Vec<Complex64>> = nk
             .iter()
@@ -220,7 +220,7 @@ impl PyDesignStack {
                 v.as_slice().map(|sl| (std::sync::Arc::from(k.as_str()), sl.to_vec()))
             })
             .collect::<Result<_, _>>()?;
-        let gm: HashMap<String, navette_structure::Group> = groups
+        let gm: HashMap<String, navette::structure::Group> = groups
             .iter()
             .map(|(k, g)| (k.clone(), g.inner_clone()))
             .collect();
