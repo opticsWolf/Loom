@@ -1,0 +1,36 @@
+# -*- coding: utf-8 -*-
+# Example program: complete, restorable setup (materials → groups →
+# named structures → architect chain). Every section is also valid as a
+# standalone document ({schema_version, kind, ...} + the section content).
+schema_version: 1
+kind: program
+name: "AR demo"
+sections:
+  materials:
+    - name: "SiO2"
+      code: "L"
+      model: "Konstant"
+      params: {n: 1.46, k: 0.0}
+    - name: "TiO2"
+      code: "H"
+      model: "Konstant"
+      params: {n: 2.35, k: 0.01}
+  groups:
+    - name: "H"
+      thick_factor: 1.0
+  structures:
+    - label: "ar"
+      layers:
+        - material_code: "L"
+          thickness_nm: 100.0
+        - material_code: "H"
+          thickness_nm: 60.0
+          inhomogen: true
+          inh_delta: 0.2
+          optimize: false
+          needle: false
+  architect:
+    blocks:
+      - structure: "ar"
+        label: "main"
+        kind: 1

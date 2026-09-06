@@ -190,6 +190,26 @@ class GroupConfig(BaseModel):
     n_error_params: ErrorParams = Field(default_factory=ErrorParams)
     k_error_params: ErrorParams = Field(default_factory=ErrorParams)
 
+class BlockConfig(BaseModel):
+    """One architect block: reference to a named structure plus flags."""
+    model_config = ConfigDict(extra="forbid")
+
+    structure: str
+    inverted: bool = False
+    repeat_count: int = Field(default=1, ge=1)
+    label: str = ""
+    kind: int = Field(default=1, ge=0, le=1, description="BlockKind: 0=STACK, 1=FILMS")
+
+
+class NamedStructureConfig(BaseModel):
+    """A labelled structure: authoring layers + optional own groups."""
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    layers: List[LayerConfig]
+    groups: List[GroupConfig] = Field(default_factory=list)
+
+
 # -------------------------------------------------------------------------
 # Structure and Architect states (for serialisation)
 # -------------------------------------------------------------------------
