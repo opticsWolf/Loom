@@ -72,7 +72,7 @@ Navette/
 │   ├── _*.py                 # shims re-exporting the `navette._navette` submodules
 │   ├── structure/            # stacks, architect (native model + thin wrappers)
 │   ├── synthesis/            # needle pipeline driver (native DesignStack)
-│   ├── config/               # YAML/JSON libraries, stacks, program documents
+│   ├── config/               # native-validated holders, program documents
 │   └── data/CIE/             # bundled reference spectra
 ├── rust/                     # Rust sources: one engine crate + bindings
 │   ├── navette/              # pure-Rust engine (color/interpolate/materials/
@@ -80,7 +80,8 @@ Navette/
 │   │                         # published as `navette` on crates.io)
 │   └── navette-py/           # PyO3 aggregator -> navette._navette (one wheel)
 ├── validation/               # tests, parity, benches, goldens + references (see validation/README.md)
-├── examples/  tools/  docs/plans/  attic/
+├── tools/check_exposure.py   # bidirectional exposure lint (CI)
+├── examples/  docs/plans/  attic/
 ```
 
 ### Install & build
@@ -94,6 +95,16 @@ cargo test --workspace     # everything (needs Python for binding crates)
 cargo test-pure            # pure-Rust gate (no Python needed)
 pytest validation
 ```
+
+### Architecture: Rust core, Python addon
+
+All logic and all validation live in the `navette` Rust crate — it runs
+fully standalone (file → design → solve → report, no interpreter).
+The Python package is a thin addon: validated config holders, YAML→dict
+parsing, result reshapes, and re-exports. Conversely every feature-level
+Rust function is exposed via PyO3, so Python can drive the whole engine.
+`tools/check_exposure.py` enforces this both ways in CI (see
+docs/plans/exposure_audit.md).
 
 ### Layout notes
 

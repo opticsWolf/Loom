@@ -5,12 +5,12 @@
 addon. Conversely, **every** public Rust function is exposed to Python,
 so Python can still drive the whole engine.
 
-**Status:** living tracker. Phases run R1 → R5 in order; each phase cuts
-over sharply (old Python logic deleted, not dual-maintained). Pydantic
-survives only as transition scaffolding: it keeps validating exactly
-those models whose phase has not cut over yet, and each phase deletes
-the models it ports. At no point do pydantic and serde own the same
-schema in the shipped state.
+**Status: COMPLETE 2026-09-06.** All phases shipped, each verified
+(bitwise twins), version-bumped, committed and pushed:
+R1 solver/needle/eigen/orchestration (0.4.2–0.4.6), R2 providers
+(0.4.7–0.4.10), R3 synthesis drivers (0.4.11–0.4.14), R4 config (0.4.15–
+0.4.17), R5 audit (0.4.18–0.4.19). Pydantic deleted, no dual
+maintenance remains. Exposure record: docs/plans/exposure_audit.md.
 
 ## 0. Binding principles (locked)
 
