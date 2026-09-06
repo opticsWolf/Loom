@@ -281,6 +281,12 @@ usable), `load_program` (dependency order, file-wins, context fills
 absent, prefix namespaces with consistent ref rewrites), `BlockConfig`/
 `NamedStructureConfig` + `architect_from_config`, `example_program.yaml`.
 6 program tests; 103 validation green.
+2026-09-06: RELEASE 0.4.0 — version bumped everywhere (workspace +
+crates + pyproject + __about__ + smoke assert; breaking vs 0.3.0:
+Rust-first port), release wheel built + force-added (wheel verified:
+141 entries, METADATA 0.4.0, single _navette.pyd), dev→main merged
+(41 commits, main had no divergences) and pushed. Old 0.3.0 wheel
+left in target/wheels (history, not referenced).
 DECIDED (format): pure YAML or pure JSON per file, no hybrid;
 machine-written YAML gets an emitted comment header (provenance:
 timestamp, source program, config hash, warnings); JSON refuses
