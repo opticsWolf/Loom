@@ -74,14 +74,10 @@ Navette/
 │   ├── synthesis/            # needle pipeline driver (native DesignStack)
 │   ├── config/               # YAML/JSON libraries, stacks, program documents
 │   └── data/CIE/             # bundled reference spectra
-├── crates/                   # Rust sources: six pure cores + umbrella + bindings
-│   ├── navette-color/        # pure-Rust color core
-│   ├── navette-interpolate/  # pure-Rust interpolation core
-│   ├── navette-smatrix/      # pure-Rust S-matrix core (incl. synthesis)
-│   ├── navette-spectralweave/# pure-Rust weaving core
-│   ├── navette-materials/    # pure-Rust dispersion core
-│   ├── navette-structure/    # pure-Rust stack model (layers/groups/expansion)
-│   ├── navette/              # umbrella rlib (published as `navette` on crates.io)
+├── crates/                   # Rust sources: one engine crate + bindings
+│   ├── navette/              # pure-Rust engine (color/interpolate/materials/
+│   │                         # smatrix/spectralweave/structure modules;
+│   │                         # published as `navette` on crates.io)
 │   └── navette-py/           # PyO3 aggregator -> navette._navette (one wheel)
 ├── validation/               # tests, parity, benches, goldens + references (see validation/README.md)
 ├── examples/  tools/  docs/plans/  attic/
@@ -101,9 +97,9 @@ pytest validation
 
 ### Layout notes
 
-- `crates/` holds the Cargo workspace (six pure-Rust engine cores, the
-  `navette` umbrella rlib, and the `navette-py` PyO3 aggregator) — the
-  idiomatic Rust layout, publishable to crates.io.
+- `crates/` holds the Cargo workspace (the single `navette` engine crate
+  plus the `navette-py` PyO3 aggregator) — the idiomatic Rust layout,
+  publishable to crates.io.
 - `src/navette/` is the Python package in src-layout — the idiomatic
   Python layout, which maturin detects automatically for mixed projects.
 
@@ -118,6 +114,5 @@ publisher) + crates.io (token), leaf crates first.
 maturin build --release   # -> target/wheels/navette-0.4.0-*.whl (single wheel, all engines)
 ```
 
-Manual fallback (same order the workflow uses):
-`cargo publish -p navette-interpolate -p navette-materials -p navette-color -p navette-spectralweave -p navette-structure -p navette-smatrix`,
-then `cargo publish -p navette`; `maturin upload target/wheels/navette-0.4.0-*.whl`.
+Manual fallback: `cargo publish -p navette`;
+`maturin upload target/wheels/navette-0.4.0-*.whl`.

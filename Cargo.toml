@@ -1,12 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/navette-color",
-  "crates/navette-interpolate",
-  "crates/navette-smatrix",
-  "crates/navette-structure",
-  "crates/navette-spectralweave",
-  "crates/navette-materials",
   "crates/navette",
   "crates/navette-py",
 ]
@@ -26,13 +20,7 @@ numpy = "0.28"
 num-complex = "0.4"
 rayon = "1"
 ndarray = "0.15"
-# Engine cores (version + path: resolvable on crates.io at publish time).
-navette-color = { version = "0.4.0", path = "crates/navette-color" }
-navette-interpolate = { version = "0.4.0", path = "crates/navette-interpolate" }
-navette-materials = { version = "0.4.0", path = "crates/navette-materials" }
-navette-smatrix = { version = "0.4.0", path = "crates/navette-smatrix" }
-navette-structure = { version = "0.4.0", path = "crates/navette-structure" }
-navette-spectralweave = { version = "0.4.0", path = "crates/navette-spectralweave" }
+# Single Rust crate (pure engine + modules); bindings take it by path.
 navette = { version = "0.4.0", path = "crates/navette" }
 
 [profile.release]
