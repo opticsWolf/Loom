@@ -24,6 +24,16 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  check-cie-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: embedded CIE tables match sources
+        run: python tools/check_cie_sync.py
+
   check-versions:
     runs-on: ubuntu-latest
     steps:
@@ -40,7 +50,7 @@ jobs:
             || { echo "version mismatch"; exit 1; }
 
   build-wheels:
-    needs: check-versions
+    needs: [check-versions, check-cie-sync]
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -76,7 +86,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-crates:
-    needs: check-versions
+    needs: [check-versions, check-cie-sync]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

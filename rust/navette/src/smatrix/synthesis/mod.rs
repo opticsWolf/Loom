@@ -20,6 +20,7 @@
 //!   optimization technique to the design of optical coatings,"
 //!   Appl. Opt. 35(28), 5493–5508 (1996).
 
+pub mod color_merit;
 pub mod structure;
 pub mod merit;
 pub mod thick_opt;

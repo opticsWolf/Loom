@@ -1,0 +1,16 @@
+Embedded CIE reference data
+===========================
+
+`cmf_1931_2deg.json`
+  CIE 1931 2° colour-matching functions x̄(λ), ȳ(λ), z̄(λ), 360-830 nm
+  (1 nm). Extracted from `src/navette/data/CIE/cmf/CIE_xyz_1931_2deg.json`.
+
+`illum_d65.json`
+  CIE standard illuminant D65 relative spectral power distribution.
+  Extracted from `src/navette/data/CIE/sds/CIE_std_illum_D65_S_D65.json`.
+
+Attribution: data © CIE, reproduced under CC-BY-SA 4.0 as labeled
+upstream. Values are unmodified; only the file envelope was reformatted
+(minimal `{wavelengths, …}` JSON) by `tools/extract_cie_defaults.py`.
+The share-alike obligation binds these data files, not the crate.
+`tools/check_cie_sync.py` (CI) fails loud on any drift vs the sources.

@@ -41,8 +41,13 @@ Conventions: nm everywhere (solver grid = CMF grid units, no conversion);
 ## D2. Core kernel — `smatrix/synthesis/color_merit.rs` (new, ~250 lines)
 
 ```rust
-pub enum ColorQuantity { Lab, XyY }                    // LCh/sRGB/Oklab later
+// P1: Lab | XyY. P2 adds LCh | Oklab | Y (scalar) — §D9 progression.
+// Reserved (on demand, no work planned): Srgb | Luv | Xyz | Din99.
+pub enum ColorQuantity { Lab, XyY, LCh, Oklab, Y }
 pub enum ColorDistance { DeltaE2000, DeltaE76, Channels }
+/// Triple reference, or scalar for `Y` (luminance-only demands).
+/// JSON: `[62, 18, -34]` vs `12.5` (untagged; validated against quantity).
+pub enum ColorReference { Triple([f64; 3]), Scalar(f64) }
 pub struct ColorDemand {
   pub key_idx: u32,            // normal MeritKey (angle+curve) — §3
   pub cmf: Vec<[f64; 3]>,      // NATIVE table grid (resampled at eval, §D2.4)
@@ -50,11 +55,28 @@ pub struct ColorDemand {
   pub illuminant: Vec<f64>,
   pub illum_wl: Vec<f64>,
   pub quantity: ColorQuantity,
-  pub reference: [f64; 3],
+  pub reference: ColorReference,
   pub distance: ColorDistance,
   pub weight: f64,
 }
 ```
+
+Quantity × distance compatibility (enforced at compile, §3):
+
+| quantity | DeltaE2000/76 | Channels | notes |
+|---|---|---|---|
+| Lab | yes | yes (L/a/b tol) | white = illuminant white (§D2.2) |
+| XyY | REFUSED (ΔE is Lab-space) | yes (x/y/Y tol) | fully analytic → bitwise twins |
+| LCh (P2) | yes (ref converted LCh→Lab, ΔE in Lab) | yes, **hue diff wrapped** to [−180,180] | singularity at C=0 → FD-twin |
+| Oklab (P2) | REFUSED — use equal-tol Channels, mathematically identical to unweighted Euclidean | yes | smooth incl. neutrals (cbrt guarded by FD) |
+| Y (P2) | n/a (scalar) | scalar tol | the AR classic: dark residual, hue free |
+
+Cross-illuminant rules: Lab/LCh white point = the demand illuminant's
+own white (computed at compile from native tables — never adapt
+D65-numbers to F2-numbers). Oklab is D65-defined: non-D65 demands
+Bradford-adapt XYZ → D65 first (existing `func_08`, illuminant white
+known at compile, D65 tristimulus constant in-tree), then Oklab.
+Documented, tested (adapted-white identity twin).
 
 1. `xyz_of_spectrum(sim_row, sim_wl, cmf, cmf_wl, illum, illum_wl)` —
    generalize `color::func_13` integration: resample tables onto `sim_wl`
@@ -83,7 +105,8 @@ pub struct ColorDemand {
 
 1. `TargetSet` gains `#[serde(default)] pub color: Vec<ColorTargetJson>`:
    `{curve ("Ru"|"Rs"|"Rp"|"Tu"|"Ts"|"Tp"), angle, illuminant (name|table),
-   observer (name|cmf-table), quantity, reference [3], distance, weight}`.
+   observer (name|cmf-table), quantity, reference ([3] or scalar for `Y`),
+   distance, weight}`.
    Names resolved: `"D65"` → embedded default; `"1931_2deg"` → embedded
    default; anything else must be an explicit `{wavelengths, values}`
    table (mirrors the explicit-grid provider rule — no registry to drift).
@@ -92,8 +115,11 @@ pub struct ColorDemand {
    - curve ∉ {Rs,Rp,Ru,Ts,Tp,Tu} → refuse (`"...: color needs a front
      R/T intensity curve, got {curve}."`); back curves refused in v1
      (`"...: back-incidence color is not supported yet."`).
-   - quantity/distance strings unknown → refuse; `reference.len() != 3`
-     → refuse; weight via `check_weight`; kind ≠ Exact → refuse;
+   - quantity/distance strings unknown → refuse; reference shape must
+     match quantity (scalar ⟺ `Y`, triple otherwise — refuse with
+     `"color: scalar reference needs quantity 'Y'"` / converse);
+     quantity×distance pairs outside the §D2 matrix → refuse naming both;
+     weight via `check_weight`; kind ≠ Exact → refuse;
      transform ≠ linear → refuse (mirrors the needle linear-only rule);
      `integral`/`count_norm`/`phase`/`band` set → refuse (color *is*
      integral; no double counting).
@@ -118,7 +144,9 @@ pub struct ColorDemand {
    standard missing-penalty path, parity with pointwise); empty
    table/sim overlap → `Err` (refuse-loud: a color demand that sees
    nothing is a spec bug, unlike pointwise grid-miss skips — documented
-   divergence, tested).
+   divergence, tested). LCh-hue residual wrapped to [−180,180] before
+   scaling (wrap-twin: h=179° vs h=−179° ≡ 2°, not 358°). `Y` demands
+   push one scalar residual.
    - Thick-opt/LM work with color with **zero further changes**
      (they consume `residuals()`).
 
@@ -190,9 +218,11 @@ preserved for later (fields exist when back color lands).
 ## D6. Python surface (thin, per R5 rules)
 - `spectralweave/target.py`: `ColorTarget` dataclass
   (`curve="Ru"`, `angle=0.0`, `illuminant="D65"`, `observer="1931_2deg"`,
-  `quantity="Lab"`, `reference=(…)`, `distance="DeltaE2000"`, `weight=1.0`)
-  with `_dump()` (names resolved to arrays from `data/CIE/`, or explicit
-  arrays passed through); `TargetCollection.color_targets`;
+  `quantity="Lab"`, `reference=(…)` triple **or scalar for `Y`**,
+  `distance="DeltaE2000"`, `weight=1.0`) with `_dump()` (names resolved
+  to arrays from `data/CIE/`, or explicit arrays passed through);
+  shape/compat pre-checks mirror §D3 messages (native re-validates —
+  single validator, no duplication); `TargetCollection.color_targets`;
   `validate_targets` arm natively (fail-fast messages mirror §D3).
 - `synthesis/__init__.py::build_merit_spec`: include the `"color"`
   section (same 5-line shape as spectral/angular).
@@ -265,12 +295,44 @@ messages; `_dump` name→array resolution (D65 + explicit-table paths);
 `build_merit_spec` color section compiles; program-document roundtrip
 with a color demand (schema v1 carries it — assert restore → same merit).
 
-## D9. Sequencing (one feature per patch)
-- **0.4.22 (D1+D2)** — data + kernel + R1 tests.
-- **0.4.23 (D3+D4)** — schema/compile/merit + R2/R3 tests.
-- **0.4.24 (D5)** — Option B machinery + R4 tests.
-- **0.4.25 (D6+D7)** — Python surface + docs + R5 tests.
-Each: implement → gates (R0) → twin batch → commit/push dev → ff to main.
+## D9. Progression (vertical slices — each phase works end to end)
+
+Rationale: slice by *quantity set*, not by layer. P1 proves the whole
+chain (kernel → schema → merit → needle-B → Python) on Lab|xyY; P2 runs
+the same arms with LCh|Oklab|Y, which by then is mostly new tests — the
+machinery already exists. Horizontal layering (all quantities in the
+kernel first) would touch every arm twice.
+
+- **P1 — core color, Lab|xyY (0.4.23–0.4.26):**
+  - 0.4.23: D1 remainder (embedded defaults + sync CI) + D2 kernel
+    (Lab|xyY) + R1 tests. DONE 2026-09-06 (dev): `tools/cie_defaults.py` +
+    extract + sync scripts, `rust/navette/data/{cmf_1931_2deg,illum_d65}.json`
+    + NOTICE, CI `check-cie-sync` job gating wheels/crates, `tables.rs`
+    `default_tables()` (OnceLock, `pub(crate)`), `synthesis/color_merit.rs`
+    (all fns `pub(crate)` — exposure unchanged at 204/90), 7 R1 tests
+    (306 lib green). Notes: white-Y identity is 1-ulp not bitwise (per-term
+    k rounding — asserted 1e-15); Δλ is forward-difference (uniform grid ⇒
+    op-for-op `func_13` summation); kernel dead_code warnings live until
+    0.4.24 wires D3/D4 consumers.
+  - 0.4.24: D3+D4 schema/compile/merit (Lab|xyY) + R2/R3 tests.
+  - 0.4.25: D5 needle-B (R/T buckets, U-½) + R4 tests.
+  - 0.4.26: D6+D7 Python surface + docs + R5 tests.
+- **P2 — extended quantities (0.4.27):** LCh + Oklab + Y-scalar through
+  all arms in one patch: scalar-`reference` JSON shape, §D2 compat
+  matrix, hue-wrap, Oklab D65-adapt rule. New twins: LCh-Channels vs
+  `_color` LCh pipeline; Oklab-Channels vs `func_04` direct (bitwise —
+  smooth map, analytic Jacobian + FD only at cbrt-zero guard);
+  Y-scalar vs hand-rolled ΣR·E·ȳ oracle (bitwise); hue-wrap unit test;
+  adapted-white identity (Oklab under F2 ≡ Oklab of adapted XYZ).
+  Needle R4 batch re-run per new quantity (chain-rule vs FD sweep).
+- **P3 — on demand (unversioned, each its own patch+twin):** sRGB / Luv /
+  XYZ-raw / DIN99-coords (all kernels in-tree); whiteness/yellowness
+  (~20-line kernels first); dominant-wavelength+purity (2-vector ref +
+  purple-line branch rule); opacity (two-spectrum demand — architecture
+  decision first, §D10).
+
+Each patch: implement → gates (R0) → twin batch → commit/push dev →
+ff to main. Parser prerequisite shipped 0.4.22 (all 97 files bitwise).
 
 ## D10. Risks & mitigations
 | Risk | Mitigation |
@@ -280,4 +342,7 @@ Each: implement → gates (R0) → twin batch → commit/push dev → ff to main
 | Table/Python drift | CI byte-compare fails loud, not silent |
 | CC-BY-SA data in crate | NOTICE attribution; data files isolated in `data/` |
 | Hot-pass regression | nonzero-skip guards + bitwise grad-free test + bench |
-| Scope creep (LCh/sRGB/back/boxes) | refused-with-message at compile; each a future patch with its own twin |
+| Hue wrap (LCh Channels) | wrap before scaling; dedicated wrap-twin |
+| Oklab under non-D65 | Bradford-adapt to D65 (in-tree `func_08`), identity-tested |
+| Scalar-vs-triple ref confusion | untagged enum + quantity-gated validation, both directions tested |
+| Scope creep (sRGB/Luv/whiteness/opacity/boxes) | refused-with-message at compile; P3 per-item with own twin |
