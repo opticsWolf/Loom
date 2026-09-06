@@ -1823,6 +1823,76 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn color_fold_chain_rule_holds_per_quantity() {
+        // R4 re-run for P2: LCh (hue wrap live), Oklab (adapt live), Y
+        // (scalar) — central FD of the true merit vs deposited g, plus
+        // Lab regression in the same harness.
+        use crate::smatrix::synthesis::color_merit::{
+            ColorDemand as QDemand, ColorDistance as QDist, ColorQuantity as QQty,
+            ColorReference as QRef,
+        };
+        // Tri-lobe toy CMF (linearly independent channels — genuine hue
+        // variation; the affine toy elsewhere is rank-1 in chromaticity and
+        // holds hue constant, useless for LCh).
+        let wl: Vec<f64> = TEST_WAVLS.to_vec();
+        let cmf: Vec<[f64; 3]> = vec![
+          [0.30, 0.05, 0.00],
+          [0.50, 0.30, 0.05],
+          [0.20, 0.60, 0.20],
+          [0.05, 0.50, 0.50],
+          [0.00, 0.20, 0.70],
+          [0.00, 0.05, 0.40],
+        ];
+        let cases: Vec<(QQty, QRef)> = vec![
+            (QQty::Lab, QRef::Triple([60.0, 10.0, -20.0])),
+            (QQty::XyY, QRef::Triple([0.30, 0.31, 0.50])),
+            (QQty::LCh, QRef::Triple([60.0, 20.0, 100.0])),
+            (QQty::Oklab, QRef::Triple([0.55, 0.02, -0.03])),
+            (QQty::Y, QRef::Scalar(0.45)),
+        ];
+        let base = vec![0.55, 0.50, 0.45, 0.60, 0.52, 0.48];
+        let mk = |row: Vec<f64>| {
+            let mut sim = color_sim_r4(0.0);
+            sim.curves[0] = Some(Arc::from(row));
+            sim
+        };
+        for (q, r) in cases {
+            let mut spec = MeritSpec::new();
+            let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
+            spec
+                .add_color_demand(
+                    QDemand::new(
+                        k as u32,
+                        cmf.clone(),
+                        wl.clone(),
+                        vec![1.0; NW],
+                        wl.clone(),
+                        q,
+                        r,
+                        QDist::Channels,
+                        1.0,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let fold =
+                build_needle_targets(&spec, &[0.0], &TEST_WAVLS, Some(&mk(base.clone()))).unwrap();
+            let delta = 1e-6;
+            for j in [1usize, 4] {
+                let mut hi = base.clone();
+                hi[j] += delta;
+                let mut lo = base.clone();
+                lo[j] -= delta;
+                let fd = (spec.merit(&mk(hi), 1e6) - spec.merit(&mk(lo), 1e6)) / (2.0 * delta);
+                let g = fold.grad_r[j];
+                let scale = g.abs().max(1e-30);
+                assert!((fd - g).abs() / scale < 1e-6, "{q:?} j={j} fd={fd} g={g}");
+            }
+        }
+    }
+
     #[test]
     fn u_curve_half_is_sum_of_single_branch_halves() {
         // Load-bearing 1/2: Ru(both branches) == (Rs(s-only) + Rp(p-only))/2.

@@ -459,9 +459,12 @@ pub fn check_color_demand(t: &ColorTargetJson) -> Result<ColorDemand, String> {
     let quantity = match t.quantity.as_str() {
       "Lab" => ColorQuantity::Lab,
       "XyY" => ColorQuantity::XyY,
+      "LCh" => ColorQuantity::LCh,
+      "Oklab" => ColorQuantity::Oklab,
+      "Y" => ColorQuantity::Y,
       q => {
         return Err(format!(
-          "color: unknown quantity {q:?} (P1 serves 'Lab'|'XyY')."
+          "color: unknown quantity {q:?} (one of 'Lab'|'XyY'|'LCh'|'Oklab'|'Y')."
         ))
       }
     };
@@ -821,7 +824,7 @@ mod tests {
     assert!(bad(&|t| t.count_norm = Some(2.0)).contains("count_norm"));
     assert!(bad(&|t| t.phase = true).contains("phase"));
     assert!(bad(&|t| t.band = Some(Band::Scalar(0.1))).contains("band"));
-    assert!(bad(&|t| t.quantity = "LCh".to_string()).contains("unknown quantity"));
+    assert!(bad(&|t| t.quantity = "Nope".to_string()).contains("unknown quantity"));
     assert!(bad(&|t| t.distance = "DIN99".to_string()).contains("unknown distance"));
     assert!(bad(&|t| t.quantity = "XyY".to_string()).contains("XyY"));
     assert!(bad(&|t| t.illuminant = IllumJson::Name("F2".to_string())).contains("unknown illuminant"));
@@ -829,6 +832,27 @@ mod tests {
     assert!(bad(&|t| t.reference = ReferenceJson::Valid(ColorReference::Scalar(1.0)))
       .contains("scalar reference"));
     assert!(bad(&|t| t.weight = -1.0).contains("weight"));
+  }
+
+
+  #[test]
+  fn p2_quantities_compile_and_gate_pairs() {
+    // LCh x DeltaE (ref converts to Lab), Oklab/Y x Channels compile;
+    // Oklab x DeltaE and Y x DeltaE refuse; Y x triple refuses (shape).
+    let ok = |q: &str, r: ReferenceJson, d: &str| {
+      let mut set = color_set();
+      set.color[0].quantity = q.to_string();
+      set.color[0].reference = r;
+      set.color[0].distance = d.to_string();
+      compile_merit_spec(&set)
+    };
+    assert!(ok("LCh", ReferenceJson::Valid(crate::smatrix::synthesis::color_merit::ColorReference::Triple([60.0, 20.0, 100.0])), "DeltaE2000").is_ok());
+    assert!(ok("LCh", ReferenceJson::Valid(crate::smatrix::synthesis::color_merit::ColorReference::Triple([60.0, 20.0, 100.0])), "Channels").is_ok());
+    assert!(ok("Oklab", ReferenceJson::Valid(crate::smatrix::synthesis::color_merit::ColorReference::Triple([0.5, 0.01, 0.02])), "Channels").is_ok());
+    assert!(ok("Y", ReferenceJson::Valid(crate::smatrix::synthesis::color_merit::ColorReference::Scalar(0.5)), "Channels").is_ok());
+    assert!(ok("Oklab", ReferenceJson::Valid(crate::smatrix::synthesis::color_merit::ColorReference::Triple([0.5, 0.0, 0.0])), "DeltaE76").unwrap_err().contains("Oklab"));
+    assert!(ok("Y", ReferenceJson::Valid(crate::smatrix::synthesis::color_merit::ColorReference::Scalar(0.5)), "DeltaE76").unwrap_err().contains("'Y'"));
+    assert!(ok("Y", ReferenceJson::Valid(crate::smatrix::synthesis::color_merit::ColorReference::Triple([0.5, 0.0, 0.0])), "Channels").unwrap_err().contains("scalar"));
   }
 
   #[test]

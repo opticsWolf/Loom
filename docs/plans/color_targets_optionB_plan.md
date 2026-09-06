@@ -354,7 +354,20 @@ kernel first) would touch every arm twice.
     section (TargetSet JSON roundtrip instead); (3) `check_color_demand`
     is `pub` (navette-py is a separate crate) + allowlisted.
     319+22+15 Rust, exposure 207/93, 339 green.
-- **P2 — extended quantities (0.4.27):** LCh + Oklab + Y-scalar through
+- **P2 — extended quantities (0.4.27):** DONE 2026-09-06 (dev) — LCh +
+  Oklab + Y-scalar through all arms in one patch (no struct changes;
+  `new()` matrix extended, `color_of_xyz` + `objective` arms, compile
+  quantity strings, zero merit/needle/fold changes). Twins: LCh-DE76
+  1e-12, hue-cut wrap twin (wrapped==native, raw provably not), Oklab
+  HEX through VonKries, Y HEX vs hand oracle, adapted-white + D65-
+  neutral units, achromatic-finite gradients, per-quantity needle FD,
+  P2 compile gates, surface constructions. FINDINGS: (1) the LCh twin
+  caught a REAL bug — ΔE arm left `c` in LCh while converting only the
+  ref (fixed: Lab recomputed from XYZ, no roundtrip; Rust value pin
+  added); (2) pre-existing in-tree D65-white/Oklab-matrix mismatch
+  (~1e-4 b, documented in code+docs, kernel≡oracle bitwise regardless);
+  (3) affine toy CMFs are hue-degenerate — P2 FD uses a tri-lobe CMF.
+  LCh + Oklab + Y-scalar through (original scope, kept for reference):
   all arms in one patch: scalar-`reference` JSON shape, §D2 compat
   matrix, hue-wrap, Oklab D65-adapt rule. New twins: LCh-Channels vs
   `_color` LCh pipeline; Oklab-Channels vs `func_04` direct (bitwise —

@@ -274,3 +274,19 @@ else must be an explicit table (no registry to drift).
   demands ride the shared bucket under the same convention as pointwise
   targets. Zero points are skipped in the hot pass, so color-free sets
   are bitwise unaffected.
+
+### Extended quantities (P2: LCh | Oklab | Y)
+
+- **LCh:** references convert LCh→Lab once per eval; DeltaE is measured
+  in Lab. Channels compare (L, C, h) with the hue difference wrapped to
+  [−180, 180] *before* scaling (179 vs −179 is 2 deg, not 358).
+  Near-neutral colors (C≈0) have ill-defined hue — the kernel gradient
+  stays finite (FD class) but directionally unstable; weight hue
+  tolerance generously near the achromatic axis.
+- **Oklab:** D65-defined. Non-D65 demands Bradford-adapt XYZ→D65 first
+  (same `adapt` the bindings use, unclipped so the FD gradient stays
+  smooth). DeltaE on Oklab is refused — equal-tol Channels *is*
+  unweighted Euclidean. Note: the in-tree D65 white constant and the
+  Oklab matrix disagree ~1e-4 in b (pre-existing); systematic, negligible.
+- **Y:** scalar reference, single residual off `tol[0]` (the AR classic:
+  dark residual, hue free).

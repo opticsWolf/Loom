@@ -180,10 +180,15 @@ class ColorTarget:
     (``{"wavelengths", "values"}`` / ``{"wavelengths", "xyz"}``);
     unknown names are refused natively (no registry to drift).
     Lab white point is always the demand illuminant's own white.
-    v1 limits (all refused natively with named messages): front R/T curves
+    Limits (all refused natively with named messages): front R/T curves
     only (no back, no absorption/phase curves), kind ``"Exact"`` only,
-    ``"linear"`` only, quantities Lab|XyY x DeltaE2000|DeltaE76|Channels
-    (XyY takes Channels only — DeltaE is Lab-space). No ``integral`` /
+    ``"linear"`` only; quantities Lab|XyY|LCh|Oklab|Y — DeltaE2000|DeltaE76
+    in Lab/LCh only (XyY and Oklab take Channels; Y is scalar Channels).
+    Oklab references are D65-Oklab (non-D65 demands Bradford-adapt first;
+    in-tree D65 white carries a pre-existing ~1e-4 b offset — systematic,
+    far below demand relevance). LCh hue wraps before scaling; near-neutral
+    hues are gradient-unstable by nature (weight hue tolerance generously
+    near the achromatic axis). No ``integral`` /
     ``count_norm`` / ``phase`` / ``band`` — a color demand already is
     integral. ``weight`` scales the demand's merit sum (default 1).
     Needle note: ``Ru``/``Tu`` demands split half per polarization branch

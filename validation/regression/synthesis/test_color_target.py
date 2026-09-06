@@ -22,7 +22,7 @@ def test_construction_refusals_mirror_native():
   with pytest.raises(ValueError, match="back-incidence"):
     ColorTarget(curve="RBs")
   with pytest.raises(ValueError, match="unknown quantity"):
-    ColorTarget(quantity="LCh")
+    ColorTarget(quantity="Nope")
   with pytest.raises(ValueError, match="unknown distance"):
     ColorTarget(distance="DIN99")
   with pytest.raises(ValueError, match="scalar reference"):
@@ -103,3 +103,25 @@ def test_named_and_explicit_tables_agree():
   row = np.full((1, len(WL)), 0.5)
   sim = sim_curves_from_arrays(np.array([0.0]), WL, {"Ru": row})
   assert named.merit(sim, 1e6).hex() == explicit.merit(sim, 1e6).hex()
+
+
+def test_p2_quantities_construct_and_compile():
+  col = TargetCollection()
+  col.add(ColorTarget(quantity="LCh", reference=(60.0, 20.0, 100.0),
+                      distance="DeltaE2000"))
+  col.add(ColorTarget(quantity="Oklab", reference=(0.55, 0.02, -0.03),
+                      distance="Channels"))
+  col.add(ColorTarget(quantity="Y", reference=0.45, distance="Channels"))
+  assert col.count == 3
+  spec = build_merit_spec(col)
+  assert spec.n_residuals() == 3
+  wl = np.linspace(500., 519., 20)
+  row = np.full((1, len(wl)), 0.5)
+  sim = sim_curves_from_arrays(np.array([0.0]), wl, {"Ru": row})
+  assert np.isfinite(spec.merit(sim, 1e6))
+  # Pair gates still fire through the surface.
+  with pytest.raises(ValueError, match="Oklab"):
+    ColorTarget(quantity="Oklab", reference=(0.5, 0.0, 0.0),
+                distance="DeltaE76")
+  with pytest.raises(ValueError, match="'Y'"):
+    ColorTarget(quantity="Y", reference=0.45, distance="DeltaE2000")

@@ -10,7 +10,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::color::common::xyz_to_lab;
+use crate::color::common::{xyz_to_lab, REF_WHITE_D65};
+use crate::color::func_02::{lab_to_lch, lch_to_lab};
+use crate::color::func_04::xyz_to_oklab;
+use crate::color::func_08::adapt;
 use crate::color::func_01::xyz_to_xyy;
 use crate::color::func_09::delta_e_76_single;
 use crate::color::func_16::delta_e_2000_single;
@@ -102,21 +105,23 @@ impl ColorDemand {
         "color: scalar reference needs quantity 'Y'.".to_string()
       });
     }
-    // P2 quantities: refused here, schema-stable enums.
-    match quantity {
-      ColorQuantity::LCh | ColorQuantity::Oklab | ColorQuantity::Y => {
-        return Err(format!(
-          "color: quantity '{quantity:?}' arrives in P2 (0.4.27); P1 serves Lab|XyY."
-        ))
-      }
-      ColorQuantity::Lab | ColorQuantity::XyY => {}
-    }
-    // Compat matrix (§D2): ΔE is Lab-space; Oklab-ΔE would double-count
-    // (equal-tol Channels is mathematically identical to unweighted Euclidean).
+    // Compat matrix (§D2): ΔE is Lab-space (XyY takes Channels);
+    // Oklab-ΔE would double-count (equal-tol Channels is mathematically
+    // identical to unweighted Euclidean); Y is scalar (Channels only).
     match (quantity, distance) {
       (ColorQuantity::XyY, ColorDistance::DeltaE2000) | (ColorQuantity::XyY, ColorDistance::DeltaE76) => {
         return Err(format!(
           "color: quantity 'XyY' with distance '{distance:?}' refused (DeltaE is Lab-space; use Channels)."
+        ))
+      }
+      (ColorQuantity::Oklab, ColorDistance::DeltaE2000) | (ColorQuantity::Oklab, ColorDistance::DeltaE76) => {
+        return Err(format!(
+          "color: quantity 'Oklab' with distance '{distance:?}' refused (use equal-tol Channels)."
+        ))
+      }
+      (ColorQuantity::Y, ColorDistance::DeltaE2000) | (ColorQuantity::Y, ColorDistance::DeltaE76) => {
+        return Err(format!(
+          "color: quantity 'Y' with distance '{distance:?}' refused (scalar demand takes Channels)."
         ))
       }
       _ => {}
@@ -289,21 +294,72 @@ pub(crate) fn color_of_xyz(
       xyz_to_xyy(&[*xyz], &mut out);
       Ok(out[0])
     }
-    q => Err(format!("color: quantity '{q:?}' arrives in P2 (0.4.27); P1 serves Lab|XyY.")),
+    ColorQuantity::LCh => {
+      let mut lab = [[0.0; 3]];
+      xyz_to_lab(&[*xyz], white, &mut lab);
+      let mut out = [[0.0; 3]];
+      lab_to_lch(&lab, &mut out);
+      Ok(out[0])
+    }
+    ColorQuantity::Oklab => {
+      // Oklab is D65-defined: Bradford-adapt non-D65 XYZ first via the
+      // same `adapt` the bindings (and func_13) use — no clipping, so
+      // the FD gradient keeps the smooth map.
+      let mut adapted = [[0.0; 3]];
+      adapt(&[*xyz], white, &REF_WHITE_D65, false, &mut adapted);
+      let mut out = [[0.0; 3]];
+      xyz_to_oklab(&adapted, &mut out);
+      Ok(out[0])
+    }
+    ColorQuantity::Y => Err("color: quantity 'Y' is scalar (no triple form).".to_string()),
   }
+}
+
+/// Wrap a hue difference in degrees to [-180, 180] BEFORE scaling
+/// (179 vs -179 is 2 deg, not 358).
+pub(crate) fn wrap_deg(d: f64) -> f64 {
+  d - 360.0 * (d / 360.0).round()
 }
 
 /// Scalar objective `F(xyz)`: `w·ΔE²`, resp. `w·Σ((c−c_t)/tol)²`.
 fn objective_of_xyz(demand: &ColorDemand, xyz: &[f64; 3]) -> Result<f64, String> {
+  // Scalar Y: single residual off tol[0] (no triple form involved).
+  if demand.quantity == ColorQuantity::Y {
+    let ColorReference::Scalar(t) = &demand.reference else {
+      return Err("color: quantity 'Y' needs a scalar reference.".to_string());
+    };
+    let r = (xyz[1] - t) / demand.tol[0];
+    return Ok(demand.weight * r * r);
+  }
   let c = color_of_xyz(xyz, &demand.white, demand.quantity)?;
   match demand.distance {
     ColorDistance::DeltaE2000 | ColorDistance::DeltaE76 => {
       let ColorReference::Triple(t) = &demand.reference else {
         return Err("color: scalar reference needs quantity 'Y'.".to_string());
       };
+      // ΔE lives in Lab: the LCh ref converts (exact map), and so does
+      // the op point (recomputed from XYZ — no trig roundtrip).
+      let t_lab;
+      let t_ref: &[f64; 3] = if demand.quantity == ColorQuantity::LCh {
+        let mut lab = [[0.0; 3]];
+        lch_to_lab(&[*t], &mut lab);
+        t_lab = lab[0];
+        &t_lab
+      } else {
+        t
+      };
+      let c_lab_hold;
+      let c_lab: &[f64; 3] = if demand.quantity == ColorQuantity::LCh {
+        let mut lab = [[0.0; 3]];
+        xyz_to_lab(&[*xyz], &demand.white, &mut lab);
+        c_lab_hold = lab[0];
+        &c_lab_hold
+      } else {
+        &c
+      };
       let d = match demand.distance {
-        ColorDistance::DeltaE2000 => delta_e_2000_single(&c, t, 1.0, 1.0, 1.0),
-        _ => delta_e_76_single(&c, t),
+        ColorDistance::DeltaE2000 => delta_e_2000_single(c_lab, t_ref, 1.0, 1.0, 1.0),
+        _ => delta_e_76_single(c_lab, t_ref),
       };
       Ok(demand.weight * d * d)
     }
@@ -313,7 +369,12 @@ fn objective_of_xyz(demand: &ColorDemand, xyz: &[f64; 3]) -> Result<f64, String>
       };
       let mut s = 0.0;
       for i in 0..3 {
-        let r = (c[i] - t[i]) / demand.tol[i];
+        let mut diff = c[i] - t[i];
+        // Hue wraps BEFORE scaling (LCh channel 2, degrees).
+        if demand.quantity == ColorQuantity::LCh && i == 2 {
+          diff = wrap_deg(diff);
+        }
+        let r = diff / demand.tol[i];
         s += r * r;
       }
       Ok(demand.weight * s)
@@ -507,11 +568,17 @@ mod tests {
     assert!(mk(ColorQuantity::XyY, ColorReference::Triple([0.3, 0.3, 0.5]), ColorDistance::DeltaE2000)
       .unwrap_err()
       .contains("XyY"));
+    // P2 quantities construct (compat matrix below gates the pairs).
     for q in [ColorQuantity::LCh, ColorQuantity::Oklab] {
-      assert!(mk(q, ColorReference::Triple([0.0; 3]), ColorDistance::Channels)
-        .unwrap_err()
-        .contains("P2"));
+      assert!(mk(q, ColorReference::Triple([0.0; 3]), ColorDistance::Channels).is_ok());
     }
+    assert!(mk(ColorQuantity::Y, ColorReference::Scalar(0.5), ColorDistance::Channels).is_ok());
+    assert!(mk(ColorQuantity::Oklab, ColorReference::Triple([0.0; 3]), ColorDistance::DeltaE2000)
+      .unwrap_err()
+      .contains("Oklab"));
+    assert!(mk(ColorQuantity::Y, ColorReference::Scalar(0.5), ColorDistance::DeltaE76)
+      .unwrap_err()
+      .contains("'Y'"));
     // Shape gate fires before the P2 gate (malformed regardless of phase).
     assert!(mk(ColorQuantity::Y, ColorReference::Triple([0.0; 3]), ColorDistance::Channels)
       .unwrap_err()
@@ -544,5 +611,129 @@ mod tests {
     assert!((white[1] - 1.0).abs() < 1e-12);
     assert!((white[0] - 0.9505).abs() < 1e-3, "X={}", white[0]);
     assert!((white[2] - 1.0890).abs() < 1e-3, "Z={}", white[2]);
+  }
+
+  fn p2_demand(q: ColorQuantity, r: ColorReference) -> ColorDemand {
+    let (cmf_wl, cmf, illum_wl, illuminant) = toy();
+    ColorDemand::new(0, cmf, cmf_wl, illuminant, illum_wl, q, r, ColorDistance::Channels, 1.0)
+      .unwrap()
+  }
+
+  #[test]
+  fn lch_wrappers_are_bitwise() {
+    let d = p2_demand(ColorQuantity::LCh, ColorReference::Triple([60.0, 20.0, 100.0]));
+    let xyz = [0.3, 0.4, 0.2];
+    let mut lab = [[0.0; 3]];
+    xyz_to_lab(&[xyz], &d.white, &mut lab);
+    let mut lch = [[0.0; 3]];
+    crate::color::func_02::lab_to_lch(&lab, &mut lch);
+    assert_eq!(color_of_xyz(&xyz, &d.white, ColorQuantity::LCh).unwrap(), lch[0]);
+    // ΔE path converts the LCh ref to Lab (roundtrip identity pins it).
+    let mut back = [[0.0; 3]];
+    crate::color::func_02::lch_to_lab(&[lch[0]], &mut back);
+    for i in 0..3 {
+      assert!((back[0][i] - lab[0][i]).abs() < 1e-12);
+    }
+  }
+
+  #[test]
+  fn oklab_wrapper_is_bitwise_and_white_is_unit() {
+    use crate::color::common::REF_WHITE_D65;
+    let d = p2_demand(ColorQuantity::Oklab, ColorReference::Triple([0.5, 0.01, -0.02]));
+    let xyz = [0.3, 0.4, 0.2];
+    let mut adapted = [[0.0; 3]];
+    adapt(&[xyz], &d.white, &REF_WHITE_D65, false, &mut adapted);
+    let mut ok = [[0.0; 3]];
+    crate::color::func_04::xyz_to_oklab(&adapted, &mut ok);
+    assert_eq!(color_of_xyz(&xyz, &d.white, ColorQuantity::Oklab).unwrap(), ok[0]);
+    // Full Bradford path (clearly non-D65 toy white): maps onto D65 to
+    // rounding. (Near-D65 whites take adapt's copy short-circuit instead —
+    // the common D65-demand regime, exact by construction.)
+    let (twl, tcmf, tewl, till) = toy();
+    let ones = vec![1.0; 8];
+    let tw = xyz_of_spectrum(&ones, &tewl, &tcmf, &twl, &till, &tewl).unwrap();
+    let mut w65 = [[0.0; 3]];
+    adapt(&[tw], &tw, &REF_WHITE_D65, false, &mut w65);
+    for i in 0..3 {
+      assert!((w65[0][i] - REF_WHITE_D65[i]).abs() < 1e-12, "{w65:?}");
+    }
+    // D65 white is Oklab near-neutral — up to a PRE-EXISTING in-tree
+    // constant/matrix mismatch (REF_WHITE_D65 is the 2-dp-chromaticity
+    // derivation [0.95045593, 1, 1.08905775]; the Oklab matrix is
+    // native-white, hence b ≈ -1.2e-4). Systematic, ~1e-4 in b, far below
+    // demand relevance; kernel and oracle agree bitwise regardless
+    // (proven via the bound `_color` twins in R3).
+    let mut wok = [[0.0; 3]];
+    crate::color::func_04::xyz_to_oklab(&[REF_WHITE_D65], &mut wok);
+    assert!((wok[0][0] - 1.0).abs() < 3e-6, "{wok:?}");
+    assert!(wok[0][1].abs() < 3e-4 && wok[0][2].abs() < 3e-4, "{wok:?}");
+  }
+
+  #[test]
+  fn lch_de_measures_in_lab() {
+    // The ΔE arm converts BOTH sides to Lab (regression: c once leaked
+    // through in LCh — the R3 twin caught it).
+    let (cmf_wl, cmf, illum_wl, illuminant) = toy();
+    let wl = cmf_wl.clone();
+    let d = ColorDemand::new(
+      0, cmf, cmf_wl, illuminant, illum_wl,
+      ColorQuantity::LCh,
+      ColorReference::Triple([60.0, 20.0, 100.0]),
+      ColorDistance::DeltaE76,
+      1.0,
+    )
+    .unwrap();
+    let row = vec![0.6, 0.55, 0.5, 0.45, 0.4, 0.35, 0.3, 0.25];
+    let (r, _) = eval_color(&d, &row, &wl).unwrap();
+    let xyz = xyz_of_spectrum(&row, &wl, &d.cmf, &d.cmf_wl, &d.illuminant, &d.illum_wl).unwrap();
+    let mut lab = [[0.0; 3]];
+    xyz_to_lab(&[xyz], &d.white, &mut lab);
+    let mut ref_lab = [[0.0; 3]];
+    lch_to_lab(&[[60.0, 20.0, 100.0]], &mut ref_lab);
+    assert_eq!(r, delta_e_76_single(&lab[0], &ref_lab[0]));
+  }
+
+  #[test]
+  fn y_scalar_is_exact_and_hue_wraps() {
+    // wrap unit: 179 vs -179 differ by 2 deg, not 358.
+    assert_eq!(wrap_deg(358.0), -2.0);
+    assert_eq!(wrap_deg(-358.0), 2.0);
+    // Y residual == hand formula, bitwise.
+    let d = p2_demand(ColorQuantity::Y, ColorReference::Scalar(0.5));
+    let (wl, _, _, _) = toy();
+    let row = vec![0.6; 8];
+    let (r, g) = eval_color(&d, &row, &wl).unwrap();
+    let xyz = xyz_of_spectrum(&row, &wl, &d.cmf, &d.cmf_wl, &d.illuminant, &d.illum_wl).unwrap();
+    let e = ((xyz[1] - 0.5) / 1.0).abs();
+    assert_eq!(r, e);
+    assert_eq!(g.len(), 8);
+    // Hue wrap through the objective: h=179 vs ref h=-179 -> 2 deg gap.
+    let dh = p2_demand(ColorQuantity::LCh, ColorReference::Triple([60.0, 20.0, -179.0]));
+    let xyz_h = [0.3, 0.4, 0.2];
+    let f = objective_of_xyz(&dh, &xyz_h).unwrap();
+    let c = color_of_xyz(&xyz_h, &dh.white, ColorQuantity::LCh).unwrap();
+    let gap = (wrap_deg(c[2] - -179.0) / 1.0).powi(2);
+    let rest = ((c[0] - 60.0).powi(2) + (c[1] - 20.0).powi(2)).max(0.0);
+    assert!((f - (rest + gap)).abs() < 1e-12, "{f}");
+  }
+
+  #[test]
+  fn achromatic_gradients_stay_finite() {
+    // C=0 singularity (LCh) + cbrt neutrals (Oklab): uniform spectra land
+    // on the achromatic axis — gradients must stay finite (FD-twin class).
+    let (wl, _, _, _) = toy();
+    let row = vec![0.5; 8];
+    for (q, r) in [
+      (ColorQuantity::LCh, ColorReference::Triple([50.0, 5.0, 10.0])),
+      (ColorQuantity::Oklab, ColorReference::Triple([0.5, 0.0, 0.0])),
+      (ColorQuantity::Y, ColorReference::Scalar(0.4)),
+    ] {
+      let (cmf_wl, cmf, illum_wl, illuminant) = toy();
+      let d = ColorDemand::new(0, cmf, cmf_wl, illuminant, illum_wl, q, r, ColorDistance::Channels, 1.0)
+        .unwrap();
+      let (resid, grad) = eval_color(&d, &row, &wl).unwrap();
+      assert!(resid.is_finite());
+      assert!(grad.iter().all(|v| v.is_finite()), "{q:?}");
+    }
   }
 }
