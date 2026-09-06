@@ -39,7 +39,14 @@ import numpy as np
 # has its own wrapper module (`navette.needle`).
 try:
     from navette._smatrix import (
-        core_engine,
+        Solver as _NativeSolver,
+        solver_rt_request as _rt_request,
+        solver_ellipsometry_request as _ellipsometry_request,
+        solver_absorption_request as _absorption_request,
+        solver_amplitudes_request as _amplitudes_request,
+        solver_stokes_request as _stokes_request,
+        solver_dispersion_request as _dispersion_request,
+        solver_energy_conservation as _energy_conservation,
         w_function,
         redheffer_product_real,
         redheffer_product_cross,
@@ -272,37 +279,34 @@ class ScatterMatrix:
         coherence_mode: Union[CoherenceMode, int] = CoherenceMode.FRONT_BLOCK,
         angles_in_radians: bool = False,
     ):
-        self.wavls = np.ascontiguousarray(wavelengths, dtype=np.float64).ravel()
-        self.n_wavs = self.wavls.size
-        if self.n_wavs == 0:
-            raise ValueError("`wavelengths` must be non-empty.")
-
-        theta = np.atleast_1d(np.asarray(angles, dtype=np.float64)).ravel()
-        if not angles_in_radians:
-            theta = np.radians(theta)
-        self.sin_theta = np.ascontiguousarray(np.sin(theta), dtype=np.float64)
-        self.n_angles = self.sin_theta.size
-        if self.n_angles == 0:
-            raise ValueError("`angles` must be non-empty.")
-
-        # Normalise layer_indices to (n_layers, n_wavs) complex.
-        idx = np.asarray(layer_indices, dtype=np.complex128)
-        if idx.ndim == 1:
-            idx = np.repeat(idx[:, None], self.n_wavs, axis=1)
-        elif idx.ndim != 2:
+        # Thin over the native Solver: validation, normalization and the
+        # solve itself live in Rust. Array views below stay for the
+        # needle driver (ported in R1c) and eigen slicing (R1c).
+        wavls = np.ascontiguousarray(wavelengths, dtype=np.float64).ravel()
+        theta = np.ascontiguousarray(angles, dtype=np.float64).ravel()
+        raw_idx = np.asarray(layer_indices, dtype=np.complex128)
+        if raw_idx.ndim == 1:
+            n_layers = raw_idx.shape[0]
+            idx2d = np.repeat(raw_idx[:, None], wavls.size, axis=1)
+        elif raw_idx.ndim == 2:
+            n_layers = raw_idx.shape[0]
+            idx2d = raw_idx
+        else:
             raise ValueError("`layer_indices` must be 1-D or 2-D.")
-        self.n_layers = idx.shape[0]
-        if self.n_layers < 2:
-            raise ValueError("Need at least 2 layers (ambient + substrate).")
-        if idx.shape[1] != self.n_wavs:
-            raise ValueError(
-                f"layer_indices second axis ({idx.shape[1]}) must equal "
-                f"number of wavelengths ({self.n_wavs})."
-            )
-        # Keep both views: (n_layers, n_wavs) for slicing, (n_wavs, n_layers) for the cache.
-        self._indices = np.ascontiguousarray(idx)                 # (n_layers, n_wavs)
-        self._indices_wav_major = np.ascontiguousarray(idx.T)     # (n_wavs, n_layers)
-
+        self._native = _NativeSolver(
+            wavls, theta, np.ascontiguousarray(idx2d).ravel(), n_layers,
+            thicknesses=None if thicknesses is None else np.ascontiguousarray(thicknesses, dtype=np.float64).ravel(),
+            incoherent_flags=None if incoherent_flags is None else np.ascontiguousarray(incoherent_flags, dtype=np.int32).ravel(),
+            roughness_types=None if roughness_types is None else np.ascontiguousarray(roughness_types, dtype=np.int32).ravel(),
+            roughness_values=None if roughness_values is None else np.ascontiguousarray(roughness_values, dtype=np.float64).ravel(),
+            coherence_mode=int(coherence_mode),
+            angles_in_radians=bool(angles_in_radians),
+        )
+        self.wavls = wavls
+        self.n_wavs = wavls.size
+        self.n_angles = theta.size
+        self.n_layers = n_layers
+        self.coherence_mode = CoherenceMode(int(coherence_mode))
         self.thicknesses = self._as_layer_array(thicknesses, np.float64, "thicknesses", 0.0)
         self.incoherent_flags = self._as_layer_array(
             incoherent_flags, np.int32, "incoherent_flags", 0
@@ -313,11 +317,13 @@ class ScatterMatrix:
         self.roughness_values = self._as_layer_array(
             roughness_values, np.float64, "roughness_values", 0.0
         )
-        self.coherence_mode = CoherenceMode(int(coherence_mode))
-
-        # Flat re/im-interleaved cache the Rust core_engine expects:
-        # layout per wavelength is [Re0, Im0, Re1, Im1, ...]; base = w * n_layers * 2.
+        self._indices = np.ascontiguousarray(idx2d)
+        self._indices_wav_major = np.ascontiguousarray(idx2d.T)
         self._n_stack_cache = self._indices_wav_major.view(np.float64).ravel()
+        self.sin_theta = np.ascontiguousarray(
+            np.sin(theta) if angles_in_radians else np.sin(np.radians(theta)),
+            dtype=np.float64,
+        )
 
     # ---- input helpers ------------------------------------------------------
     def _as_layer_array(self, value, dtype, name, default):
@@ -345,20 +351,7 @@ class ScatterMatrix:
         when a single angle was supplied and ``squeeze=True``.
         """
         req = int(request)
-        if req == 0:
-            raise ValueError("Empty request mask: select at least one observable.")
-        out = core_engine(
-            self.wavls,
-            self.sin_theta,
-            int(self.n_layers),
-            self._n_stack_cache,
-            self.thicknesses,
-            self.incoherent_flags,
-            self.roughness_types,
-            self.roughness_values,
-            int(self.coherence_mode),
-            int(req),
-        )
+        out = self._native.solve(req)
         if not squeeze or self.n_angles != 1:
             return dict(out)
         return {k: self._squeeze(v) for k, v in out.items()}
@@ -366,46 +359,23 @@ class ScatterMatrix:
     # ---- convenience views over `compute` -----------------------------------
     def reflectance_transmittance(self, pol: str = "u") -> Dict[str, np.ndarray]:
         """R/T spectra. ``pol`` is 's', 'p', or 'u' (unpolarized = both)."""
-        if pol not in ("s", "p", "u"):
-            raise ValueError("pol must be 's', 'p', or 'u'.")
-        req = Request.R_AVG | Request.T_AVG
-        if pol in ("s", "u"):
-            req |= Request.RS | Request.TS
-        if pol in ("p", "u"):
-            req |= Request.RP | Request.TP
-        return self.compute(req)
+        return self.compute(_rt_request(pol))
 
     def ellipsometry(self, *, transmission: bool = False) -> Dict[str, np.ndarray]:
         """Psi/Delta/DOP plus R (and optionally T) spectra."""
-        req = (
-            Request.PSI_R | Request.DELTA_R | Request.DOP_R
-            | Request.RS | Request.RP | Request.R_AVG
-        )
-        if transmission:
-            req |= (
-                Request.PSI_T | Request.DELTA_T | Request.DOP_T
-                | Request.TS | Request.TP | Request.T_AVG
-            )
-        return self.compute(req)
+        return self.compute(_ellipsometry_request(bool(transmission)))
 
     def absorption(self) -> Dict[str, np.ndarray]:
         """Per-polarization and averaged absorptance (A = 1 - R - T)."""
-        return self.compute(Request.ABSORPTION)
+        return self.compute(_absorption_request())
 
     def complex_amplitudes(self) -> Dict[str, np.ndarray]:
         """Complex r/t coefficients (rs_c, rp_c, ts_c, tp_c)."""
-        return self.compute(Request.RS_C | Request.RP_C | Request.TS_C | Request.TP_C)
+        return self.compute(_amplitudes_request())
 
     def stokes(self, *, reflection: bool = True, transmission: bool = False) -> Dict[str, np.ndarray]:
         """Stokes parameters S0..S3 for reflection and/or transmission."""
-        req = Request(0)
-        if reflection:
-            req |= Request.STOKES_R
-        if transmission:
-            req |= Request.STOKES_T
-        if int(req) == 0:
-            raise ValueError("Select reflection and/or transmission.")
-        return self.compute(req)
+        return self.compute(_stokes_request(bool(reflection), bool(transmission)))
 
     def dispersion(
         self, *, reflection: bool = True, transmission: bool = False,
@@ -418,18 +388,8 @@ class ScatterMatrix:
         numerical noise — validate against a fine-grid spline if precision
         matters.
         """
-        req = Request(0)
-        if reflection and s_pol:
-            req |= Request.DISP_R_S
-        if reflection and p_pol:
-            req |= Request.DISP_R_P
-        if transmission and s_pol:
-            req |= Request.DISP_T_S
-        if transmission and p_pol:
-            req |= Request.DISP_T_P
-        if int(req) == 0:
-            raise ValueError("Select at least one channel for dispersion.")
-        return self.compute(req)
+        return self.compute(_dispersion_request(
+            bool(reflection), bool(transmission), bool(s_pol), bool(p_pol)))
 
     def energy_conservation(self) -> np.ndarray:
         """``max(|1 - Rs - Ts|, |1 - Rp - Tp|)`` per grid point.
@@ -438,12 +398,9 @@ class ScatterMatrix:
         absorbing stacks it equals the absorptance and lies in [0, 1].
         """
         out = self.compute(
-            Request.RS | Request.RP | Request.TS | Request.TP, squeeze=False
+            _rt_request("u"), squeeze=False
         )
-        cons = np.maximum(
-            np.abs(1.0 - out["Rs"] - out["Ts"]),
-            np.abs(1.0 - out["Rp"] - out["Tp"]),
-        )
+        cons = _energy_conservation(out["Rs"], out["Rp"], out["Ts"], out["Tp"])
         return self._squeeze(cons)
 
     # ---- eigenmode tools ----------------------------------------------------

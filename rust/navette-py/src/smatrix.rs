@@ -88,6 +88,153 @@ pub fn solve_coherent_block_fields(
     ))
 }
 
+// ---- shared solution emit (used by core_engine + PySolver) ----
+fn solution_to_dict(
+    py: Python<'_>,
+    sol: &navette::smatrix::solver::Solution,
+) -> PyResult<Py<PyDict>> {
+    let shape = [sol.n_angles, sol.n_wavs];
+    let out = PyDict::new(py);
+    for (k, b) in &sol.f64maps {
+        out.set_item(k, PyArray::from_vec(py, b.clone()).reshape(shape)?)?;
+    }
+    for (k, b) in &sol.c64maps {
+        out.set_item(k, PyArray::from_vec(py, b.clone()).reshape(shape)?)?;
+    }
+    for (chan, quads) in &sol.dispmaps {
+        let (g, gg, t, f) = match chan.as_str() {
+            "R_s" => ("GD_R_s", "GDD_R_s", "TOD_R_s", "FOD_R_s"),
+            "R_p" => ("GD_R_p", "GDD_R_p", "TOD_R_p", "FOD_R_p"),
+            "T_s" => ("GD_T_s", "GDD_T_s", "TOD_T_s", "FOD_T_s"),
+            _ => ("GD_T_p", "GDD_T_p", "TOD_T_p", "FOD_T_p"),
+        };
+        out.set_item(g, PyArray::from_vec(py, quads[0].clone()).reshape(shape)?)?;
+        out.set_item(gg, PyArray::from_vec(py, quads[1].clone()).reshape(shape)?)?;
+        out.set_item(t, PyArray::from_vec(py, quads[2].clone()).reshape(shape)?)?;
+        out.set_item(f, PyArray::from_vec(py, quads[3].clone()).reshape(shape)?)?;
+    }
+    Ok(out.into())
+}
+
+// ---- native Solver (Rust-first ScatterMatrix engine) ----
+#[pyclass(name = "Solver")]
+pub struct PySolver {
+    inner: navette::smatrix::solver::Solver,
+}
+
+#[pymethods]
+impl PySolver {
+    #[new]
+    #[pyo3(signature = (wavelengths, angles, indices, n_layers, thicknesses=None, incoherent_flags=None, roughness_types=None, roughness_values=None, coherence_mode=0, angles_in_radians=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        wavelengths: PyReadonlyArray1<f64>,
+        angles: PyReadonlyArray1<f64>,
+        indices: PyReadonlyArray1<Complex64>,
+        n_layers: usize,
+        thicknesses: Option<PyReadonlyArray1<f64>>,
+        incoherent_flags: Option<PyReadonlyArray1<i32>>,
+        roughness_types: Option<PyReadonlyArray1<i32>>,
+        roughness_values: Option<PyReadonlyArray1<f64>>,
+        coherence_mode: i32,
+        angles_in_radians: bool,
+    ) -> PyResult<Self> {
+        let opt_f = |o: &Option<PyReadonlyArray1<f64>>| o.as_ref().map(|a| a.as_slice().unwrap().to_vec());
+        let opt_i = |o: &Option<PyReadonlyArray1<i32>>| o.as_ref().map(|a| a.as_slice().unwrap().to_vec());
+        let tf = opt_f(&thicknesses);
+        let cf = opt_i(&incoherent_flags);
+        let rt = opt_i(&roughness_types);
+        let rv = opt_f(&roughness_values);
+        navette::smatrix::solver::Solver::from_raw(
+            wavelengths.as_slice()?,
+            angles.as_slice()?,
+            angles_in_radians,
+            indices.as_slice()?,
+            n_layers,
+            tf.as_deref(),
+            cf.as_deref(),
+            rt.as_deref(),
+            rv.as_deref(),
+            coherence_mode,
+        )
+        .map(|inner| PySolver { inner })
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    fn solve(&self, py: Python<'_>, requested: u64) -> PyResult<Py<PyDict>> {
+        let sol = py
+            .detach(|| self.inner.solve(requested))
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        solution_to_dict(py, &sol)
+    }
+
+    #[getter]
+    fn n_angles(&self) -> usize {
+        self.inner.n_angles()
+    }
+
+    #[getter]
+    fn n_wavs(&self) -> usize {
+        self.inner.n_wavs()
+    }
+}
+
+// ---- view request masks + energy kernel (thin over solver) ----
+#[pyfunction]
+fn solver_rt_request(pol: &str) -> PyResult<u64> {
+    navette::smatrix::solver::rt_request(pol).map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+#[pyfunction]
+fn solver_ellipsometry_request(transmission: bool) -> u64 {
+    navette::smatrix::solver::ellipsometry_request(transmission)
+}
+
+#[pyfunction]
+fn solver_absorption_request() -> u64 {
+    navette::smatrix::solver::absorption_request()
+}
+
+#[pyfunction]
+fn solver_amplitudes_request() -> u64 {
+    navette::smatrix::solver::amplitudes_request()
+}
+
+#[pyfunction]
+fn solver_stokes_request(reflection: bool, transmission: bool) -> PyResult<u64> {
+    navette::smatrix::solver::stokes_request(reflection, transmission)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+#[pyfunction]
+fn solver_dispersion_request(
+    reflection: bool,
+    transmission: bool,
+    s_pol: bool,
+    p_pol: bool,
+) -> PyResult<u64> {
+    navette::smatrix::solver::dispersion_request(reflection, transmission, s_pol, p_pol)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+#[pyfunction]
+fn solver_energy_conservation(
+    py: Python<'_>,
+    rs: PyReadonlyArray1<f64>,
+    rp: PyReadonlyArray1<f64>,
+    ts: PyReadonlyArray1<f64>,
+    tp: PyReadonlyArray1<f64>,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let e = navette::smatrix::solver::energy_conservation(
+        rs.as_slice()?,
+        rp.as_slice()?,
+        ts.as_slice()?,
+        tp.as_slice()?,
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    Ok(PyArray::from_vec(py, e).into())
+}
+
 // ---- core_engine wrapper (verbatim from core) ----
 #[pyfunction]
 #[pyo3(name = "core_engine")]
@@ -143,27 +290,7 @@ pub fn core_engine(
     let sol = py
         .detach(|| solver.solve(requested))
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let shape = [num_angles, num_wavs];
-    let out = PyDict::new(py);
-    for (k, b) in &sol.f64maps {
-        out.set_item(k, PyArray::from_vec(py, b.clone()).reshape(shape)?)?;
-    }
-    for (k, b) in &sol.c64maps {
-        out.set_item(k, PyArray::from_vec(py, b.clone()).reshape(shape)?)?;
-    }
-    for (chan, quads) in &sol.dispmaps {
-        let (g, gg, t, f) = match chan.as_str() {
-            "R_s" => ("GD_R_s", "GDD_R_s", "TOD_R_s", "FOD_R_s"),
-            "R_p" => ("GD_R_p", "GDD_R_p", "TOD_R_p", "FOD_R_p"),
-            "T_s" => ("GD_T_s", "GDD_T_s", "TOD_T_s", "FOD_T_s"),
-            _ => ("GD_T_p", "GDD_T_p", "TOD_T_p", "FOD_T_p"),
-        };
-        out.set_item(g, PyArray::from_vec(py, quads[0].clone()).reshape(shape)?)?;
-        out.set_item(gg, PyArray::from_vec(py, quads[1].clone()).reshape(shape)?)?;
-        out.set_item(t, PyArray::from_vec(py, quads[2].clone()).reshape(shape)?)?;
-        out.set_item(f, PyArray::from_vec(py, quads[3].clone()).reshape(shape)?)?;
-    }
-    Ok(out.into())
+    solution_to_dict(py, &sol)
 }
 
 // ---- needle_engine wrapper (verbatim from core) ----
@@ -1197,6 +1324,14 @@ pub fn _smatrix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::synthesis_pipeline::PyPipelineConfig>()?;
     m.add_class::<crate::synthesis_pipeline::PyNeedleCycleConfig>()?;
     m.add_class::<crate::synthesis_pipeline::PyNeedlePipeline>()?;
+    m.add_class::<PySolver>()?;
+    m.add_function(wrap_pyfunction!(solver_rt_request, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_ellipsometry_request, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_absorption_request, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_amplitudes_request, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_stokes_request, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_dispersion_request, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_energy_conservation, m)?)?;
     m.add("NREQ_P", NREQ_P)?;
     m.add("NREQ_P_MB", NREQ_P_MB)?;
     m.add("NREQ_P_T", NREQ_P_T)?;

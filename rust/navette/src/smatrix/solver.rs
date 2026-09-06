@@ -33,6 +33,93 @@ pub struct Solver {
   n_layers: usize,
 }
 
+/// Request masks for the `ScatterMatrix` convenience views (mirror the
+/// Python view methods exactly; `pol` is 's', 'p' or 'u').
+pub fn rt_request(pol: &str) -> Result<u64, String> {
+  let mut req = REQ_R_AVG | REQ_T_AVG;
+  match pol {
+    "s" => req |= REQ_RS | REQ_TS,
+    "p" => req |= REQ_RP | REQ_TP,
+    "u" => req |= REQ_RS | REQ_TS | REQ_RP | REQ_TP,
+    _ => return Err("pol must be 's', 'p', or 'u'".to_string()),
+  }
+  Ok(req)
+}
+
+pub fn ellipsometry_request(transmission: bool) -> u64 {
+  let mut req = REQ_PSI_R | REQ_DELTA_R | REQ_DOP_R | REQ_RS | REQ_RP | REQ_R_AVG;
+  if transmission {
+    req |= REQ_PSI_T | REQ_DELTA_T | REQ_DOP_T | REQ_TS | REQ_TP | REQ_T_AVG;
+  }
+  req
+}
+
+pub fn absorption_request() -> u64 {
+  REQ_A_S | REQ_A_P | REQ_A_AVG
+}
+
+pub fn amplitudes_request() -> u64 {
+  REQ_RS_C | REQ_RP_C | REQ_TS_C | REQ_TP_C
+}
+
+pub fn stokes_request(reflection: bool, transmission: bool) -> Result<u64, String> {
+  let mut req = 0;
+  if reflection {
+    req |= REQ_S0_R | REQ_S1_R | REQ_S2_R | REQ_S3_R;
+  }
+  if transmission {
+    req |= REQ_S0_T | REQ_S1_T | REQ_S2_T | REQ_S3_T;
+  }
+  if req == 0 {
+    return Err("select reflection and/or transmission".to_string());
+  }
+  Ok(req)
+}
+
+pub fn dispersion_request(
+  reflection: bool,
+  transmission: bool,
+  s_pol: bool,
+  p_pol: bool,
+) -> Result<u64, String> {
+  let mut req = 0;
+  if reflection && s_pol {
+    req |= REQ_DISP_R_S;
+  }
+  if reflection && p_pol {
+    req |= REQ_DISP_R_P;
+  }
+  if transmission && s_pol {
+    req |= REQ_DISP_T_S;
+  }
+  if transmission && p_pol {
+    req |= REQ_DISP_T_P;
+  }
+  if req == 0 {
+    return Err("select at least one channel for dispersion".to_string());
+  }
+  Ok(req)
+}
+
+/// `max(|1-Rs-Ts|, |1-Rp-Tp|)` per grid point (energy-conservation residual).
+/// Slices must share length; empty input is refused.
+pub fn energy_conservation(
+  rs: &[f64],
+  rp: &[f64],
+  ts: &[f64],
+  tp: &[f64],
+) -> Result<Vec<f64>, String> {
+  if rs.len() != rp.len() || rs.len() != ts.len() || rs.len() != tp.len() {
+    return Err("energy_conservation: R/T slices must share length".to_string());
+  }
+  if rs.is_empty() {
+    return Err("energy_conservation: empty input".to_string());
+  }
+  Ok(rs.iter().zip(rp).zip(ts).zip(tp)
+    .map(|(((s, p), t_s), t_p)| ((1.0 - s - t_s).abs()).max((1.0 - p - t_p).abs()))
+    .collect())
+}
+
 impl Solver {
   #[allow(clippy::too_many_arguments)]
   pub fn new(
@@ -105,6 +192,63 @@ impl Solver {
       coherence_mode,
       n_layers,
     })
+  }
+
+  /// Raw-input constructor mirroring the Python driver: angles in degrees
+  /// unless `radians` is set; `indices` is either per-layer (len ==
+  /// `n_layers`, broadcast over wavelengths) or full `(n_layers, n_wavs)`
+  /// row-major; per-layer option slices default when `None`.
+  #[allow(clippy::too_many_arguments)]
+  pub fn from_raw(
+    wavelengths: &[f64],
+    angles: &[f64],
+    radians: bool,
+    indices: &[Complex64],
+    n_layers: usize,
+    thicknesses: Option<&[f64]>,
+    incoherent_flags: Option<&[i32]>,
+    roughness_types: Option<&[i32]>,
+    roughness_values: Option<&[f64]>,
+    coherence_mode: i32,
+  ) -> Result<Self, String> {
+    if wavelengths.is_empty() {
+      return Err("`wavelengths` must be non-empty.".to_string());
+    }
+    if angles.is_empty() {
+      return Err("`angles` must be non-empty.".to_string());
+    }
+    let nw = wavelengths.len();
+    let full = if indices.len() == n_layers {
+      let mut v = Vec::with_capacity(n_layers * nw);
+      for l in 0..n_layers {
+        for _ in 0..nw {
+          v.push(indices[l]);
+        }
+      }
+      v
+    } else if indices.len() == n_layers * nw {
+      indices.to_vec()
+    } else {
+      return Err("`indices` must be per-layer or (n_layers, n_wavs).".to_string());
+    };
+    let theta: Vec<f64> = angles
+      .iter()
+      .map(|a| if radians { *a } else { a.to_radians() })
+      .collect();
+    let sin_theta: Vec<f64> = theta.iter().map(|t| t.sin()).collect();
+    let zero_f = vec![0.0; n_layers];
+    let zero_i = vec![0; n_layers];
+    Self::new(
+      wavelengths,
+      &sin_theta,
+      &full,
+      n_layers,
+      thicknesses.unwrap_or(&zero_f),
+      incoherent_flags.unwrap_or(&zero_i),
+      roughness_types.unwrap_or(&zero_i),
+      roughness_values.unwrap_or(&zero_f),
+      coherence_mode,
+    )
   }
 
   pub fn n_angles(&self) -> usize {
@@ -455,6 +599,63 @@ mod tests {
     let ra = sol.f64maps.iter().find(|(k, _)| k == "R_avg").unwrap().1.clone();
     for v in &ra {
       assert!((v - 0.04).abs() < 1e-15);
+    }
+  }
+
+  #[test]
+  fn view_masks_match_python() {
+    use super::super::core_engine::{
+      REQ_A_AVG, REQ_A_P, REQ_A_S, REQ_DELTA_R, REQ_DOP_R, REQ_PSI_R, REQ_RP, REQ_RS,
+      REQ_R_AVG, REQ_S0_R, REQ_S1_R, REQ_S2_R, REQ_S3_R, REQ_TS, REQ_T_AVG,
+    };
+    assert_eq!(super::rt_request("s").unwrap(), REQ_R_AVG | REQ_T_AVG | REQ_RS | REQ_TS);
+    assert_eq!(
+      super::rt_request("u").unwrap(),
+      REQ_R_AVG | REQ_T_AVG | REQ_RS | REQ_TS | REQ_RP | super::super::core_engine::REQ_TP
+    );
+    assert!(super::rt_request("x").is_err());
+    assert_eq!(
+      super::ellipsometry_request(false),
+      REQ_PSI_R | REQ_DELTA_R | REQ_DOP_R | REQ_RS | REQ_RP | REQ_R_AVG
+    );
+    assert_eq!(super::absorption_request(), REQ_A_S | REQ_A_P | REQ_A_AVG);
+    assert_eq!(
+      super::stokes_request(true, false).unwrap(),
+      REQ_S0_R | REQ_S1_R | REQ_S2_R | REQ_S3_R
+    );
+    assert!(super::stokes_request(false, false).is_err());
+    assert!(super::dispersion_request(false, false, false, false).is_err());
+  }
+
+  #[test]
+  fn energy_conservation_values() {
+    let e = super::energy_conservation(&[0.04], &[0.04], &[0.96], &[0.96]).unwrap();
+    assert!((e[0] - 0.0).abs() < 1e-15);
+    let e = super::energy_conservation(&[0.5], &[0.4], &[0.3], &[0.4]).unwrap();
+    assert!((e[0] - 0.2).abs() < 1e-15);
+    assert!(super::energy_conservation(&[0.5], &[0.4], &[0.3], &[]).is_err());
+  }
+
+  #[test]
+  fn from_raw_broadcast_matches_explicit() {
+    let wl = vec![500.0, 600.0];
+    let per_layer = vec![Complex64::new(1.0, 0.0), Complex64::new(1.5, 0.0)];
+    let a = super::Solver::from_raw(&wl, &[0.0], false, &per_layer, 2, None, None, None, None, 2)
+      .unwrap();
+    let full = vec![
+      Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0),
+      Complex64::new(1.5, 0.0), Complex64::new(1.5, 0.0),
+    ];
+    let b = super::Solver::new(&wl, &[0.0], &full, 2, &[0.0, 0.0], &[0, 0], &[0, 0], &[0.0, 0.0], 2)
+      .unwrap();
+    use super::super::core_engine::REQ_RS;
+    let ra = a.solve(REQ_RS).unwrap();
+    let rb = b.solve(REQ_RS).unwrap();
+    let fa = ra.f64maps.iter().find(|(k, _)| k == "Rs").unwrap().1.clone();
+    let fb = rb.f64maps.iter().find(|(k, _)| k == "Rs").unwrap().1.clone();
+    assert_eq!(fa.len(), fb.len());
+    for (x, y) in fa.iter().zip(fb.iter()) {
+      assert_eq!(x.to_bits(), y.to_bits());
     }
   }
 
