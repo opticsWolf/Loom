@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Unified optical thin-film engine: color, interpolation, S-matrix, spectral weaving, materials, stack model."
+readme = "../../README.md"
 keywords = ["optics", "thin-film", "color", "interpolation", "spectral"]
 categories = ["science"]
 

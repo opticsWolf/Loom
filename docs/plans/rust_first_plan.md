@@ -491,8 +491,10 @@ outcome (v0.4.0 retagged on current main, hardened workflow).
 Ready on request: construction bench; config pipeline builder;
 leftover dropped surface (chain surgery, index/label lookup,
 simple_layer_list, architect block-contains).
-Housekeeping: stale 0.3.0 wheel in target/wheels/; registry names
-claim on first publish (6/7 crates live).
+Housekeeping: binaries untracked (registries host releases).
+2026-09-06: SINGLE-CRATE MERGE done — engines are modules of one
+`navette` crate (public paths unchanged); the six 0.4.0 subcrates
+stay frozen orphans on crates.io; future publishes: `navette` only.
 Branch policy: dev_rust →(no-ff) dev →(ff-only) main; verify
 tree-identity after promotions.
 
