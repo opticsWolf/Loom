@@ -495,8 +495,9 @@ Housekeeping: binaries untracked (registries host releases).
 2026-09-06: SINGLE-CRATE MERGE done — engines are modules of one
 `navette` crate (public paths unchanged); the six 0.4.0 subcrates
 stay frozen orphans on crates.io; future publishes: `navette` only.
-Branch policy: dev_rust →(no-ff) dev →(ff-only) main; verify
-tree-identity after promotions.
+Branch policy (user decision 2026-09-06): development on `dev`;
+`dev_rust` deleted; `dev`→`main` by fast-forward only (`--ff-only`),
+so the release line stays linear. Verify tree-identity after promotions.
 
 ## 10. Order of work
 
