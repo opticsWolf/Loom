@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
-from navette.materials import MaterialSpec, evaluate
+from navette.materials import MaterialSpec
 
 from .types import InterpolationSettings
 
@@ -488,7 +488,9 @@ def wrap_material_source(source: Any, **kwargs: Any) -> MaterialProvider:
   if isinstance(source, MaterialProvider):
     return source
   if isinstance(source, dict):
-    wl = kwargs.get("wavelength") or kwargs.get("target_wavelength")
+    wl = kwargs.get("wavelength")
+    if wl is None:
+      wl = kwargs.get("target_wavelength")
     if wl is not None:
       return MaterialObjectProvider(source, wl)
     return DictMaterialProvider(source)
