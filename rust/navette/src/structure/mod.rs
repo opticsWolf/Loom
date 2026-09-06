@@ -28,7 +28,7 @@ pub type SharedGroup = std::rc::Rc<std::cell::RefCell<Group>>;
 pub use group::{ErrorParams, Group};
 pub use group::shared_group;
 pub use layer::Layer;
-pub use providers::{DictProvider, Entry, MaterialProvider, assert_provider_grid, grids_equal};
+pub use providers::{DictProvider, Entry, MaterialProvider, SpecProvider, assert_provider_grid, grids_equal};
 pub use expansion::{ExpandOptions, SolverArrays, Span, expand};
 pub use structure::Structure;
 pub use specs::{MODELS, MaterialSpec};

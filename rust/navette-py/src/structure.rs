@@ -30,7 +30,7 @@ use serde_json::Value;
 use navette::structure::{
   expand,
   Architect, BlockKind, DictProvider, Entry, ExpandOptions, Group, Layer, LayerType, MaterialProvider,
-  MaterialSpec, RoughnessType, SharedGroup, SharedStructure, SolverArrays, Structure,
+  MaterialSpec, RoughnessType, SharedGroup, SharedStructure, SolverArrays, SpecProvider, Structure,
 };
 
 fn ver<T>(r: Result<T, String>) -> PyResult<T> {
@@ -768,6 +768,73 @@ impl PyDictProvider {
     let grid = wavelength.map(|w| w.as_slice().map(|s| s.to_vec())).transpose()?;
     self.inner.refresh(entries, grid);
     Ok(())
+  }
+}
+
+/// Spec/array library on one mandatory grid, memoized (mirrors
+/// `MaterialObjectProvider`). Holds RefCell cache → unsendable.
+#[pyclass(name = "SpecProvider", unsendable)]
+pub struct PySpecProvider {
+  inner: SpecProvider,
+}
+
+#[pymethods]
+impl PySpecProvider {
+  #[new]
+  fn new(mat_dict: &Bound<'_, PyDict>, wavelength: PyReadonlyArray1<f64>) -> PyResult<Self> {
+    let mut entries = HashMap::new();
+    for (k, v) in mat_dict.iter() {
+      let name = k.extract::<String>()?;
+      entries.insert(name.clone(), py_named_entry(&v, &name)?);
+    }
+    let grid = wavelength.as_slice()?.to_vec();
+    let inner = ver(SpecProvider::new(entries, grid))?;
+    Ok(Self { inner })
+  }
+
+  fn get_nk<'py>(
+    &self,
+    py: Python<'py>,
+    material_name: &str,
+    wavelengths: PyReadonlyArray1<f64>,
+  ) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
+    use navette::structure::MaterialProvider as _MP;
+    let nk = ver(self.inner.nk(material_name, wavelengths.as_slice()?))?;
+    Ok(PyArray1::from_vec(py, nk))
+  }
+
+  fn contains(&self, material_name: &str) -> bool {
+    use navette::structure::MaterialProvider as _MP;
+    self.inner.contains(material_name)
+  }
+
+  fn grid<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+    use navette::structure::MaterialProvider as _MP;
+    PyArray1::from_vec(py, self.inner.grid().unwrap_or(&[]).to_vec())
+  }
+
+  fn set_wavelength(&mut self, wavelength: PyReadonlyArray1<f64>) -> PyResult<()> {
+    self.inner.set_grid(wavelength.as_slice()?.to_vec());
+    Ok(())
+  }
+
+  #[pyo3(signature = (material_name=None))]
+  fn invalidate(&self, material_name: Option<String>) -> PyResult<()> {
+    self.inner.invalidate(material_name.as_deref());
+    Ok(())
+  }
+
+  /// Upsert one entry (arrays, spec dicts, MaterialSpec objects) and
+  /// drop its memoized curve. Write-through path for edits.
+  fn insert(&mut self, name: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    let entry = py_named_entry(value, &name)?;
+    self.inner.upsert(name, entry);
+    Ok(())
+  }
+
+  fn has(&self, material_name: &str) -> bool {
+    use navette::structure::MaterialProvider as _MP;
+    self.inner.contains(material_name)
   }
 }
 
@@ -1757,6 +1824,7 @@ pub fn _structure(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<PyLayer>()?;
   m.add_class::<PyGroup>()?;
   m.add_class::<PyDictProvider>()?;
+  m.add_class::<PySpecProvider>()?;
   m.add_class::<PySolverArrays>()?;
   m.add_class::<PyStructure>()?;
   m.add_class::<PyArchitect>()?;

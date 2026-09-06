@@ -168,15 +168,19 @@ class MaterialObjectProvider:
   expansion, leftovers inert.
   """
 
-  __slots__ = ("_dict", "_wavelength", "_wl_sig", "_cache")
+  # Thin over the native SpecProvider: evaluation, memoization and the
+  # grid live in Rust. `_dict` stays as the live shelf (snapshotter +
+  # pour-back read it); serving syncs native on demand.
+  __slots__ = ("_dict", "_wavelength", "_native", "_memo")
 
   def __init__(
     self, mat_dict: Dict[str, Any], wavelength: np.ndarray
   ) -> None:
+    from navette._structure import SpecProvider as _NativeSpec
     self._dict = mat_dict
     self._wavelength = np.asarray(wavelength, dtype=np.float64)
-    self._wl_sig: bytes = self._wavelength.tobytes()
-    self._cache: Dict[str, np.ndarray] = {}
+    self._native = _NativeSpec(dict(mat_dict), self._wavelength)
+    self._memo: Dict[str, np.ndarray] = {}
 
   @property
   def grid(self) -> np.ndarray:
@@ -196,11 +200,9 @@ class MaterialObjectProvider:
   @wavelength.setter
   def wavelength(self, wl: np.ndarray) -> None:
     wl = np.asarray(wl, dtype=np.float64)
-    sig = wl.tobytes()
-    if sig != self._wl_sig:
-      self._wavelength = wl
-      self._wl_sig = sig
-      self._cache.clear()
+    self._wavelength = wl
+    self._memo.clear()
+    self._native.set_wavelength(wl)
 
   def get_nk(self, material_name: str) -> np.ndarray:
     """Spec evaluated on the shared grid, memoized per material.
@@ -209,11 +211,15 @@ class MaterialObjectProvider:
     object). Raises ``KeyError`` for unknown names. After editing a spec
     dict in place, call ``invalidate`` — the cache cannot see the edit.
     """
-    cached = self._cache.get(material_name)
-    if cached is not None:
-      return cached
-    nk = evaluate(self._dict[material_name], self._wavelength)
-    self._cache[material_name] = nk
+    if material_name not in self._dict:
+      raise KeyError(material_name)
+    hit = self._memo.get(material_name)
+    if hit is not None:
+      return hit
+    if not self._native.has(material_name):
+      self._native.insert(material_name, self._dict[material_name])
+    nk = self._native.get_nk(material_name, self._wavelength)
+    self._memo[material_name] = nk
     return nk
 
   def contains(self, material_name: str) -> bool:
@@ -227,9 +233,15 @@ class MaterialObjectProvider:
     material name only and cannot detect param edits.
     """
     if material_name is None:
-      self._cache.clear()
+      self._memo.clear()
+      self._native.invalidate()
+    elif material_name in self._dict:
+      self._memo.pop(material_name, None)
+      self._native.insert(material_name, self._dict[material_name])
     else:
-      self._cache.pop(material_name, None)
+      self._memo.pop(material_name, None)
+      self._native.invalidate(material_name)
+  
 
 
 class WeaverMaterialProvider:
