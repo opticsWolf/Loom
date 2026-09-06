@@ -7,7 +7,7 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 """
 
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Mapping, Optional
 from navette.structure import (
     MaterialProvider,
     MaterialObjectProvider,
@@ -17,7 +17,7 @@ from navette.structure import (
     Navette_Architect,
 )
 from navette.materials import MaterialSpec
-from .models import MaterialDefinition, LayerConfig, GroupConfig
+from .models import MaterialDefinition, LayerConfig, GroupConfig, BlockConfig
 
 def material_from_config(
     cfg: MaterialDefinition,
@@ -132,3 +132,24 @@ def structure_from_config(
     groups = {c.name: group_from_config(c) for c in group_cfgs}
     # Navette_Structure auto-wraps plain dicts into DictMaterialProvider.
     return Navette_Structure(layer_list=layers, group_dict=groups, materials=materials)
+
+
+def architect_from_config(
+    structures: Mapping[str, Navette_Structure],
+    blocks: List[BlockConfig],
+    materials: Any = None,
+) -> Navette_Architect:
+    """Build a Navette_Architect: blocks reference structures by label.
+
+    Missing labels raise KeyError naming the block index and label.
+    """
+    from navette.structure import Navette_Architect
+    arch = Navette_Architect(materials=materials)
+    for i, b in enumerate(blocks):
+        if b.structure not in structures:
+            raise KeyError(
+                f"architect block {i}: unknown structure label '{b.structure}'."
+            )
+        arch.add_structure(structures[b.structure], inverted=b.inverted,
+                           repeat=b.repeat_count, label=b.label, kind=b.kind)
+    return arch

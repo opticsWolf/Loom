@@ -265,6 +265,27 @@ hosts); merge keyed on `(material, span)` so profiles survive cleanup.
 Requires pinned-background span machinery first.
 D2b: UNSPECIFIED (request cut off) — awaiting definition.
 
+Program persistence (PROPOSED 2026-09-06, review answers recorded):
+envelope (`schema_version/kind/name/sections`) with per-section schemas
+identical standalone or nested; name references across sections
+(file-first, then injectable live context); results EMBED frozen states.
+DECIDED: (a) per-load namespace with optional prefix on import for
+multi-load collisions; (b) results as sidecar (`run.results.yaml`),
+programs stay hand-authorable/diffable. Legacy flat files keep loading.
+Phases: 1 envelope+registry+gate → 2 pipeline/run schemas →
+3 merit/target schemas → 4 results writer.
+2026-09-06: Phase 1 IMPLEMENTED (`config/program.py`): envelope +
+`load_document` (fmt switch, legacy-flat detection), per-kind section
+loaders (materials/groups/structure/named/architect — each standalone-
+usable), `load_program` (dependency order, file-wins, context fills
+absent, prefix namespaces with consistent ref rewrites), `BlockConfig`/
+`NamedStructureConfig` + `architect_from_config`, `example_program.yaml`.
+6 program tests; 103 validation green.
+DECIDED (format): pure YAML or pure JSON per file, no hybrid;
+machine-written YAML gets an emitted comment header (provenance:
+timestamp, source program, config hash, warnings); JSON refuses
+non-finite results with a clear error.
+
 ## 7. Phase E — Deferred (only if needed)
 
 - `WeaverProvider` port. Trigger: a second Rust consumer of woven
