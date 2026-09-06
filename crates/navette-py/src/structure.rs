@@ -22,9 +22,9 @@ use std::rc::Rc;
 
 use num_complex::Complex64;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyDict, PyList};
+use pyo3::types::{IntoPyDict, PyComplex, PyDict, PyList};
 use serde_json::Value;
 
 use navette_structure::{
@@ -623,6 +623,59 @@ impl PyGroup {
       .map_err(|e| PyValueError::new_err(e.to_string()))?;
     json_to_py(py, &v)
   }
+  /// Full property dict (settings-store shape; mirrors `Layer`).
+  fn get_properties(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    self.get_state(py)
+  }
+
+  /// Perturbed thickness (floored at 0) under this group's configured
+  /// channel law. `seed=None` = thread RNG (non-reproducible).
+  #[pyo3(signature = (value, seed=None))]
+  fn thickness_error(&self, value: f64, seed: Option<u64>) -> f64 {
+    self.inner.borrow().thickness_error(value, &mut rng_for(seed))
+  }
+
+  /// Perturbed grading strength (unfloored, like legacy).
+  #[pyo3(signature = (value, seed=None))]
+  fn inh_delta_error(&self, value: f64, seed: Option<u64>) -> f64 {
+    self.inner.borrow().inh_delta_error(value, &mut rng_for(seed))
+  }
+
+  /// Perturbed surface roughness [nm] (floored at 0).
+  ///
+  /// NOTE vs legacy: the old `thickness` parameter was accepted but
+  /// never used (relative terms always scaled to `value`, as here).
+  #[pyo3(signature = (value, seed=None))]
+  fn sr_roughness_error(&self, value: f64, seed: Option<u64>) -> f64 {
+    self.inner.borrow().sr_roughness_error(value, &mut rng_for(seed))
+  }
+
+  /// Perturbed interface width [nm] (floored at 0; same legacy note).
+  #[pyo3(signature = (value, seed=None))]
+  fn interface_error(&self, value: f64, seed: Option<u64>) -> f64 {
+    self.inner.borrow().interface_error(value, &mut rng_for(seed))
+  }
+
+  /// Perturbed index (n floored at 0, k untouched). Accepts complex or
+  /// any `(real, imag)` pair (incl. numpy complex scalars).
+  #[pyo3(signature = (nk_value, seed=None))]
+  fn nk_error(
+    &self,
+    py: Python<'_>,
+    nk_value: &Bound<'_, PyAny>,
+    seed: Option<u64>,
+  ) -> PyResult<Py<PyAny>> {
+    let pair: (f64, f64) = match (nk_value.getattr("real"), nk_value.getattr("imag")) {
+      (Ok(r), Ok(i)) => (r.extract()?, i.extract()?),
+      _ => nk_value.extract()?,
+    };
+    let z = self
+      .inner
+      .borrow()
+      .nk_error(Complex64::new(pair.0, pair.1), &mut rng_for(seed));
+    Ok(PyComplex::from_doubles(py, z.re, z.im).into_any().unbind())
+  }
+
   fn clone_group(&self, py: Python<'_>) -> Self {
     let _ = py;
     Self { inner: Rc::new(RefCell::new(self.inner.borrow().clone())) }
@@ -1190,7 +1243,44 @@ impl PyStructure {
 
   /// Append a layer (wrapper merge path; RefCell interior mutability).
   fn append_layer(&self, layer: &PyLayer) -> PyResult<()> {
-    self.inner.borrow_mut().layers.push(layer.inner.clone());
+    self.inner.borrow_mut().layers.push(layer.inner_clone());
+    Ok(())
+  }
+
+  /// Insert a layer at `index` (list semantics: negatives count back,
+  /// out-of-range clamps — mirrors the legacy `list.insert`).
+  fn insert_layer(&self, index: isize, layer: &PyLayer) -> PyResult<()> {
+    let mut core = self.inner.borrow_mut();
+    let len = core.layers.len() as isize;
+    let at = (if index < 0 { len + index } else { index }).clamp(0, len) as usize;
+    core.layers.insert(at, layer.inner_clone());
+    Ok(())
+  }
+
+  /// Remove + return the layer at `index` (negatives ok; IndexError).
+  fn remove_layer(&self, index: isize) -> PyResult<PyLayer> {
+    let mut core = self.inner.borrow_mut();
+    let len = core.layers.len() as isize;
+    let at = if index < 0 { len + index } else { index };
+    if at < 0 || at >= len {
+      return Err(PyIndexError::new_err(format!(
+        "remove_layer: index {index} out of bounds ({len} layers)"
+      )));
+    }
+    Ok(PyLayer::from_inner(core.layers.remove(at as usize)))
+  }
+
+  /// Replace the layer at `index` (negatives ok; IndexError).
+  fn replace_layer(&self, index: isize, layer: &PyLayer) -> PyResult<()> {
+    let mut core = self.inner.borrow_mut();
+    let len = core.layers.len() as isize;
+    let at = if index < 0 { len + index } else { index };
+    if at < 0 || at >= len {
+      return Err(PyIndexError::new_err(format!(
+        "replace_layer: index {index} out of bounds ({len} layers)"
+      )));
+    }
+    core.layers[at as usize] = layer.inner_clone();
     Ok(())
   }
 
@@ -1590,6 +1680,41 @@ fn apply_error_fn(
     }
   };
   Ok(Group::apply_error(value, et, &p, rng))
+}
+
+/// Seed-selected RNG for the per-channel draw helpers (`None` = thread RNG).
+enum SeedRng {
+  Seeded(rand::rngs::StdRng),
+  Thread(rand::rngs::ThreadRng),
+}
+
+impl rand::RngCore for SeedRng {
+  fn next_u32(&mut self) -> u32 {
+    match self {
+      SeedRng::Seeded(r) => r.next_u32(),
+      SeedRng::Thread(r) => r.next_u32(),
+    }
+  }
+  fn next_u64(&mut self) -> u64 {
+    match self {
+      SeedRng::Seeded(r) => r.next_u64(),
+      SeedRng::Thread(r) => r.next_u64(),
+    }
+  }
+  fn fill_bytes(&mut self, dest: &mut [u8]) {
+    match self {
+      SeedRng::Seeded(r) => r.fill_bytes(dest),
+      SeedRng::Thread(r) => r.fill_bytes(dest),
+    }
+  }
+}
+
+fn rng_for(seed: Option<u64>) -> SeedRng {
+  use rand::SeedableRng;
+  match seed {
+    Some(s) => SeedRng::Seeded(rand::rngs::StdRng::seed_from_u64(s)),
+    None => SeedRng::Thread(rand::rng()),
+  }
 }
 
 /// Native thin-film stack model: Layer/Group providers, two-phase

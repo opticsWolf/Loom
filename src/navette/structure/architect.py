@@ -42,11 +42,15 @@ class StructureBlock:
 class Navette_Architect:
   """Positioned composition of structures with global-index addressing.
 
-  Thin wrapper over the bound ``Architect``. Dropped surface vs the legacy
-  Python class (re-add on demand): ``is_empty``, ``get_layer_at_global``,
-  ``insert_layer_at_global``, ``get_optimization_parameters``,
-  ``set_optimization_mask`` (bound ``optimization_entries`` covers reads),
-  ``clone``.
+  Thin wrapper over the bound ``Architect``. Still dropped vs the legacy
+  Python class: ``index``, ``get_block_index_by_label`` (no in-tree
+  users — one-liners over :meth:`blocks` if a GUI needs them),
+  ``insert/replace_structure``, ``move_block``, ``remove_structure``,
+  ``clear`` (chain surgery needs core support),
+  ``get_optimization_parameters`` (bound-only, unwrapped —
+  ``optimization_entries`` covers reads), block-identity
+  ``__contains__`` (murky across view rebuilds; use ``block in
+  arch.blocks``).
   """
 
   def __init__(self, materials: Any = None) -> None:
@@ -204,6 +208,41 @@ class Navette_Architect:
 
   def set_optimization_mask(self, group_name: str, mask: List[int]) -> None:
     self._inner.set_optimization_mask(group_name, mask)
+
+  # -- GUI conveniences (restored) --------------------------------------
+  @property
+  def active_material_dict(self) -> Any:
+    """Alias of :attr:`materials` (legacy name)."""
+    return self.materials
+
+  @active_material_dict.setter
+  def active_material_dict(self, value: Any) -> None:
+    self.materials = value
+
+  def replace_material(self, old_name: str, new_name: str) -> int:
+    """Replace all occurrences of old material name with new. Returns count."""
+    return sum(shell.replace_material(old_name, new_name)
+               for shell in self.unique_structures)
+
+  def get_total_physical_thickness(self) -> float:
+    """Sum of all film thicknesses [nm] across the chain (× repeat)."""
+    return sum(view.structure.total_physical_thickness() * view.repeat_count
+               for view in self.blocks)
+
+  def copy(self) -> "Navette_Architect":
+    """Deep copy: all structures cloned, chain flags preserved.
+
+    The carried provider is shared by reference (dicts are re-wrapped
+    into an equal provider — same content, new object).
+    """
+    new = Navette_Architect()
+    if self.materials is not None:
+      new.materials = self.materials
+    for view in self.blocks:
+      new.add_structure(view.structure.clone(), inverted=view.inverted,
+                        repeat=view.repeat_count, label=view.label,
+                        kind=view.kind)
+    return new
 
   def get_state(self) -> Dict[str, Any]:
     return self._inner.get_state()

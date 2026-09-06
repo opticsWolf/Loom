@@ -405,6 +405,17 @@ normalization. 6 Rust tests (incl. real-weaver→expansion end to end)
 + 4-test Python twin. 47 structure / 90 validation / workspace green,
 clippy clean.
 
+- 2026-09-06: dropped-surface restoration (request): `Group.get_properties`
+(== state, both classes have `set_properties`) + 5 per-channel draw
+helpers (`value, seed=None`; legacy `thickness` arg was vestigial —
+accepted, never used); structure `find/count/apply/insert/remove/
+replace/active-alias/thickness/contains` (indexed mutation is new core
+binding ops, list semantics); architect `copy/active-alias/
+replace_material/total-thickness`. Still dropped: `generate_simple_
+layer_list` (legacy row adapter + cache side effect), chain surgery
+(insert/replace/move/remove/clear), `index`/label lookup (no callers),
+architect block-`__contains__`. 94 validation green.
+
 ## 10. Order of work
 
 A1 → A2 → A3 → A4 → A5 → A6 → A7 → B → C → D (→ E iff needed),
