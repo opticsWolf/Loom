@@ -2,6 +2,7 @@
 //
 // Module map:
 //   optics_core      — shared primitives (stars, roughness, complex kernels)
+//   solver           — configured solver: validation + parallel solve + derives
 //   coherent_block   — s/p/dual coherent-block solvers
 //   core_engine      — request-driven unified engine (resolve_plan/solve_point)
 //   needle_operator  — analytic needle-operator sensitivities (pure Rust)
@@ -11,6 +12,7 @@
 //   synthesis        — automated design synthesis (pure Rust core)
 
 pub mod optics_core;
+pub mod solver;
 pub mod coherent_block;
 pub mod core_engine;
 pub mod needle_operator;

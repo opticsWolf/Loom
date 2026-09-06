@@ -7,7 +7,7 @@ from __future__ import annotations
 def test_package_version() -> None:
   import navette
 
-  assert navette.__version__ == "0.4.1"
+  assert navette.__version__ == "0.4.2"
 
 
 def test_structure_imports() -> None:

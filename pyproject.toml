@@ -11,7 +11,7 @@ build-backend = "maturin"
 
 [project]
 name = "navette"
-version = "0.4.1"
+version = "0.4.2"
 description = "A high-performance optical engine utilizing a Scattering Matrix algorithm for stable simulation of light in stratified media."
 readme = "README.md"
 requires-python = ">=3.12"
