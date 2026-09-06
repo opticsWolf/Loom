@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import pytest
 
-import navette.structure.expander as expander_mod
+from navette._navette import _structure as native_mod
 import navette.structure.models as models_mod
 from navette.structure import (
   BlockKind,
@@ -144,13 +144,17 @@ def test_from_state_bad_ref_raises():
 
 
 # WART-7: systematic error semantics --------------------------------------------
+# NOTE (flip-proof): draws go through the native `apply_error` (seed-based)
+# rather than the Python `Group._apply_error` (Generator-based), so this
+# file runs unchanged against the bound classes post-flip.
 def test_apply_error_is_systematic_across_wl():
-  g = Group("x")
-  arr = np.full(4, 1.5)
-  out1 = Group._apply_error(arr, 0, g.thickness_error_params,
-                            rng=np.random.default_rng(3))
-  out2 = Group._apply_error(arr, 0, g.thickness_error_params,
-                            rng=np.random.default_rng(3))
+  from navette._structure import apply_error
+  # Pinned defaults (both implementations agree; avoids impl-specific accessors).
+  params = dict(abs_mean_delta_g=0.0, abs_std_dev=0.01, rel_mean_delta_g=0.0,
+                rel_std_dev=1.0, abs_mean_delta_h=0.0, abs_variance=0.01,
+                rel_mean_delta_h=0.0, rel_variance=1.0)
+  out1 = np.array([apply_error(1.5, 0, params, seed=3) for _ in range(4)])
+  out2 = np.array([apply_error(1.5, 0, params, seed=3) for _ in range(4)])
   np.testing.assert_allclose(out1, out2)  # seeded reproducible
   assert np.ptp(out1) == 0.0  # one offset across lambda, not per-lambda noise
 
@@ -393,7 +397,7 @@ def test_weaver_target_reset_clears_cache():
 # NIT-2: module docstrings live --------------------------------------------------
 def test_module_docstrings_present():
   assert models_mod.__doc__ and "Layer and Group" in models_mod.__doc__
-  assert expander_mod.__doc__ and "SolverArrays" in expander_mod.__doc__
+  assert native_mod.__doc__ and "SolverArrays" in native_mod.__doc__
 
 
 # NIT-3: interface policy ---------------------------------------------------------

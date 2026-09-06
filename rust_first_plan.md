@@ -97,11 +97,16 @@ otherwise break).
 **A3 — Providers.** `trait MaterialProvider { fn nk(&self, name, wavelengths: &[f64]) -> Result<Vec<Complex64>, String>; fn contains(&self, name: &str) -> bool; }`
 — grid passed **explicitly** (kills the grid-implicit class of bugs;
 Python keeps its implicit-grid providers behind the bridge assert).
-Impls: `MapProvider` (name → evaluated arrays + grid-length check).
-Spec evaluation (`MaterialSpec` dispatch) stays Python-side for now —
-Python evaluates specs to arrays and registers them (existing machinery);
-porting dispatch over the native kernels is Phase E. `WeaverProvider`:
-not ported (Python-side weaver; revisit if needed).
+Impls: `MapProvider` (name → evaluated arrays + grid-length check) and
+`SpecProvider` (name → `MaterialSpec`, evaluated on the call grid).
+DECIDED (§9.3B): spec dispatch is ported NOW, not Phase E — a Rust
+`MaterialSpec` type (model + validated param map, serde-compatible)
+with `evaluate(spec, grid)` dispatching over the existing
+`navette-materials` kernels (same kernels Python calls — one
+implementation). All 23 models get oracle twins against Python's
+`evaluate` (seeded grids, bit-identity incl. Table linear replay and EMA
+nesting). `bake_materials` therefore ports in A6, not E.
+`WeaverProvider`: not ported (Python-side weaver; revisit if needed).
 
 **A4 — Expansion (the intricate one).** Transliterate the two-phase
 algorithm exactly: phase-1 bulk resolve (independent n/k scaling,
@@ -167,7 +172,8 @@ and `wrap_material_source`-adjacent helpers stay Python (thin over bound
 types). Compat checklist per class: constructor kwargs, method names,
 state-dict shape (incl. `schema_version`), error/warning behavior,
 `__repr__` text. Then DELETE the Python implementation (no dual
-maintenance — Rust-first means one home). BLAST RADIUS (re-review):
+maintenance — Rust-first means one home). → DECIDED: A (sharp cutover).
+BLAST RADIUS (re-review):
 `config/{builders,loader,models}.py` construct Python `Layer`/`Group`
 today — they move to the bound classes in this phase (same names, so
 mostly transparent; `from_state` dict paths re-verified). The 73
@@ -199,10 +205,8 @@ trajectory.
 
 ## 7. Phase E — Deferred (only if needed)
 
-- `MaterialSpec` dispatch port (Rust spec type over the native kernels) →
-  unlocks Rust `bake_materials` + `SpecProvider`. Do it when Python-side
-  evaluation becomes the bottleneck or a second Rust consumer appears.
 - `WeaverProvider` port. Contract tags if versions ever feel too coarse.
+(Spec dispatch + `bake_materials` moved into A3/A6 per §9.3B.)
 
 ## 8. Verification: every behavior tested in Rust AND Python
 
@@ -254,7 +258,8 @@ tracked alongside, not gamed after.
    Option B: accept a Python `Generator` and draw in Python. Preserves
    exact NumPy streams, but every error draw crosses the GIL, expansion
    can't `detach`, and Rust-side determinism tests become meaningless —
-   it keeps the model half-Python. → Recommend A.
+   it keeps the model half-Python. → DECIDED: A (different draws accepted;
+   acceptance is statistical agreement + per-side determinism).
 
 3. Spec dispatch stays Python-side until Phase E (Rust providers take
    evaluated arrays)?
@@ -265,9 +270,9 @@ tracked alongside, not gamed after.
    Rust `bake_materials` waits.
    Option B: port spec dispatch now (Rust spec type over the native
    kernels). One home sooner, but puts a 23-model port + its own oracle
-   suite on the critical path before expansion even starts. → Recommend
-   A; trigger E when a second Rust consumer appears or spec evaluation
-   profiles as the bottleneck.
+   suite on the critical path before expansion even starts. → DECIDED: B
+   (Rust owns recipes end-to-end; A3 now includes the spec port — see
+   revised A3 below).
 
 4. Python flip = same class names rebound to Rust, then delete the
    Python implementation?
@@ -289,7 +294,36 @@ tracked alongside, not gamed after.
    serialized-absent by the fingerprint test), and anyone caching it
    across a thickness change gets a fresh value, which is the correct one.
    Option B: store + re-refine on set (Python behavior). Preserves the
-   attribute idiom but also preserves the stale-state hazard. → Recommend A.
+   attribute idiom but also preserves the stale-state hazard. → DECIDED: A.
+   Perf audit: the rule is one pow + ceil (~10 ns), called O(layers) times
+   per expansion — unmeasurable against µs–ms workloads, no memoization
+   needed. Sole downside: hand-tuned counts deviating from the rule become
+   unrepresentable — an undocumented escape hatch nothing uses (states
+   don't carry it; only the bypass smell wrote it). Its removal is the
+   point, not a cost.
+
+- 2026-09-05: Phase B done: `_structure` submodule (Layer/Group/
+DictProvider/SolverArrays/Structure/Architect + warnings re-emit, seed
+RNG, GIL-detached expansion, `unsendable` shared handles). Binding
+adaptations documented + tested (prefixed validate strings, snapshot
+providers, fixed-length masks). Differential suite green: 300 stacks
+(validity agreed + bit-identical), 100 mixed chains, error moments agree
+within 5% (test caught a live rel-variance default). 86 validation +
+41 Rust + full workspace (16 suites) green.
+
+- 2026-09-05: Phase C done — THE FLIP. `models.py` re-exports bound
+`Layer`/`Group`; thin `Navette_Structure`/`Navette_Architect` wrappers carry
+providers (dict auto-wrap restored), own bake pour-back + shell tracking
+(`is`-identity preserved); `expander.py` DELETED; `builders.py` moved to
+`set_error_*`. Binding grew: materials slots with overwrite warnings,
+provider snapshotter (dicts/_dict/get_nk/customs, full-shelf for collision
+checks, unknown-tolerant for validation), grid resolution (stored/dummy/
+refuse), error accessors, mappings with Python names + IndexError,
+`__add__` surface, `apply_error` fn. Shared-group handles (`Rc`) mirror
+Python reference semantics (bake visible via originals). 86 validation +
+41 Rust + workspace + parity green with ZERO twin-file semantic changes
+(only pre-approved migrations: native `apply_error`, `rng_for` fixture,
+new-API differential).
 
 ## 10. Order of work
 
@@ -307,4 +341,46 @@ distribution/determinism); (2) `rng_for` helper saves the unchanged-
 files flip proof; (3) ema kernel paths verified present; (4) config
 package + pipeline files listed as blast radius; (5) approximation
 fallback added to A6; (6) expansion perf gate added. §9.1 DECIDED (new
-crate). Still [P]: awaiting §9.2–9.5 before A1.
+crate). §9.2 DECIDED (seed RNG, full-Rust randomness).
+- 2026-09-05: foundation laid [A0]: `navette-structure` crate (enums with
+  pinned discriminants + fail-closed coercion, SCHEMA_VERSION gate, typed
+  ValidationIssue) in workspace + umbrella; 4 Rust tests green,
+  `cargo check --workspace` clean (2 pre-existing smatrix warnings,
+  untouched). Still [P]: A1 unblocked — all §9 decided (§9.3B recipes in Rust,
+§9.4A sharp cutover, §9.5A derived count). Order holds with A3 now
+carrying the spec port.
+- 2026-09-05: A1 done: `Layer` (fields/defaults/mask/Display/state
+key-for-key + version-checked/unknown-ignoring deserialize,
+`set_properties` warnings-as-return, derived `sub_layer_count`,
+int-serde for all 7 enums). 9 Rust tests green incl. refinement counts
+bit-matching Python (powf/ceil agreement holds on pinned values).
+- 2026-09-05: A3a done: `MaterialProvider` trait (grid in the signature)
++ `MapProvider` (exact-grid serve, length-checked insert/construct,
+atomic refresh) + `assert_provider_grid` bridge helper. Same-length-
+other-values refused at serve (the Python silent case, closed). 21 Rust
+tests green.
+- 2026-09-05: A3b done: `MaterialSpec` + `evaluate` over the native
+kernels (raw value-map params + per-model extractors; aliases, nesting,
+error texts mirrored; table-size assert is a Result, not a panic). All 23
+models bit-track Python on live-captured oracles + 9 dispatch-error twins.
+23 Rust tests green. EMA cores confirmed in `navette-materials` (binding
+only wraps) — no move needed.
+- 2026-09-05: A4 done: two-phase `expand` (bulk resolve, mirror rule,
+donor carve + buffered rescale, owner+carrier mix, plane roughness, draw
+order, spans first-class) + `SolverArrays` + scalar-draw array perturb.
+RNG widened to `&mut dyn RngCore` (seeded/thread). Flat/full/mirror
+oracles bit-match Python (slice mix, 11x graded factors, roughness).
+29 Rust tests green. Randomized differential deferred to Phase B (needs
+bindings to drive both sides from pytest).
+- 2026-09-05: A5/A6 done: `Structure` (validate incl. dry run +
+carve-explained, gate, solver/error inputs, both total_sub_layers tiers,
+bakes incl. Rust `bake_materials` with `_table[N]` naming, states) +
+`Architect` (Rc-shared blocks, chain rules, merge conflicts, global/solver
+mapping, split/duplicate/insert/remove/prune, masks, reference-preserving
+states). Providers external (states never carried them). 41 Rust tests
+green, clippy clean.
+- 2026-09-05: A2 done: `Group` + `ErrorParams` (identity defaults incl.
+roughness x0.1, validate domains, draw order + floors, state fingerprint
+23 keys, set_properties warnings-as-return). `rand 0.9`/`rand_distr 0.5`;
+`StdRng`-seeded determinism + Gaussian/Uniform statistics pinned. 15 Rust
+tests green.

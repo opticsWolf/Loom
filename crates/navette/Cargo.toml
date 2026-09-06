@@ -18,4 +18,5 @@ navette-color = { workspace = true }
 navette-interpolate = { workspace = true }
 navette-materials = { workspace = true }
 navette-smatrix = { workspace = true }
+navette-structure = { workspace = true }
 navette-spectralweave = { workspace = true }

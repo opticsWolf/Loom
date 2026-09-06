@@ -2,7 +2,12 @@
 """
 ``navette.structure`` — thin-film layer stacks and architect.
 
-Pure Python (numpy). No Rust build needed.
+Rust-first model (``navette._structure``) with Python provider plumbing:
+:class:`Layer`/:class:`Group` are bound classes re-exported from
+:mod:`navette.structure.models`; :class:`Navette_Structure` and
+:class:`Navette_Architect` are thin wrappers carrying the material
+provider and owning bake pour-back. Provider vocabulary (``types`` /
+``materials``) and the solve bridge stay Python-side.
 """
 
 from __future__ import annotations
@@ -27,7 +32,6 @@ from .materials import MaterialProvider, DictMaterialProvider, MaterialObjectPro
 from .models import Layer, Group
 from .structure import Navette_Structure, gate_validation
 from .architect import Navette_Architect, StructureBlock
-from .expander import _LayerExpander
 
 import warnings
 from typing import Any, Dict, Optional, Sequence, Union
