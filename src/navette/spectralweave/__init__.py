@@ -3,7 +3,7 @@
 ``navette.spectralweave`` — spectral fragment weaving and merit evaluation.
 
 Thin wrappers over the private native extension
-``navette._spectralweave`` built from ``crates/navette-spectralweave``::
+``navette._spectralweave`` built from ``rust/navette/src/spectralweave``::
 
     maturin develop  # from the repo root
 """

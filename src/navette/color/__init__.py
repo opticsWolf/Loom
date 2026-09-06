@@ -3,7 +3,7 @@
 ``navette.color`` — colorimetry (sRGB/XYZ/Lab/LCH/LUV/Oklab, ΔE, photometry).
 
 Thin wrapper over the private native extension ``navette._color`` built
-from ``crates/navette-color``::
+from ``rust/navette/src/color``::
 
     maturin develop  # from the repo root
 """

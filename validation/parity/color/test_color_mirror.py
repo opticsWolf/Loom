@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Mirror of the Rust color tests through the installed ``navette.color``.
 
-Covers ``crates/navette-color/src/parity.rs`` (15 golden tests, same
+Covers ``rust/navette/src/color/parity.rs`` (15 golden tests, same
 vectors/tolerance ``|a-b| <= 1e-12 + 1e-9*|b|``), the per-function unit
 tests (``func_01``..``func_14``), the broadcast semantics (``metrics.rs``)
 and the white-point/matrix checks (``common.rs``/``func_08.rs``).
