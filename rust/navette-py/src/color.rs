@@ -8,6 +8,7 @@ use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use navette::color::common::{REF_WHITE_D50, REF_WHITE_D65};
 
@@ -575,6 +576,46 @@ impl PyPhotometry {
     }
 }
 
+// ---- CIE reference tables ----------------------------------------------
+
+/// Parse CIE DataCite JSON text into `{column: float64 array}` (thin over
+/// `color::tables::parse_cie_tables` — the single canonical parser).
+#[pyfunction]
+fn parse_cie_tables<'py>(py: Python<'py>, text: &str) -> PyResult<Py<PyDict>> {
+    let table =
+        navette::color::tables::parse_cie_tables(text).map_err(PyValueError::new_err)?;
+    let out = PyDict::new(py);
+    for name in table.column_names() {
+        let col = table.column(name).expect("name came from the table");
+        out.set_item(name, PyArray1::from_vec(py, col.to_vec()))?;
+    }
+    Ok(out.into())
+}
+
+/// `(wavelengths, x, y, z)` triplet for CMF/chromaticity files (thin over
+/// `xyz_column_names`; refuses non-triplet files naming their columns).
+#[pyfunction]
+fn cie_xyz_triplet(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    use pyo3::types::PyTuple;
+    let table =
+        navette::color::tables::parse_cie_tables(text).map_err(PyValueError::new_err)?;
+    let wl = table.lambda().ok_or_else(|| {
+        PyValueError::new_err("CIE table: no 'lambda' column for the XYZ triplet.")
+    })?;
+    let [x, y, z] = table.xyz_column_names().map_err(PyValueError::new_err)?;
+    let get = |n: &str| table.column(n).expect("name came from the triplet").to_vec();
+    let tup = PyTuple::new(
+        py,
+        [
+            PyArray1::from_vec(py, wl.to_vec()).into_any(),
+            PyArray1::from_vec(py, get(&x)).into_any(),
+            PyArray1::from_vec(py, get(&y)).into_any(),
+            PyArray1::from_vec(py, get(&z)).into_any(),
+        ],
+    )?;
+    Ok(tup.into_any().unbind())
+}
+
 // ---- module registration -----------------------------------------------
 
 /// Register the colorimetry submodule (`navette._navette._color`).
@@ -610,6 +651,9 @@ pub fn _color(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
         // func_13 (Spectral)
         spectral_to_srgb,
+
+        // tables (CIE reference data)
+        parse_cie_tables, cie_xyz_triplet,
     );
     m.add_class::<PyPhotometry>()?;
     Ok(())

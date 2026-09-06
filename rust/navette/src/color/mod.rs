@@ -34,6 +34,7 @@ pub mod common;
 pub mod matrices;
 pub mod metrics;
 pub mod composites;
+pub mod tables;
 
 pub mod func_01;
 pub mod func_02;
