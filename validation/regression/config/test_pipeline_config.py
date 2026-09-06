@@ -55,7 +55,7 @@ def test_duplicate_film_code_raises():
 
 def test_unknown_material_raises():
     s = NamedStructureConfig(label="t", layers=[_film("X", 100.0)])
-    with pytest.raises(KeyError, match="'X'"):
+    with pytest.raises(ValueError, match='not found in library'):
         pipeline_from_config(s, LIB, WL)
 
 def test_two_ambients_raise():
@@ -63,6 +63,35 @@ def test_two_ambients_raise():
     s = NamedStructureConfig(label="t", layers=[a, a, _film("L", 10.0)])
     with pytest.raises(ValueError, match="ambient"):
         pipeline_from_config(s, LIB, WL)
+
+def test_native_matches_direct_driver_bitwise():
+    """Same design via stack_from_layers and via configs: identical films."""
+    from navette.config.builders import material_from_config
+    from navette.synthesis.pipeline import stack_from_layers
+    films = [_film("L", 100.0), _film("H", 60.0, roughness_nm=2.0)]
+    s = NamedStructureConfig(label="t", layers=films)
+    stack_cfg, _ = pipeline_from_config(s, LIB, WL, contrast={"H": "L"})
+    specs = {m.code: material_from_config(m, WL) for m in LIB}
+    layers = [(specs["L"], 100.0), (specs["H"], 60.0)]
+    per = {"L": {}, "H": {"roughness": 2.0}}
+    stack_direct, _ = stack_from_layers(
+        layers, WL, {"H": specs["L"]},
+        names=["L", "H"], per_film_flags=per)
+    import numpy as _np
+
+    def _same(a, b):
+        if isinstance(a, dict):
+            return set(a) == set(b) and all(_same(a[k], b[k]) for k in a)
+        if isinstance(a, (list, tuple)):
+            return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+        if isinstance(a, _np.ndarray):
+            return a.shape == b.shape and bool(_np.array_equal(a, b))
+        if isinstance(a, float):
+            return a.hex() == b.hex()
+        return a == b
+
+    assert _same(stack_cfg.to_dict(), stack_direct.to_dict())
+
 
 def test_group_rides_along():
     g = GroupConfig(name="H")

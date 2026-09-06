@@ -150,71 +150,38 @@ def pipeline_from_config(
 ):
     """Native ``(DesignStack, contrast_map)`` from typed configs.
 
-    ``structure.layers`` carry ``layer_type``: 0 = ambient row, 2 =
-    substrate row, 1 = film. At most one ambient / one substrate row;
-    absent rows fall back to the driver constants (n=1.0 air, n=1.52
-    substrate). Films are keyed by material code — codes must be unique
-    (they key the nk table; repeats raise ``ValueError``) and present
-    in ``library`` (else ``KeyError``). Per-layer flags flow from each
-    ``LayerConfig`` (driver key names); ``per_film_flags`` overrides by
-    code (int index also accepted) on top. ``contrast`` maps host code
-    → seed code. Groups ride the bound-``Group`` fast path, error
-    config intact. Returns exactly what ``stack_from_layers`` returns.
+    Thin wrapper over the native assembler
+    (``DesignStack.design_from_config``): validates here (pydantic),
+    assembles there (material evaluation, film/group construction, one
+    ``from_design``). ``structure.layers`` carry ``layer_type``: 0 =
+    ambient row, 2 = substrate row, 1 = film. At most one ambient / one
+    substrate row; absent rows fall back to the driver constants (n=1.0
+    air, n=1.52 substrate). Films are keyed by material code — codes
+    must be unique (they key the nk table) and present in ``library``.
+    ``per_film_flags`` overrides by code (int index also accepted).
+    ``contrast`` maps host code → seed code. Assembly errors arrive as
+    ``ValueError`` from the core. Returns ``(stack, contrast_map)``.
     """
-    from navette.synthesis.pipeline import stack_from_layers
+    import json
+    from navette._smatrix import DesignStack as NativeDesignStack
     wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
-    specs = {}
-    for mat_def in library:
-        key = mat_def.code if mat_def.code else mat_def.name
-        specs[key] = material_from_config(mat_def, wl)
-
-    ambient_rows = [c for c in structure.layers if c.layer_type == 0]
-    substrate_rows = [c for c in structure.layers if c.layer_type == 2]
-    film_rows = [c for c in structure.layers if c.layer_type == 1]
-    if len(ambient_rows) > 1:
-        raise ValueError("pipeline_from_config: at most one ambient (layer_type=0) row.")
-    if len(substrate_rows) > 1:
-        raise ValueError("pipeline_from_config: at most one substrate (layer_type=2) row.")
-
-    def _resolve(code):
-        if code not in specs:
-            raise KeyError(f"Material code '{code}' not found in library")
-        return specs[code]
-
-    ambient = ((_resolve(ambient_rows[0].material_code), ambient_name)
-               if ambient_rows else (1.0, ambient_name))
-    substrate = ((_resolve(substrate_rows[0].material_code), substrate_name)
-                 if substrate_rows else (1.52, substrate_name))
-
-    layers, names, auto_flags = [], [], {}
-    for c in film_rows:
-        if c.material_code in names:
-            raise ValueError(
-                f"pipeline_from_config: duplicate film material code '{c.material_code}' "
-                "(film names key the nk table; split repeats into distinct codes).")
-        names.append(c.material_code)
-        layers.append((_resolve(c.material_code), c.thickness_nm))
-        auto_flags[c.material_code] = {
-            "coherent": c.coherent, "roughness": c.roughness_nm,
-            "rough_type": c.rough_type, "inhomogen": c.inhomogen,
-            "inh_delta": c.inh_delta, "interface": c.interface,
-            "interface_thickness": c.interface_thickness_nm,
-            "optimize": c.optimize, "needle": c.needle,
-        }
-    merged_flags = {}
-    for i, nm in enumerate(names):
-        merged_flags[nm] = dict(auto_flags[nm])
+    names = [c.material_code for c in structure.layers if c.layer_type == 1]
+    resolved_flags = {}
     for key, override in (per_film_flags or {}).items():
         nm = names[key] if isinstance(key, int) and 0 <= key < len(names) else str(key)
-        if nm not in merged_flags:
+        if nm not in names:
             raise KeyError(f"per_film_flags: unknown film '{key}'.")
-        merged_flags[nm].update(dict(override))
-    cmap_in = {str(h): _resolve(s) for h, s in (contrast or {}).items()}
-    groups = {c.name: group_from_config(c) for c in structure.groups}
-    return stack_from_layers(layers, wl, cmap_in, ambient=ambient,
-                             substrate=substrate, names=names,
-                             film_flags=film_flags, groups=groups,
-                             per_film_flags=merged_flags)
+        resolved_flags[nm] = dict(override)
+    request = {
+        "structure": structure.model_dump(mode="json"),
+        "library": [m.model_dump(mode="json") for m in library],
+        "contrast": {str(h): str(s) for h, s in (contrast or {}).items()},
+        "film_flags": dict(film_flags or {}),
+        "per_film_flags": resolved_flags,
+        "ambient_name": ambient_name,
+        "substrate_name": substrate_name,
+    }
+    return NativeDesignStack.design_from_config(json.dumps(request), wl)
 
 
 def architect_from_config(

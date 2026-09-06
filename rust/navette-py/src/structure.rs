@@ -38,7 +38,7 @@ fn ver<T>(r: Result<T, String>) -> PyResult<T> {
 }
 
 /// Re-emit Rust-side warnings through Python `warnings.warn`.
-fn emit_warnings(py: Python<'_>, what: &str, warnings: &[String]) -> PyResult<()> {
+pub(crate) fn emit_warnings(py: Python<'_>, what: &str, warnings: &[String]) -> PyResult<()> {
   if warnings.is_empty() {
     return Ok(());
   }

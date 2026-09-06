@@ -24,6 +24,7 @@ use pyo3::types::{IntoPyDict, PyAny, PyDict};
 
 use navette::smatrix::synthesis::config::PipelineConfig;
 use navette::smatrix::synthesis::context::DesignContext;
+use navette::smatrix::synthesis::design_config::{DesignRequest, build_design};
 use navette::smatrix::synthesis::cycle::{ContrastMap, NeedleCycleConfig};
 use navette::smatrix::synthesis::evaluator::SmatrixContext;
 use navette::smatrix::synthesis::pipeline::{NeedlePipeline, PipelinePhaseResult, SpectralInputs};
@@ -50,6 +51,12 @@ fn deg_to_sin(angles_deg: &[f64]) -> Vec<f64> {
 #[derive(Clone)]
 pub struct PyLayerSpec {
     inner: LayerSpec,
+}
+
+impl PyLayerSpec {
+    pub(crate) fn from_inner(inner: LayerSpec) -> Self {
+        Self { inner }
+    }
 }
 
 #[pymethods]
@@ -240,6 +247,33 @@ impl PyDesignStack {
             }
         }
         Ok(PyDesignStack::from_inner(stack))
+    }
+
+    /// Rust-first assembly from a typed design request (JSON).
+    ///
+    /// `request_json` is a serialized `DesignRequest` (structure +
+    /// material library + contrast + flags); assembly — material
+    /// evaluation, film/group construction, one `from_design` — runs
+    /// entirely in the core. Returns `(stack, contrast_map)`; core
+    /// warnings re-emit as Python warnings.
+    #[staticmethod]
+    #[pyo3(signature = (request_json, wavelengths))]
+    fn design_from_config(
+        py: Python<'_>,
+        request_json: &str,
+        wavelengths: PyReadonlyArray1<f64>,
+    ) -> PyResult<(Py<PyDesignStack>, Py<PyDict>)> {
+        let req: DesignRequest = serde_json::from_str(request_json).map_err(|e| {
+            PyValueError::new_err(format!("design_from_config: invalid request: {e}"))
+        })?;
+        let (stack, cmap, warnings) =
+            build_design(&req, wavelengths.as_slice()?).map_err(PyValueError::new_err)?;
+        crate::structure::emit_warnings(py, "design_from_config", &warnings)?;
+        let dict = PyDict::new(py);
+        for (k, v) in &cmap {
+            dict.set_item(k.to_string(), PyLayerSpec::from_inner(v.clone()))?;
+        }
+        Ok((Py::new(py, PyDesignStack::from_inner(stack))?, dict.into()))
     }
 
     /// Number of films (excludes ambient + substrate).
