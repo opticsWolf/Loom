@@ -87,6 +87,7 @@ def stack_from_layers(layers: Sequence[Tuple[Any, float]],
                       names: Optional[Sequence[str]] = None,
                       film_flags: Optional[Dict[str, Any]] = None,
                       groups: Optional[Mapping[str, Any]] = None,
+                      per_film_flags: Optional[Mapping[str, Dict[str, Any]]] = None,
                       ) -> Tuple[Any, Dict[str, Any]]:
     """Native ``(DesignStack, contrast_map)`` from ``[(material, d_nm)]`` films.
 
@@ -98,8 +99,15 @@ def stack_from_layers(layers: Sequence[Tuple[Any, float]],
     per-film ``LayerSpec`` defaults (``optimize``/``needle``/…).
     ``groups`` maps material name → bound ``Group`` (or param dict):
     thickness/nk scaling, roughness and interface policy expand here —
-    the silent-drop limitation is gone. Graded profiles are refused
-    (span-aware optimization is future work).
+    the silent-drop limitation is gone. Graded films take one of two
+    paths, implied by their flags (no separate declaration): a graded
+    film with ``optimize=False`` *and* ``needle=False`` expands WITH
+    the profile as pinned background (silent; excluded from needle
+    candidacy and thickness optimization; merge/cleanup preserve the
+    span). Any other graded film homogenizes with a warning (base
+    index — pin it to keep the profile). ``per_film_flags`` overrides
+    ``film_flags`` per film name (e.g. grade only the substrate).
+    Span-aware graded optimization is future work (D2).
     """
     from navette._structure import Layer as RsLayer, Group as RsGroup
     wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
@@ -125,14 +133,34 @@ def stack_from_layers(layers: Sequence[Tuple[Any, float]],
         raise ValueError("names length must match layers length.")
     if len(set(names)) != len(names):
         raise ValueError("film names must be unique (they key the nk table).")
+    # Per-film flags: globals split once, then each film merges its
+    # override (if any) and re-splits. Single source for the split keys.
+    def _split(fd):
+        fd = dict(fd)
+        lf = {k: fd.pop(k) for k in
+              ("roughness", "rough_type", "interface", "interface_thickness")
+              if k in fd}
+        if "rough_val" in fd:
+            lf["roughness"] = fd.pop("rough_val")
+        return fd, lf
     design, nk_map = [], {}
+    overrides = per_film_flags or {}
     for (mat, d), nm in zip(layers, names):
         nk_map[str(nm)] = _eval_nk(mat, wl)
-        design.append(RsLayer(float(d), str(nm), **flags, **layer_flags))
+        if nm in overrides:
+            local, lf = _split({**flags, **layer_flags, **dict(overrides[nm])})
+        else:
+            local, lf = flags, layer_flags
+        design.append(RsLayer(float(d), str(nm), **local, **lf))
     gmap = {}
     for name, g in (groups or {}).items():
         gmap[str(name)] = g if isinstance(g, RsGroup) else RsGroup(str(name), **dict(g))
-    stack = DesignStack.from_design(amb, sub, design, nk_map, gmap, wl)
+    # Background is implied, not declared: graded + pinned (both flags
+    # false) keeps its profile; any other graded film homogenizes loudly.
+    background = [str(nm) for layer, nm in zip(design, names)
+                  if layer.inhomogen and not layer.optimize and not layer.needle]
+    stack = DesignStack.from_design(
+        amb, sub, design, nk_map, gmap, wl, background=background)
     cmap = {str(k): layer_from_material(v, 0.0, wl, name=f"{k}_seed",
                                         coherent=True, optimize=True,
                                         needle=True)
