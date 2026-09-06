@@ -159,6 +159,75 @@ impl DesignStack {
         self.films.iter().map(|f| f.d_nm).sum()
     }
 
+    /// Build a stack by expanding design films through `navette-structure`.
+    ///
+    /// Entry point for the Python driver (`stack_from_layers`): films are
+    /// design layers (material NAMES resolved via `nk` on `wavelengths`),
+    /// groups apply thickness/nk/roughness/interface policy, and the
+    /// expansion emits solver rows. Physics (thickness/nk/coherent/
+    /// roughness) comes from the rows; identity and optimizer flags come
+    /// from the carrier design layer — except interface-slice rows, which
+    /// are derived (optimize/needle forced false, never free parameters).
+    /// Graded profiles are refused (span-aware optimization is future
+    /// work; flattening them silently would be worse than refusing).
+    pub fn from_design(
+        ambient: LayerSpec,
+        substrate: LayerSpec,
+        films: &[navette_structure::Layer],
+        nk: &std::collections::HashMap<std::sync::Arc<str>, Vec<num_complex::Complex64>>,
+        groups: &std::collections::HashMap<String, navette_structure::Group>,
+        wavelengths: &[f64],
+    ) -> Result<Self, String> {
+        use std::collections::HashMap;
+        if films.iter().any(|l| l.inhomogen) {
+            return Err(
+                "DesignStack::from_design: graded (inhomogen) profiles are not yet supported by the pipeline; \
+                 pre-expand or flatten the profile before constructing the stack."
+                    .to_string(),
+            );
+        }
+        let num_wavs = wavelengths.len();
+        if ambient.nk.len() != num_wavs || substrate.nk.len() != num_wavs {
+            return Err("DesignStack::from_design: boundary nk length != grid length.".to_string());
+        }
+        let mut entries = HashMap::new();
+        for (name, values) in nk {
+            entries.insert(
+                name.to_string(),
+                navette_structure::Entry::Array(values.clone()),
+            );
+        }
+        let provider = navette_structure::DictProvider::with_grid(entries, wavelengths.to_vec())?;
+        let seq: Vec<(navette_structure::Layer, bool)> =
+            films.iter().cloned().map(|l| (l, false)).collect();
+        let (sa, spans) = navette_structure::expand(
+            &seq,
+            &provider,
+            wavelengths,
+            groups,
+            navette_structure::ExpandOptions::deterministic(),
+        )?;
+        let mut rows = Vec::with_capacity(sa.n_rows());
+        for span in spans.iter() {
+            let carrier = &seq[span.logical].0;
+            for r in span.start..span.end {
+                let is_slice = span.slice && r == span.start;
+                let nk_row: Vec<num_complex::Complex64> = sa.row(r).to_vec();
+                rows.push(LayerSpec {
+                    material: std::sync::Arc::from(carrier.material.as_str()),
+                    nk: nk_row.into(),
+                    d_nm: sa.thicknesses[r],
+                    coherent: !sa.incoherent[r],
+                    rough_type: sa.rough_types[r],
+                    rough_val: sa.rough_vals[r],
+                    optimize: carrier.optimize && !is_slice,
+                    needle: carrier.needle && !is_slice,
+                });
+            }
+        }
+        Self::with_films(ambient, substrate, rows)
+    }
+
     // -- mutation primitives -------------------------------------------------
 
     /// Split the film at `film_idx` and insert a seed layer.
@@ -363,6 +432,36 @@ mod tests {
 
     fn stack(films: Vec<LayerSpec>) -> DesignStack {
         DesignStack::with_films(air(0.0), sub(0.0), films).unwrap()
+    }
+
+    /// D1: design films expand through the structure model (interface
+    /// slices appear as derived rows; graded profiles refuse loudly).
+    #[test]
+    fn from_design_expands_interfaces_and_refuses_grading() {
+        use std::collections::HashMap;
+        let wl: Vec<f64> = (0..NW).map(|i| 400.0 + i as f64 * 50.0).collect();
+        let mut nk = HashMap::new();
+        nk.insert(Arc::from("H"), vec![Complex64::new(2.35, 0.0); NW]);
+        let mut films = vec![
+            navette_structure::Layer::film(20.0, "H"),
+            navette_structure::Layer::film(50.0, "H"),
+        ];
+        films[1].interface = true;
+        films[1].interface_thickness = 5.0;
+        let stack =
+            DesignStack::from_design(air(0.0), sub(0.0), &films, &nk, &HashMap::new(), &wl).unwrap();
+        // Plain film + slice + bulk (ambient/substrate flank outside films).
+        assert_eq!(stack.films().len(), 3);
+        assert!((stack.films()[1].d_nm - 5.0).abs() < 1e-12);
+        assert!((stack.films()[2].d_nm - 45.0).abs() < 1e-12);
+        // Slice rows are derived: never free, never hosts.
+        assert!(!stack.films()[1].optimize && !stack.films()[1].needle);
+        assert!(stack.films()[2].optimize && stack.films()[2].needle);
+        assert_eq!(stack.films()[1].material.as_ref(), "H");
+        // Graded input refuses instead of flattening silently.
+        let mut graded = vec![navette_structure::Layer::film(50.0, "H")];
+        graded[0].inhomogen = true;
+        assert!(DesignStack::from_design(air(0.0), sub(0.0), &graded, &nk, &HashMap::new(), &wl).is_err());
     }
 
     fn h(d: f64) -> LayerSpec {

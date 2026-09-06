@@ -325,6 +325,15 @@ Python reference semantics (bake visible via originals). 86 validation +
 (only pre-approved migrations: native `apply_error`, `rng_for` fixture,
 new-API differential).
 
+- 2026-09-05: Phase D1 done (bounded): `DesignStack::from_design`
+(design films + nk table + groups + grid → expansion → solver rows;
+physics from rows, identity/flags from carriers, slice rows derived
+with optimize/needle false; graded refused loudly). Driver builds bound
+Layers + nk table (`groups=` surfaces via `run_needle` kwargs; names must
+be unique). Flat parity trajectory bit-identical; groups/interfaces now
+expand (were silently dropped). 86 validation + workspace green.
+D2 (span-aware graded optimization) stays future.
+
 ## 10. Order of work
 
 A1 → A2 → A3 → A4 → A5 → A6 → A7 → B → C → D (→ E iff needed),

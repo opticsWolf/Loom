@@ -191,6 +191,42 @@ impl PyDesignStack {
             .map_err(PyValueError::new_err)
     }
 
+    /// Expanded construction from design layers (first-class model path).
+    ///
+    /// `films` are design `Layer`s (material names); `nk` maps film name →
+    /// evaluated nk on `wavelengths`; `groups` maps material → policy.
+    /// Groups, nk scaling, roughness and interface slices expand here, so
+    /// the silent-drop limitation is gone; graded profiles refuse loudly.
+    #[staticmethod]
+    #[pyo3(signature = (ambient, substrate, films, nk, groups, wavelengths))]
+    fn from_design(
+        py: Python<'_>,
+        ambient: Py<PyLayerSpec>,
+        substrate: Py<PyLayerSpec>,
+        films: Vec<crate::structure::PyLayer>,
+        nk: HashMap<String, PyReadonlyArray1<Complex64>>,
+        groups: HashMap<String, crate::structure::PyGroup>,
+        wavelengths: PyReadonlyArray1<f64>,
+    ) -> PyResult<Self> {
+        let a = ambient.bind(py).borrow().inner.clone();
+        let s = substrate.bind(py).borrow().inner.clone();
+        let design: Vec<navette_structure::Layer> =
+            films.iter().map(|l| l.inner_clone()).collect();
+        let nk_map: HashMap<std::sync::Arc<str>, Vec<Complex64>> = nk
+            .iter()
+            .map(|(k, v)| {
+                v.as_slice().map(|sl| (std::sync::Arc::from(k.as_str()), sl.to_vec()))
+            })
+            .collect::<Result<_, _>>()?;
+        let gm: HashMap<String, navette_structure::Group> = groups
+            .iter()
+            .map(|(k, g)| (k.clone(), g.inner_clone()))
+            .collect();
+        DesignStack::from_design(a, s, &design, &nk_map, &gm, wavelengths.as_slice()?)
+            .map(PyDesignStack::from_inner)
+            .map_err(PyValueError::new_err)
+    }
+
     /// Number of films (excludes ambient + substrate).
     fn film_count(&self) -> usize {
         self.inner.films().len()

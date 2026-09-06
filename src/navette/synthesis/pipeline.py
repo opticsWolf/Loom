@@ -85,7 +85,8 @@ def stack_from_layers(layers: Sequence[Tuple[Any, float]],
                       ambient: Tuple[Any, str] = (1.0, "air"),
                       substrate: Tuple[Any, str] = (1.52, "sub"),
                       names: Optional[Sequence[str]] = None,
-                      film_flags: Optional[Dict[str, Any]] = None
+                      film_flags: Optional[Dict[str, Any]] = None,
+                      groups: Optional[Mapping[str, Any]] = None,
                       ) -> Tuple[Any, Dict[str, Any]]:
     """Native ``(DesignStack, contrast_map)`` from ``[(material, d_nm)]`` films.
 
@@ -95,10 +96,20 @@ def stack_from_layers(layers: Sequence[Tuple[Any, float]],
     name *or film index* → seed material. ``ambient``/``substrate`` are
     ``(material, name)``; always fixed, non-hosts. ``film_flags`` are
     per-film ``LayerSpec`` defaults (``optimize``/``needle``/…).
+    ``groups`` maps material name → bound ``Group`` (or param dict):
+    thickness/nk scaling, roughness and interface policy expand here —
+    the silent-drop limitation is gone. Graded profiles are refused
+    (span-aware optimization is future work).
     """
+    from navette._structure import Layer as RsLayer, Group as RsGroup
     wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
     flags = dict(coherent=True, optimize=True, needle=True)
     flags.update(film_flags or {})
+    layer_flags = {k: flags.pop(k) for k in
+                   ("roughness", "rough_type", "interface", "interface_thickness")
+                   if k in flags}
+    if "rough_val" in flags:
+        layer_flags["roughness"] = flags.pop("rough_val")
 
     def fixed(value, name):
         nk = (np.full(wl.shape, complex(value), dtype=np.complex128)
@@ -112,13 +123,21 @@ def stack_from_layers(layers: Sequence[Tuple[Any, float]],
     names = list(names) if names is not None else [f"film{i}" for i in range(len(layers))]
     if len(names) != len(layers):
         raise ValueError("names length must match layers length.")
-    films = [layer_from_material(mat, float(d), wl, name=nm, **flags)
-             for (mat, d), nm in zip(layers, names)]
+    if len(set(names)) != len(names):
+        raise ValueError("film names must be unique (they key the nk table).")
+    design, nk_map = [], {}
+    for (mat, d), nm in zip(layers, names):
+        nk_map[str(nm)] = _eval_nk(mat, wl)
+        design.append(RsLayer(float(d), str(nm), **flags, **layer_flags))
+    gmap = {}
+    for name, g in (groups or {}).items():
+        gmap[str(name)] = g if isinstance(g, RsGroup) else RsGroup(str(name), **dict(g))
+    stack = DesignStack.from_design(amb, sub, design, nk_map, gmap, wl)
     cmap = {str(k): layer_from_material(v, 0.0, wl, name=f"{k}_seed",
                                         coherent=True, optimize=True,
                                         needle=True)
             for k, v in contrast.items()}
-    return DesignStack(amb, sub, films), cmap
+    return stack, cmap
 
 
 def run_needle(layers: Sequence[Tuple[Any, float]],

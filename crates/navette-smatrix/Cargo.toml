@@ -12,5 +12,6 @@ name = "navette_smatrix"
 crate-type = ["rlib"]
 
 [dependencies]
+navette-structure = { workspace = true }
 num-complex = { workspace = true }
 rayon = { workspace = true }
