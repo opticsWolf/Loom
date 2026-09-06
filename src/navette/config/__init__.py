@@ -18,7 +18,7 @@ from .models import (
     ArchitectState,
     StructureState,
 )
-from .builders import material_provider_from_library, layer_from_config, group_from_config, structure_from_config, architect_from_config
+from .builders import material_provider_from_library, layer_from_config, group_from_config, structure_from_config, architect_from_config, pipeline_from_config
 from .models import BlockConfig, NamedStructureConfig
 from .program import (
     PROGRAM_SCHEMA_VERSION,
