@@ -334,6 +334,65 @@ impl Default for SimCurves {
 }
 
 impl SimCurves {
+    /// Grid points covered by one row (`n_angles × n_wavs`).
+    pub fn grid_points(&self) -> usize {
+        self.angles.len() * self.wavelengths.len()
+    }
+
+    /// Store one float row (absorptance derives from companions —
+    /// nothing to store; lengths are fail-closed).
+    pub fn set_curve(&mut self, id: CurveId, values: Arc<[f64]>) -> Result<(), String> {
+        if id.is_absorption() {
+            return Err(format!(
+                "absorption id '{id:?}': absorptance derives from companions, nothing to store"
+            ));
+        }
+        if values.len() != self.grid_points() {
+            return Err(format!(
+                "curve '{id:?}': {} entries != {} grid points.",
+                values.len(),
+                self.grid_points()
+            ));
+        }
+        match id.back_index() {
+            Some(i) => self.back[i] = Some(values),
+            None => self.curves[id.index()] = Some(values),
+        }
+        Ok(())
+    }
+
+    /// Store one complex-amplitude row for phase demands (front s/p R/T
+    /// or back s/p keys; lengths are fail-closed).
+    pub fn set_complex(&mut self, id: CurveId, values: Arc<[Complex64]>) -> Result<(), String> {
+        if values.len() != self.grid_points() {
+            return Err(format!(
+                "complex curve '{id:?}': {} entries != {} grid points.",
+                values.len(),
+                self.grid_points()
+            ));
+        }
+        if id.is_back() {
+            let i = match id {
+                CurveId::RBs => 0,
+                CurveId::RBp => 1,
+                CurveId::TBs => 2,
+                CurveId::TBp => 3,
+                _ => return Err(format!("complex row for '{id:?}': back-phase needs s/p keys")),
+            };
+            self.cplx_back[i] = Some(values);
+        } else {
+            match id {
+                CurveId::Rs | CurveId::Rp | CurveId::Ts | CurveId::Tp => {
+                    self.cplx[id.index()] = Some(values)
+                }
+                _ => {
+                    return Err(format!("complex row for '{id:?}': phase needs s/p R/T keys"))
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn curve(&self, id: CurveId) -> Option<&Arc<[f64]>> {
         // Back-incidence rows live in `back` (see back_curve); absorption
         // slots stay None (derived from companions).
@@ -841,6 +900,46 @@ impl MeritSpec {
 // ---------------------------------------------------------------------------
 // Tests — pin the lifted kernel against hand-computed values
 // ---------------------------------------------------------------------------
+
+/// Reference-rotation factors for differential-phase demands:
+/// `exp(-i·ref)` with `ref = passes·2π·n_inc·total_d·cosθ/λ` per
+/// wavelength. `arg(a·factor)` is the differential phase `Δφ`.
+pub fn reference_rotation(
+  wavelengths: &[f64],
+  angle_deg: f64,
+  n_inc: f64,
+  total_d: f64,
+  passes: f64,
+) -> Vec<num_complex::Complex64> {
+  use std::f64::consts::PI;
+  let cos_t = angle_deg.to_radians().cos();
+  wavelengths
+    .iter()
+    .map(|w| {
+      let r = passes * 2.0 * PI * n_inc * total_d * cos_t / w;
+      num_complex::Complex64::new(0.0, -r).exp()
+    })
+    .collect()
+}
+
+/// Apply per-wavelength rotation factors to flat rows in place.
+/// `rows.len()` must be a multiple of `rot.len()` (last axis wavelength).
+pub fn rotate_rows(
+  rows: &mut [num_complex::Complex64],
+  rot: &[num_complex::Complex64],
+) -> Result<(), String> {
+  if rot.is_empty() || rows.len() % rot.len() != 0 {
+    return Err(format!(
+      "rotate_rows: {} entries not a multiple of {} wavelengths.",
+      rows.len(),
+      rot.len()
+    ));
+  }
+  for (i, v) in rows.iter_mut().enumerate() {
+    *v *= rot[i % rot.len()];
+  }
+  Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -1614,6 +1713,43 @@ mod tests {
         let k = spec.add_key(MeritKey { angle: 0.0, curve: CurveId::Rs });
         assert!(spec.add_target(entry_banded(k as u32, vec![400.0], vec![0.0], vec![1.0],
             vec![0.1, 0.2], ConstraintKind::Range, SimTransform::Linear, 1.0)).is_err());
+    }
+
+    #[test]
+    fn rotation_kernel_values() {
+        // λ=1000, θ=0, n=1, d=250, passes=1: ref = 2π·250/1000 = π/2.
+        let rot = super::reference_rotation(&[1000.0], 0.0, 1.0, 250.0, 1.0);
+        assert!((rot[0].re - 0.0).abs() < 1e-15);
+        assert!((rot[0].im + 1.0).abs() < 1e-15);
+        let mut rows = vec![num_complex::Complex64::new(1.0, 0.0); 3];
+        super::rotate_rows(&mut rows, &rot).unwrap();
+        assert!((rows[0].im + 1.0).abs() < 1e-15);
+        assert!(super::rotate_rows(&mut rows[..2], &rot).is_ok());
+        let mut bad = vec![num_complex::Complex64::new(1.0, 0.0); 2];
+        let rot2 = super::reference_rotation(&[1000.0, 500.0, 250.0], 0.0, 1.0, 0.0, 1.0);
+        assert!(super::rotate_rows(&mut bad, &rot2).is_err());
+    }
+
+    #[test]
+    fn curve_setters_validate() {
+        use super::{CurveId, SimCurves};
+        use std::sync::Arc;
+        let mut sim = SimCurves {
+            angles: Arc::from([0.0]),
+            wavelengths: Arc::from([500.0, 600.0]),
+            total_d: 0.0,
+            n_front_re: 1.0,
+            n_back_re: 1.0,
+            curves: Default::default(),
+            back: Default::default(),
+            cplx: Default::default(),
+            cplx_back: Default::default(),
+        };
+        assert!(sim.set_curve(CurveId::Rs, Arc::from([0.1, 0.2])).is_ok());
+        assert!(sim.set_curve(CurveId::Rs, Arc::from([0.1])).is_err());
+        assert!(sim.set_curve(CurveId::As, Arc::from([0.1, 0.2])).is_err());
+        assert!(sim.set_complex(CurveId::Rs, Arc::from([num_complex::Complex64::new(1.0, 0.0); 2])).is_ok());
+        assert!(sim.set_complex(CurveId::Ru, Arc::from([num_complex::Complex64::new(1.0, 0.0); 2])).is_err());
     }
 
     #[test]

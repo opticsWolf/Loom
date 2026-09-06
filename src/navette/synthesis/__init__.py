@@ -264,16 +264,18 @@ def apply_reference_rotation(cplx, wavelengths, angle_deg: float,
     differential-phase demand on the raw rows (the test oracle for
     ``PDts``/``PDtp`` — native and numpy paths must agree to 1e-12).
     """
+    # Thin over the native kernel: factors computed in Rust, broadcast
+    # multiply stays numpy (arbitrary leading axes are presentation).
+    from navette._smatrix import reference_rotation as _ref_rot
     a = np.asarray(cplx)
     wl = np.asarray(wavelengths, dtype=np.float64).ravel()
     if a.shape[-1] != wl.size:
         raise ValueError(
             f"last axis {a.shape[-1]} != {wl.size} wavelengths."
         )
-    ref = (float(passes) * 2.0 * np.pi * float(n_inc) * float(total_d)
-           * np.cos(np.radians(float(angle_deg))) / wl)
-    rot = np.exp(-1j * ref).reshape((1,) * (a.ndim - 1) + (-1,))
-    return a * rot
+    rot = np.asarray(_ref_rot(wl, float(angle_deg), float(n_inc),
+                              float(total_d), float(passes)))
+    return a * rot.reshape((1,) * (a.ndim - 1) + (-1,))
 
 
 def sim_curves_from_arrays(angles, wavelengths,
@@ -292,21 +294,17 @@ def sim_curves_from_arrays(angles, wavelengths,
     thickness (same units as ``wavelengths``) and the real
     incidence/exit indices. Defaults zero the reference.
     """
+    # Thin: lengths + key rules validated natively in set_curve/set_complex.
     angles = np.ascontiguousarray(np.asarray(angles, dtype=np.float64)).ravel()
     wavelengths = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64)).ravel()
-    n = angles.size * wavelengths.size
     sim = _NativeSimCurves(angles, wavelengths, float(total_d),
                             float(n_front), float(n_back))
     for code, arr in curves.items():
-        v = np.ascontiguousarray(np.asarray(arr, dtype=np.float64)).ravel()
-        if v.size != n:
-            raise ValueError(f"curve {code!r}: {v.size} entries != {n} grid points.")
-        sim.set_curve(code, v)
+        sim.set_curve(code, np.ascontiguousarray(
+            np.asarray(arr, dtype=np.float64)).ravel())
     for code, arr in (complex_curves or {}).items():
-        v = np.ascontiguousarray(np.asarray(arr, dtype=np.complex128)).ravel()
-        if v.size != n:
-            raise ValueError(f"complex curve {code!r}: {v.size} entries != {n} grid points.")
-        sim.set_complex(code, v)
+        sim.set_complex(code, np.ascontiguousarray(
+            np.asarray(arr, dtype=np.complex128)).ravel())
     return sim
 
 

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use numpy::{PyArray, PyReadonlyArray1};
+use numpy::{PyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -95,19 +95,12 @@ impl PySimCurves {
         curve_id: String,
         values: PyReadonlyArray1<'_, f64>,
     ) -> PyResult<()> {
+        // Thin over the core setter (key rules + lengths validated there).
         let id = parse_curve(&curve_id)?;
-        if id.is_absorption() {
-            return Err(PyValueError::new_err(format!(
-                "absorption id '{curve_id}': absorptance derives from companions, nothing to store"
-            )));
-        }
-        let v = values.as_slice()?;
-        let arc: Arc<[f64]> = Arc::from(v);
-        match id.back_index() {
-            Some(i) => self.inner.back[i] = Some(arc),
-            None => self.inner.curves[id.index()] = Some(arc),
-        }
-        Ok(())
+        let arc: Arc<[f64]> = Arc::from(values.as_slice()?);
+        self.inner
+            .set_curve(id, arc)
+            .map_err(PyValueError::new_err)
     }
 
     /// Store one complex-amplitude row for phase demands (`Rs/Rp/Ts/Tp`,
@@ -117,35 +110,12 @@ impl PySimCurves {
         curve_id: String,
         values: PyReadonlyArray1<'_, Complex64>,
     ) -> PyResult<()> {
+        // Thin over the core setter (key rules + lengths validated there).
         let id = parse_curve(&curve_id)?;
-        let v = values.as_slice()?;
-        let arc: Arc<[Complex64]> = Arc::from(v);
-        if id.is_back() {
-            let i = match id {
-                CurveId::RBs => 0,
-                CurveId::RBp => 1,
-                CurveId::TBs => 2,
-                CurveId::TBp => 3,
-                _ => {
-                    return Err(PyValueError::new_err(format!(
-                        "complex row for '{curve_id}': back-phase needs s/p keys"
-                    )))
-                }
-            };
-            self.inner.cplx_back[i] = Some(arc);
-        } else {
-            match id {
-                CurveId::Rs | CurveId::Rp | CurveId::Ts | CurveId::Tp => {
-                    self.inner.cplx[id.index()] = Some(arc)
-                }
-                _ => {
-                    return Err(PyValueError::new_err(format!(
-                        "complex row for '{curve_id}': phase needs s/p R/T keys"
-                    )))
-                }
-            }
-        }
-        Ok(())
+        let arc: Arc<[Complex64]> = Arc::from(values.as_slice()?);
+        self.inner
+            .set_complex(id, arc)
+            .map_err(PyValueError::new_err)
     }
 }
 
@@ -252,6 +222,23 @@ impl PyMeritSpec {
     fn n_residuals(&self) -> usize {
         self.inner.n_residuals()
     }
+}
+
+/// Reference-rotation factors for differential-phase demands (thin over
+/// the core kernel): `exp(-i·ref)` per wavelength.
+#[pyfunction]
+#[pyo3(signature = (wavelengths, angle_deg, n_inc=1.0, total_d=0.0, passes=1.0))]
+pub fn reference_rotation(
+    py: Python<'_>,
+    wavelengths: PyReadonlyArray1<'_, f64>,
+    angle_deg: f64,
+    n_inc: f64,
+    total_d: f64,
+    passes: f64,
+) -> PyResult<Py<PyArray1<Complex64>>> {
+    use navette::smatrix::synthesis::merit::reference_rotation as core_rot;
+    let rot = core_rot(wavelengths.as_slice()?, angle_deg, n_inc, total_d, passes);
+    Ok(PyArray::from_vec(py, rot).into())
 }
 
 /// Fold a spec into per-quantity `(targets, weights)` pairs (angle-major).
