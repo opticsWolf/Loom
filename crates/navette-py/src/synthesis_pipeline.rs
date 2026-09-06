@@ -20,7 +20,7 @@ use num_complex::Complex64;
 use numpy::{PyArray, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{IntoPyDict, PyAny, PyDict};
 
 use navette::smatrix::synthesis::config::PipelineConfig;
 use navette::smatrix::synthesis::context::DesignContext;
@@ -196,9 +196,10 @@ impl PyDesignStack {
     /// `films` are design `Layer`s (material names); `nk` maps film name →
     /// evaluated nk on `wavelengths`; `groups` maps material → policy.
     /// Groups, nk scaling, roughness and interface slices expand here, so
-    /// the silent-drop limitation is gone; graded profiles refuse loudly.
+    /// the silent-drop limitation is gone; graded profiles homogenize
+    /// with a Python warning per film (never silent, never refused).
     #[staticmethod]
-    #[pyo3(signature = (ambient, substrate, films, nk, groups, wavelengths))]
+    #[pyo3(signature = (ambient, substrate, films, nk, groups, wavelengths, background=None))]
     fn from_design(
         py: Python<'_>,
         ambient: Py<PyLayerSpec>,
@@ -207,6 +208,7 @@ impl PyDesignStack {
         nk: HashMap<String, PyReadonlyArray1<Complex64>>,
         groups: HashMap<String, crate::structure::PyGroup>,
         wavelengths: PyReadonlyArray1<f64>,
+        background: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let a = ambient.bind(py).borrow().inner.clone();
         let s = substrate.bind(py).borrow().inner.clone();
@@ -222,9 +224,22 @@ impl PyDesignStack {
             .iter()
             .map(|(k, g)| (k.clone(), g.inner_clone()))
             .collect();
-        DesignStack::from_design(a, s, &design, &nk_map, &gm, wavelengths.as_slice()?)
-            .map(PyDesignStack::from_inner)
-            .map_err(PyValueError::new_err)
+        let bg: std::collections::HashSet<String> =
+            background.unwrap_or_default().into_iter().collect();
+        let (stack, warnings) =
+            DesignStack::from_design(a, s, &design, &nk_map, &gm, wavelengths.as_slice()?, &bg)
+                .map_err(PyValueError::new_err)?;
+        if !warnings.is_empty() {
+            let mod_warn = py.import("warnings")?;
+            for w in &warnings {
+                mod_warn.call_method(
+                    "warn",
+                    (w,),
+                    Some(&[("stacklevel", 3)].into_py_dict(py)?),
+                )?;
+            }
+        }
+        Ok(PyDesignStack::from_inner(stack))
     }
 
     /// Number of films (excludes ambient + substrate).

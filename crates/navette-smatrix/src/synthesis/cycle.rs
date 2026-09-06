@@ -122,7 +122,10 @@ pub fn run_needle_cycles<C: DesignContext + ?Sized>(
             }
         }
         // 1. Build candidate sites restricted to films whose material has a
-        //    contrast entry (Python skips layers without a mapping).
+        //    contrast entry (Python skips layers without a mapping) AND
+        //    that are needle hosts. The flag check is load-bearing:
+        //    interface slices and pinned graded rows share their carrier's
+        //    material (hence a contrast entry) but must never host seeds.
         let sites = build_scan_sites(stack.films(), cfg.scan_step_nm);
         let sites: Vec<_> = sites
             .into_iter()
@@ -130,7 +133,7 @@ pub fn run_needle_cycles<C: DesignContext + ?Sized>(
                 stack
                     .films()
                     .get(s.film_idx)
-                    .map(|l| contrast.contains_key(&l.material))
+                    .map(|l| l.needle && contrast.contains_key(&l.material))
                     .unwrap_or(false)
             })
             .collect();
@@ -354,6 +357,31 @@ mod tests {
             spec: MeritSpec::new(),
             angles_deg: vec![0.0],
         }
+    }
+
+    /// Non-host rows (needle=false) are never insertion sites even when
+    /// their material has a contrast entry (interface slices, pinned
+    /// graded spans). The run breaks with the stack untouched.
+    #[test]
+    fn non_host_rows_never_seed() {
+        let nw = 1;
+        let mut ambient = LayerSpec::constant("air", 1.0, 0.0, 0.0, nw);
+        ambient.optimize = false;
+        ambient.needle = false;
+        let mut substrate = LayerSpec::constant("sub", 1.52, 0.0, 0.0, nw);
+        substrate.optimize = false;
+        substrate.needle = false;
+        let mut host = LayerSpec::constant("G", 1.52, 0.0, 200.0, nw);
+        host.needle = false; // contrast entry exists, host flag refuses
+        let mut stack =
+            DesignStack::with_films(ambient, substrate, vec![host]).unwrap();
+        let mut ctx = StillCtx;
+        let spectral = spectral_of(fold_with("t", 2.0));
+        let hist = run_needle_cycles(&mut ctx, &mut stack, &spectral, &contrast_h(), &cycle_cfg())
+            .unwrap();
+        assert!(hist.is_empty());
+        assert_eq!(stack.films().len(), 1);
+        assert!((stack.films()[0].d_nm - 200.0).abs() < 1e-12);
     }
 
     #[test]

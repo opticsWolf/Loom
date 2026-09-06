@@ -226,11 +226,44 @@ dies here; flat stacks reproduce the parity merit trajectory
 bit-identically. `groups=` surfaces via `run_needle` kwargs; film names
 must be unique (they key the nk table).
 
-D2 (FUTURE): span-aware graded optimization — expand once, record
-spans, optimizer moves carriers and re-derives rows as profiled units.
-Needs thickness/needle/cleanup to understand spans (all assume free
-rows today). Trigger: someone actually wants graded needle synthesis.
-Until then, graded pipeline input refuses with a clear error.
+2026-09-06: refusal LIFTED → homogenize-with-warning. `from_design`
+returns `(stack, warnings)`; graded films expand as uniform base-index
+rows (groups/interfaces still apply) + one warning per film.
+2026-09-06: pinned graded background implemented (`background_names`;
+`per_film_flags` for per-film control): background graded expands WITH
+the profile, whole span forced optimize/needle=false, no warning
+(explicit opt-in). Operator guards (all parity-neutral on flat stacks,
+proven by unchanged merit trajectory): merge keyed on (material, nk)
+— protects slices, group-scaled rows and graded spans with zero span
+bookkeeping; needle sites require the host flag (fixes D1 gap where
+slices could host seeds); thin-removal candidates require optimize
+(budget test re-aimed; derived rows never candidates). Architect prune
+needs no guard (design-level, pre-expansion).
+2026-09-06: proposal review — `background_names` DELETED before
+shipping; background is IMPLIED (graded + optimize=False + needle=False
+⇒ profile kept, silent; any other graded ⇒ homogenize + warning).
+Driver derives the core background set from flags; `per_film_flags`
+stays as the per-film vehicle (3-tuples NOT adopted). 97 validation
+green, parity trajectory unchanged.
+
+D2a (PLANNED): gradient-based refinement on graded carriers, three
+wirings of ONE core — build order:
+1. Standalone optimizer `refine_carriers(stack, ...)` (carrier params
+   `(thickness, inh_delta)`, re-derive per eval, finite-difference
+   gradients, adjoint out of scope). Usable alone (hand rugates,
+   imports) and the testable unit. FIRST.
+2. Optional final step (`final_carrier_refinement: bool|None = None`,
+   DECIDED default auto → ON iff graded carriers present, else no-op):
+   one refine run over the needle loop's final stack. Accept-on-
+   improvement (provably never worsens mf) is what makes auto safe;
+   explicit true/false overrides. SECOND.
+3. Per-cycle phase (`carrier_refinement_per_cycle`, default OFF):
+   Phase 4 in the macro-cycle; most consistent landscape, highest
+   cost; enable for deep rugate co-design. THIRD.
+Needle stays uniform-only throughout (carriers are background, never
+hosts); merge keyed on `(material, span)` so profiles survive cleanup.
+Requires pinned-background span machinery first.
+D2b: UNSPECIFIED (request cut off) — awaiting definition.
 
 ## 7. Phase E — Deferred (only if needed)
 
@@ -239,8 +272,11 @@ Until then, graded pipeline input refuses with a clear error.
   principle — the weaver wraps live Python workflow state
   (re-woven grids, `target_wavelength`, strict mode), and porting it
   means porting spectralweave's weave machinery for one consumer.
-- Contract tags if versions ever feel too coarse (see §9.6).
+- Contract tags: REJECTED, see §9.6 (schema_version only).
 (Spec dispatch + `bake_materials` moved into A3/A6 per §9.3B.)
+
+Phase E is therefore CLOSED (weaver ported 2026-09-06; tags rejected).
+No open deferred items remain except D2 (span-aware graded optimization).
 
 ## 8. Verification: every behavior tested in Rust AND Python
 
@@ -342,15 +378,12 @@ stack build; per-simulate cost unchanged by construction).
    don't carry it; only the bypass smell wrote it). Its removal is the
    point, not a cost.
 
-6. Contract tags vs `SCHEMA_VERSION`? Informative, no decision owed.
-   `SCHEMA_VERSION` is the COMPAT gate — bump = old states refuse to
-   load (coarse, breaking, reader-enforced). Contract tags would be
-   BEHAVIOR fingerprints — per-subsystem meaning versions (expansion
-   algorithm, draw order, roughness convention) STAMPED INTO OUTPUTS
-   so a result can say what it meant without breaking readability.
-   Rule of thumb: schema = "can I read this"; contracts = "did this
-   mean the same thing". The FINGERPRINT test is a build-time contract
-   tag; emitting tags into result dicts is the deferred half (Phase E).
+6. Contract tags vs `SCHEMA_VERSION`? → DECIDED: schema_version only.
+   `SCHEMA_VERSION` is the single versioning mechanism (bump = old
+   states refuse; fingerprint test pins meaning per build). No
+   per-subsystem tags in outputs — rejected as second versioning
+   channel that would need its own bump discipline without a reader
+   to enforce it.
 
 - 2026-09-05: Phase B done: `_structure` submodule (Layer/Group/
 DictProvider/SolverArrays/Structure/Architect + warnings re-emit, seed
