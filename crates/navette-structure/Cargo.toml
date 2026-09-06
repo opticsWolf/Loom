@@ -1,6 +1,6 @@
 [package]
 name = "navette-structure"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Pure-Rust thin-film stack model: layers, groups, expansion, validation (no Python)."
 license = "LGPL-3.0-or-later"
