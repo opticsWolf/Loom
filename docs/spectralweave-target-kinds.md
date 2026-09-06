@@ -2,13 +2,13 @@
 
 Target semantics live in two Rust mirrors that must stay in lockstep:
 
-- `crates/navette-spectralweave/src/targetweaver.rs` — ingestion
+- `rust/navette/src/spectralweave/targetweaver.rs` — ingestion
   (`TargetKind`, `TargetEntry`, `register_metadata`) and
-- `crates/navette-py/src/spectralweave_target.rs` — `calculate_merit`.
-- `crates/navette-smatrix/src/synthesis/merit.rs` — `ConstraintKind`,
+- `rust/navette-py/src/spectralweave_target.rs` — `calculate_merit`.
+- `rust/navette/src/smatrix/synthesis/merit.rs` — `ConstraintKind`,
   `MeritTarget`, `MeritSpec`: a verbatim lift of the merit kernel into
   residual space for the thickness optimizer and the needle pass.
-- `crates/navette-smatrix/src/synthesis/needle_pass.rs` —
+- `rust/navette/src/smatrix/synthesis/needle_pass.rs` —
   `build_needle_targets`: folds a `MeritSpec` into flat
   `(targets_r, weights_r)` quadratics for the analytic needle operator.
 

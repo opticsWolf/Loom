@@ -4,7 +4,7 @@
 Floater-Hormann, …) with batch support.
 
 Thin wrapper over the private native extension ``navette._interpolate``
-built from ``crates/navette-interpolate``::
+built from ``rust/navette/src/interpolate``::
 
     maturin develop  # from the repo root
 """

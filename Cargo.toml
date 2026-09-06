@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/navette",
-  "crates/navette-py",
+  "rust/navette",
+  "rust/navette-py",
 ]
 
 [workspace.package]
@@ -21,7 +21,7 @@ num-complex = "0.4"
 rayon = "1"
 ndarray = "0.15"
 # Single Rust crate (pure engine + modules); bindings take it by path.
-navette = { version = "0.4.1", path = "crates/navette" }
+navette = { version = "0.4.1", path = "rust/navette" }
 
 [profile.release]
 opt-level = 3

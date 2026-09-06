@@ -44,9 +44,9 @@ all = ["numba>=0.56.0", "pytest", "maturin>=1.5,<2.0"]
 Homepage = "https://github.com/opticsWolf/Navette"
 
 [tool.maturin]
-# Single-aggregator mixed project: one cdylib (crates/navette-py) with five
+# Single-aggregator mixed project: one cdylib (rust/navette-py) with
 # native submodules, installed as navette._navette alongside src/navette.
 bindings = "pyo3"
-manifest-path = "crates/navette-py/Cargo.toml"
+manifest-path = "rust/navette-py/Cargo.toml"
 python-source = "src"
 module-name = "navette._navette"

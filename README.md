@@ -74,7 +74,7 @@ Navette/
 │   ├── synthesis/            # needle pipeline driver (native DesignStack)
 │   ├── config/               # YAML/JSON libraries, stacks, program documents
 │   └── data/CIE/             # bundled reference spectra
-├── crates/                   # Rust sources: one engine crate + bindings
+├── rust/                     # Rust sources: one engine crate + bindings
 │   ├── navette/              # pure-Rust engine (color/interpolate/materials/
 │   │                         # smatrix/spectralweave/structure modules;
 │   │                         # published as `navette` on crates.io)
@@ -97,7 +97,7 @@ pytest validation
 
 ### Layout notes
 
-- `crates/` holds the Cargo workspace (the single `navette` engine crate
+- `rust/` holds the Cargo workspace (the single `navette` engine crate
   plus the `navette-py` PyO3 aggregator) — the idiomatic Rust layout,
   publishable to crates.io.
 - `src/navette/` is the Python package in src-layout — the idiomatic
