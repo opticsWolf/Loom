@@ -52,6 +52,13 @@ pub mod func_14;
 pub mod func_15;
 pub mod func_16;
 
+/// Golden-vector parity suite (reference-engine vectors in `golden.rs`).
+/// Wired as a test-only module so `cargo test -p navette-color` runs it;
+/// it was previously orphaned (never compiled), which hid the D50 drift.
+#[cfg(test)]
+#[path = "parity.rs"]
+mod parity;
+
 pub mod prelude {
     pub use crate::common::{REF_WHITE_D50, REF_WHITE_D65};
     pub use crate::composites::*;

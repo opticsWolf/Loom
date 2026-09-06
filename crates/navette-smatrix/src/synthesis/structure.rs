@@ -159,6 +159,102 @@ impl DesignStack {
         self.films.iter().map(|f| f.d_nm).sum()
     }
 
+    /// Build a stack by expanding design films through `navette-structure`.
+    ///
+    /// Entry point for the Python driver (`stack_from_layers`): films are
+    /// design layers (material NAMES resolved via `nk` on `wavelengths`),
+    /// groups apply thickness/nk/roughness/interface policy, and the
+    /// expansion emits solver rows. Physics (thickness/nk/coherent/
+    /// roughness) comes from the rows; identity and optimizer flags come
+    /// from the carrier design layer — except interface-slice rows, which
+    /// are derived (optimize/needle forced false, never free parameters).
+    /// Graded profiles are HOMOGENIZED with a warning per film (base
+    /// index, single row): the pipeline's operators assume uniform slabs,
+    /// so dropping the profile loudly beats refusing (substrate/media use)
+    /// and beats flattening silently. Span-aware graded optimization is
+    /// future work (D2).
+    pub fn from_design(
+        ambient: LayerSpec,
+        substrate: LayerSpec,
+        films: &[navette_structure::Layer],
+        nk: &std::collections::HashMap<std::sync::Arc<str>, Vec<num_complex::Complex64>>,
+        groups: &std::collections::HashMap<String, navette_structure::Group>,
+        wavelengths: &[f64],
+        background: &std::collections::HashSet<String>,
+    ) -> Result<(Self, Vec<String>), String> {
+        use std::collections::HashMap;
+        // Graded films go one of two ways (never refused, never silent):
+        // - BACKGROUND (named in `background`): expanded WITH the profile
+        //   and pinned (optimize/needle forced false on the whole carrier
+        //   span). True physics, fixed: needle never hosts there, LM
+        //   skips the rows, nk-keyed merge and flag-guarded cleanup preserve
+        //   the span. No warning — explicit opt-in, nothing dropped.
+        // - otherwise HOMOGENIZED (base index, single row) with a warning
+        //   per film: the pipeline's operators assume uniform slabs.
+        let mut warnings = Vec::new();
+        let flat: Vec<navette_structure::Layer> = films
+            .iter()
+            .map(|l| {
+                let mut h = l.clone();
+                if h.inhomogen {
+                    if background.contains(h.material.as_str()) {
+                        h.optimize = false;
+                        h.needle = false;
+                    } else {
+                        warnings.push(format!(
+                            "DesignStack::from_design: film '{}' is graded (inhomogen) — the pipeline treats it as \
+                             homogeneous (base index, profile dropped); needle/thickness steps assume uniform slabs. \
+                             Pin it (optimize=False, needle=False) to keep the profile as background.",
+                            h.material
+                        ));
+                        h.inhomogen = false;
+                    }
+                }
+                h
+            })
+            .collect();
+        let num_wavs = wavelengths.len();
+        if ambient.nk.len() != num_wavs || substrate.nk.len() != num_wavs {
+            return Err("DesignStack::from_design: boundary nk length != grid length.".to_string());
+        }
+        let mut entries = HashMap::new();
+        for (name, values) in nk {
+            entries.insert(
+                name.to_string(),
+                navette_structure::Entry::Array(values.clone()),
+            );
+        }
+        let provider = navette_structure::DictProvider::with_grid(entries, wavelengths.to_vec())?;
+        let seq: Vec<(navette_structure::Layer, bool)> =
+            flat.iter().cloned().map(|l| (l, false)).collect();
+        let (sa, spans) = navette_structure::expand(
+            &seq,
+            &provider,
+            wavelengths,
+            groups,
+            navette_structure::ExpandOptions::deterministic(),
+        )?;
+        let mut rows = Vec::with_capacity(sa.n_rows());
+        for span in spans.iter() {
+            let carrier = &seq[span.logical].0;
+            for r in span.start..span.end {
+                let is_slice = span.slice && r == span.start;
+                let nk_row: Vec<num_complex::Complex64> = sa.row(r).to_vec();
+                rows.push(LayerSpec {
+                    material: std::sync::Arc::from(carrier.material.as_str()),
+                    nk: nk_row.into(),
+                    d_nm: sa.thicknesses[r],
+                    coherent: !sa.incoherent[r],
+                    rough_type: sa.rough_types[r],
+                    rough_val: sa.rough_vals[r],
+                    optimize: carrier.optimize && !is_slice,
+                    needle: carrier.needle && !is_slice,
+                });
+            }
+        }
+        Self::with_films(ambient, substrate, rows).map(|s| (s, warnings))
+    }
+
     // -- mutation primitives -------------------------------------------------
 
     /// Split the film at `film_idx` and insert a seed layer.
@@ -195,11 +291,14 @@ impl DesignStack {
         Ok(())
     }
 
-    /// Merge consecutive film layers of identical material.
-    ///
-    /// Verbatim port of `merge_adjacent_layers`: combined thickness is the
-    /// sum; the *first* layer's properties (optimize/needle/roughness/…)
-    /// are preserved. Returns the number of merges performed.
+    /// Merge consecutive film layers of identical material AND bit-identical
+    /// nk. The nk key is load-bearing: interface slices, group-scaled rows
+    /// and graded-profile sublayers share material names with their bulk
+    /// but must never collapse into one slab (first-row nk would win).
+    /// Uniform same-material rows carry identical vectors, so they still
+    /// merge. Combined thickness is the sum; the *first* layer's other
+    /// properties (optimize/needle/roughness/…) are preserved. Returns the
+    /// number of merges performed.
     pub fn merge_adjacent(&mut self) -> usize {
         if self.films.is_empty() {
             return 0;
@@ -213,7 +312,10 @@ impl DesignStack {
             let current = &films[i];
             let mut combined_d = current.d_nm;
             let mut j = i + 1;
-            while j < films.len() && films[j].material == current.material {
+            while j < films.len()
+                && films[j].material == current.material
+                && films[j].nk == current.nk
+            {
                 combined_d += films[j].d_nm;
                 j += 1;
                 merge_count += 1;
@@ -344,6 +446,7 @@ pub struct SolverArrays {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
     const NW: usize = 8; // simulation wavelengths
 
@@ -363,6 +466,53 @@ mod tests {
 
     fn stack(films: Vec<LayerSpec>) -> DesignStack {
         DesignStack::with_films(air(0.0), sub(0.0), films).unwrap()
+    }
+
+    /// D1: design films expand through the structure model (interface
+    /// slices appear as derived rows; graded homogenizes, background pins).
+    #[test]
+    fn from_design_expands_interfaces_and_refuses_grading() {
+        let wl: Vec<f64> = (0..NW).map(|i| 400.0 + i as f64 * 50.0).collect();
+        let mut nk = HashMap::new();
+        nk.insert(Arc::from("H"), vec![Complex64::new(2.35, 0.0); NW]);
+        let mut films = vec![
+            navette_structure::Layer::film(20.0, "H"),
+            navette_structure::Layer::film(50.0, "H"),
+        ];
+        films[1].interface = true;
+        films[1].interface_thickness = 5.0;
+        let (stack, warns) =
+            DesignStack::from_design(air(0.0), sub(0.0), &films, &nk, &HashMap::new(), &wl, &HashSet::new()).unwrap();
+        assert!(warns.is_empty());
+        // Plain film + slice + bulk (ambient/substrate flank outside films).
+        assert_eq!(stack.films().len(), 3);
+        assert!((stack.films()[1].d_nm - 5.0).abs() < 1e-12);
+        assert!((stack.films()[2].d_nm - 45.0).abs() < 1e-12);
+        // Slice rows are derived: never free, never hosts.
+        assert!(!stack.films()[1].optimize && !stack.films()[1].needle);
+        assert!(stack.films()[2].optimize && stack.films()[2].needle);
+        assert_eq!(stack.films()[1].material.as_ref(), "H");
+        // Graded input homogenizes with a warning (base index, one row).
+        let mut graded = vec![navette_structure::Layer::film(50.0, "H")];
+        graded[0].inhomogen = true;
+        graded[0].inh_delta = 0.2;
+        let (gstack, warns) =
+            DesignStack::from_design(air(0.0), sub(0.0), &graded, &nk, &HashMap::new(), &wl, &HashSet::new()).unwrap();
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("homogeneous"));
+        assert_eq!(gstack.films().len(), 1);
+        assert!((gstack.films()[0].d_nm - 50.0).abs() < 1e-12);
+        // Background graded: profile expands (11 sublayers), all pinned.
+        let bg: std::collections::HashSet<String> = ["H".to_string()].into_iter().collect();
+        let (bstack, bwarns) =
+            DesignStack::from_design(air(0.0), sub(0.0), &graded, &nk, &HashMap::new(), &wl, &bg).unwrap();
+        assert!(bwarns.is_empty());
+        assert_eq!(bstack.films().len(), 11);
+        assert!(bstack.films().iter().all(|f| !f.optimize && !f.needle));
+        // Pinned span survives merge (nk-keyed) and was never a host.
+        let mut mstack = bstack;
+        assert_eq!(mstack.merge_adjacent(), 0);
+        assert!((mstack.total_thickness_nm() - 50.0).abs() < 1e-12);
     }
 
     fn h(d: f64) -> LayerSpec {
@@ -438,6 +588,27 @@ mod tests {
         assert!(!f[2].optimize);
         assert!(f[2].needle);
         assert!((s.total_thickness_nm() - 200.0).abs() < 1e-12);
+    }
+
+    /// nk-keyed merge: same material with different nk (interface slice,
+    /// group scaling, graded sublayers) must NEVER collapse.
+    #[test]
+    fn merge_adjacent_respects_nk() {
+        // Same name, perturbed nk → no merge.
+        let mut a = h(10.0);
+        let mut b = h(10.0);
+        b.nk = std::sync::Arc::from(vec![Complex64::new(2.5, 0.0); NW]);
+        let mut s = stack(vec![a, b]);
+        assert_eq!(s.merge_adjacent(), 0);
+        assert_eq!(s.films().len(), 2);
+        // Slice-like row (same name, mixed nk, derived flags) + bulk → kept.
+        let mut slice = h(4.0);
+        slice.optimize = false;
+        slice.needle = false;
+        slice.nk = std::sync::Arc::from(vec![Complex64::new(1.9, 0.0); NW]);
+        let mut s = stack(vec![slice, h(46.0)]);
+        assert_eq!(s.merge_adjacent(), 0);
+        assert!(!s.films()[0].optimize);
     }
 
     #[test]

@@ -119,11 +119,20 @@ class Request(IntFlag):
     DISP_R_P = 1 << 38
     DISP_T_S = 1 << 39
     DISP_T_P = 1 << 40
+    PHI_RBS = 1 << 41  # back-reflection s phase (back-incidence experiment)
+    PHI_RBP = 1 << 42
+    PHI_TBS = 1 << 43  # back-transmission s phase
+    PHI_TBP = 1 << 44
+    RBS_C = 1 << 45    # complex back-reflection s amplitude
+    RBP_C = 1 << 46
+    TBS_C = 1 << 47    # complex back-transmission s amplitude
+    TBP_C = 1 << 48
 
     # Convenience bundles
     PHOTOMETRY = RS | RP | TS | TP | R_AVG | T_AVG
     ELLIPSOMETRY = PSI_R | DELTA_R | DOP_R | PSI_T | DELTA_T | DOP_T
     ABSORPTION = A_S | A_P | A_AVG
+    BACKSIDE = PHI_RBS | PHI_RBP | PHI_TBS | PHI_TBP | RBS_C | RBP_C | TBS_C | TBP_C
     STOKES_R = S0_R | S1_R | S2_R | S3_R
     STOKES_T = S0_T | S1_T | S2_T | S3_T
 
@@ -148,18 +157,9 @@ class Pol(IntEnum):
     P = 1
 
 
-class RoughnessType(IntEnum):
-    """Interface roughness form factor W(q) (see native ``w_function``).
-
-    NONE: ideal interface. LINEAR/STEP/EXPONENTIAL/GAUSSIAN: analytic
-    graded-index profiles. NEVOT_CROCE: Névot-Croce X-ray form factor.
-    """
-    NONE = 0
-    LINEAR = 1
-    STEP = 2
-    EXPONENTIAL = 3
-    GAUSSIAN = 4
-    NEVOT_CROCE = 5
+# Canonical definition lives in navette.structure.types (pure-Python home);
+# re-exported here so the engine-side API is unchanged.
+from navette.structure.types import RoughnessType
 
 
 # Maps each request bit to the output dict key(s) the engine emits for it. Used
@@ -184,6 +184,10 @@ _SCALAR_KEYS = {
     Request.PHI_RS: "phi_rs", Request.PHI_RP: "phi_rp",
     Request.PHI_TS: "phi_ts", Request.PHI_TP: "phi_tp",
     Request.RS_C: "rs_c", Request.RP_C: "rp_c", Request.TS_C: "ts_c", Request.TP_C: "tp_c",
+    Request.PHI_RBS: "phi_rbs", Request.PHI_RBP: "phi_rbp",
+    Request.PHI_TBS: "phi_tbs", Request.PHI_TBP: "phi_tbp",
+    Request.RBS_C: "rbs_c", Request.RBP_C: "rbp_c",
+    Request.TBS_C: "tbs_c", Request.TBP_C: "tbp_c",
     Request.CROSS_R: "cross_R", Request.CROSS_T: "cross_T",
 }
 

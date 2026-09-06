@@ -1,0 +1,26 @@
+[package]
+name = "navette-structure"
+version = "0.4.0"
+edition = "2024"
+description = "Pure-Rust thin-film stack model: layers, groups, expansion, validation (no Python)."
+license = "LGPL-3.0-or-later"
+authors = ["opticsWolf"]
+repository = "https://github.com/opticsWolf/Navette"
+
+[lib]
+name = "navette_structure"
+crate-type = ["rlib"]
+
+[dependencies]
+navette-materials = { workspace = true }
+navette-spectralweave = { workspace = true }
+navette-interpolate = { workspace = true }
+ndarray = { workspace = true }
+# 0.17 solely to build UniInterpolator inputs (its API types); the model
+# itself stays on workspace ndarray (0.15, numpy-bridge discipline).
+ndarray017 = { package = "ndarray", version = "0.17" }
+num-complex = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+rand_distr = "0.5"

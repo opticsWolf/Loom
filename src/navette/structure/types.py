@@ -22,9 +22,20 @@ class ErrorType(IntEnum):
     COMBINED = 2
 
 class RoughnessType(IntEnum):
-    """Structure-level roughness switch (detail lives in smatrix.RoughnessType)."""
+    """Per-interface roughness form factor (solver contract, [nm] sigma).
+
+    Canonical definition shared by the structure model and the smatrix
+    engine (`navette.smatrix.RoughnessType` re-exports this): NONE is an
+    ideal interface; LINEAR/STEP/EXPONENTIAL/GAUSSIAN are analytic
+    graded-index profiles; NEVOT_CROCE is the Nevot-Croce X-ray factor.
+    Stored on :class:`Layer.rough_type` and passed to the engine as int.
+    """
     NONE = 0
-    SCALAR = 1
+    LINEAR = 1
+    STEP = 2
+    EXPONENTIAL = 3
+    GAUSSIAN = 4
+    NEVOT_CROCE = 5
 
 class ErrorMask(IntEnum):
     """Slots of the per-layer error vector (thickness, n/k, roughness, ...)."""
@@ -35,12 +46,80 @@ class ErrorMask(IntEnum):
     INH_DELTA = 4
     INTERFACE = 5
 
+# State-schema version (structure get_state dicts + config states).
+# v1 = the current baseline. There is no past: untagged states are
+# malformed, not legacy. Bump on any breaking change (removed/renamed
+# keys, changed meaning of an existing key); purely additive keys are
+# safe without a bump (readers ignore unknown keys) — the fingerprint
+# test in validation/regression/structure/test_roundtrip.py enforces
+# this decision on every key-set change. Readers refuse anything but
+# the current version (no silent misreads).
+SCHEMA_VERSION = 1
+
+
+def check_schema_version(state, what: str) -> None:
+    """Refuse states not written at the current schema version."""
+    if "schema_version" not in state:
+        raise ValueError(f"{what}: missing schema_version tag (malformed state).")
+    found = state["schema_version"]
+    if found != SCHEMA_VERSION:
+        raise ValueError(
+            f"{what}: schema_version {found} unsupported "
+            f"(this code reads {SCHEMA_VERSION}); refusing a stale state."
+        )
+
+
+WARNING_PREFIX = "warning: "
+
+
+def is_warning(issue: str) -> bool:
+    """True for advisory validation issues (reported, never solve-blocking)."""
+    return isinstance(issue, str) and issue.startswith(WARNING_PREFIX)
+
+
 class LayerMask(IntEnum):
     """Slots of the per-layer status mask produced by :meth:`Layer.mask`."""
     ACTIVE = 0
     COHERENT = 1
     INHOMOGEN = 2
     ROUGHNESS = 3
+
+class OptMask(IntEnum):
+    """Slots of the per-group optimization mask (`Group.optimization_mask`).
+
+    Convention: 1 = the property may be optimized, 0 = fixed. The mask
+    refines `Layer.optimize` per property for optimizers that support it;
+    `get_optimization_parameters` already honors the THICKNESS slot.
+    MATERIAL governs material-substitution moves (e.g. needle insertion).
+    """
+    THICKNESS = 0
+    N = 1
+    K = 2
+    ROUGHNESS = 3
+    INH_DELTA = 4
+    INTERFACE = 5
+    MATERIAL = 6
+
+class LayerType(IntEnum):
+    """Design role of a layer (vocabulary for the former open `layer_typ` int).
+
+    Markers delimit stacks: a `STACK` block opens with `AMBIENT` and closes
+    with `SUBSTRATE`; `FILM` rows are the thin-film sequence. `FILM = 1`
+    keeps every pre-enum state file valid (1 was the only value in use).
+    """
+    AMBIENT = 0
+    FILM = 1
+    SUBSTRATE = 2
+
+class BlockKind(IntEnum):
+    """Composition role of an architect block (declared, never inferred).
+
+    `STACK` spans half-space to half-space; `FILMS` is a thin-film-only
+    sequence legal only between stacks (or films), taking its boundary
+    media from its neighbors at expansion time.
+    """
+    STACK = 0
+    FILMS = 1
 
 @dataclass(frozen=True)
 class InterpolationSettings:

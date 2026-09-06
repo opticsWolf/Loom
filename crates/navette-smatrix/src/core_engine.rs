@@ -124,6 +124,22 @@ pub const REQ_DISP_R_P: u64 = 1 << 38;
 pub const REQ_DISP_T_S: u64 = 1 << 39;
 pub const REQ_DISP_T_P: u64 = 1 << 40;
 
+pub const REQ_PHI_RBS: u64 = 1 << 41;
+
+pub const REQ_PHI_RBP: u64 = 1 << 42;
+
+pub const REQ_PHI_TBS: u64 = 1 << 43;
+
+pub const REQ_PHI_TBP: u64 = 1 << 44;
+
+pub const REQ_RBS_C: u64 = 1 << 45;
+
+pub const REQ_RBP_C: u64 = 1 << 46;
+
+pub const REQ_TBS_C: u64 = 1 << 47;
+
+pub const REQ_TBP_C: u64 = 1 << 48;
+
 // ─── Dependency resolution (request mask → what must run) ────────────────────
 //
 // Two orthogonal axes are resolved from the request, each by a single OR-reduce:
@@ -141,9 +157,11 @@ pub const REQ_DISP_T_P: u64 = 1 << 40;
 
 // Polarization usage: which branch each observable reads from.
 pub const USES_S: u64 = REQ_RS | REQ_TS | REQ_A_S | REQ_PHI_RS | REQ_PHI_TS
-    | REQ_RS_C | REQ_TS_C | REQ_DISP_R_S | REQ_DISP_T_S;
+    | REQ_RS_C | REQ_TS_C | REQ_DISP_R_S | REQ_DISP_T_S
+    | REQ_PHI_RBS | REQ_PHI_TBS | REQ_RBS_C | REQ_TBS_C;
 pub const USES_P: u64 = REQ_RP | REQ_TP | REQ_A_P | REQ_PHI_RP | REQ_PHI_TP
-    | REQ_RP_C | REQ_TP_C | REQ_DISP_R_P | REQ_DISP_T_P;
+    | REQ_RP_C | REQ_TP_C | REQ_DISP_R_P | REQ_DISP_T_P
+    | REQ_PHI_RBP | REQ_PHI_TBP | REQ_RBP_C | REQ_TBP_C;
 pub const USES_BOTH: u64 = REQ_R_AVG | REQ_T_AVG | REQ_A_AVG | REQ_PSI_R | REQ_PSI_T
     | REQ_DIATT_R | REQ_DIATT_T | REQ_S0_R | REQ_S1_R | REQ_S0_T | REQ_S1_T;
 
@@ -152,7 +170,9 @@ pub const USES_BOTH: u64 = REQ_R_AVG | REQ_T_AVG | REQ_A_AVG | REQ_PSI_R | REQ_P
 // NEEDS_CROSS: observables that need the p-s coherency channel.
 pub const NEEDS_COMPLEX: u64 = REQ_PHI_RS | REQ_PHI_RP | REQ_PHI_TS | REQ_PHI_TP
     | REQ_RS_C | REQ_RP_C | REQ_TS_C | REQ_TP_C
-    | REQ_DISP_R_S | REQ_DISP_R_P | REQ_DISP_T_S | REQ_DISP_T_P;
+    | REQ_DISP_R_S | REQ_DISP_R_P | REQ_DISP_T_S | REQ_DISP_T_P
+    | REQ_PHI_RBS | REQ_PHI_RBP | REQ_PHI_TBS | REQ_PHI_TBP
+    | REQ_RBS_C | REQ_RBP_C | REQ_TBS_C | REQ_TBP_C;
 pub const NEEDS_CROSS: u64 = REQ_DELTA_R | REQ_DELTA_T | REQ_DOP_R | REQ_DOP_T
     | REQ_S2_R | REQ_S3_R | REQ_S2_T | REQ_S3_T
     | REQ_CROSS_R | REQ_CROSS_T | REQ_RETARD_R | REQ_RETARD_T;
@@ -220,6 +240,14 @@ pub struct OpticalState {
     pub ts_c: Complex64,
     /// Complex transmitted p amplitude.
     pub tp_c: Complex64,
+    /// Complex back-reflected s amplitude (back-incidence experiment).
+    pub rbs_c: Complex64,
+    /// Complex back-reflected p amplitude.
+    pub rbp_c: Complex64,
+    /// Complex back-transmitted s amplitude.
+    pub tbs_c: Complex64,
+    /// Complex back-transmitted p amplitude.
+    pub tbp_c: Complex64,
     /// Mode-resolved reflected p-s coherency.
     pub cross_r: Complex64,
     /// Mode-resolved transmitted p-s coherency.
@@ -261,6 +289,10 @@ pub fn solve_point(
     let mut rp0 = c0;
     let mut ts0 = c0;
     let mut tp0 = c0;
+    let mut rbs0 = c0;
+    let mut rbp0 = c0;
+    let mut tbs0 = c0;
+    let mut tbp0 = c0;
     let mut first = false;
 
     let mut current_idx = 0usize;
@@ -291,6 +323,10 @@ pub fn solve_point(
                 ts0 = s_tf;
                 rp0 = p_rf;
                 tp0 = p_tf;
+                rbs0 = s_rb;
+                tbs0 = s_tb;
+                rbp0 = p_rb;
+                tbp0 = p_tb;
                 first = true;
             }
 
@@ -304,7 +340,7 @@ pub fn solve_point(
                 cross_t_acc *= p_tf * s_tf.conj();
             }
         } else if need_s {
-            let (s_rf, _s_tb, s_tf, _s_rb, s_rfi, s_tbi, s_tfi, s_rbi) =
+            let (s_rf, s_tb, s_tf, s_rb, s_rfi, s_tbi, s_tfi, s_rbi) =
                 solve_coherent_block_fields_inner(
                     current_idx, next_incoh, n_stack, inv_n_stack, thick_slice,
                     rough_vals_slice, rough_types_slice, lam, nsinfi, POL_S,
@@ -313,10 +349,12 @@ pub fn solve_point(
             if !first {
                 rs0 = s_rf;
                 ts0 = s_tf;
+                rbs0 = s_rb;
+                tbs0 = s_tb;
                 first = true;
             }
         } else if need_p {
-            let (p_rf, _p_tb, p_tf, _p_rb, p_rfi, p_tbi, p_tfi, p_rbi) =
+            let (p_rf, p_tb, p_tf, p_rb, p_rfi, p_tbi, p_tfi, p_rbi) =
                 solve_coherent_block_fields_inner(
                     current_idx, next_incoh, n_stack, inv_n_stack, thick_slice,
                     rough_vals_slice, rough_types_slice, lam, nsinfi, POL_P,
@@ -325,6 +363,8 @@ pub fn solve_point(
             if !first {
                 rp0 = p_rf;
                 tp0 = p_tf;
+                rbp0 = p_rb;
+                tbp0 = p_tb;
                 first = true;
             }
         }
@@ -379,6 +419,10 @@ pub fn solve_point(
         rp_c: rp0,
         ts_c: ts0,
         tp_c: tp0,
+        rbs_c: rbs0,
+        rbp_c: rbp0,
+        tbs_c: tbs0,
+        tbp_c: tbp0,
         cross_r,
         cross_t,
     }
@@ -482,6 +526,10 @@ pub fn solve_point_intensity(
         rp_c: cnan,
         ts_c: cnan,
         tp_c: cnan,
+        rbs_c: cnan,
+        rbp_c: cnan,
+        tbs_c: cnan,
+        tbp_c: cnan,
         cross_r: Complex64::new(0.0, 0.0),
         cross_t: Complex64::new(0.0, 0.0),
     }

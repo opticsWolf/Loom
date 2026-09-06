@@ -47,12 +47,16 @@ pub fn remove_thin_layers<C: DesignContext + ?Sized>(
     let mut removed = 0usize;
 
     while removed < budget {
-        // 1. Collect candidates (thin layers), in film order.
+        // 1. Collect candidates (thin FREE layers), in film order.
+        //    Derived rows (interface slices, pinned graded sublayers) are
+        //    never candidates: removing fixed physics to chase merit is
+        //    corruption, not cleanup. Degenerate zero-thickness needle
+        //    portions stay eligible (they clone their host's flags).
         let candidates: Vec<usize> = stack
             .films()
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.d_nm < threshold)
+            .filter(|(_, l)| l.optimize && l.d_nm < threshold)
             .map(|(i, _)| i)
             .collect();
         if candidates.is_empty() {
@@ -131,6 +135,7 @@ pub fn cleanup_design<C: DesignContext + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::synthesis::merit::SimCurves;
     use crate::synthesis::structure::{DesignStack, LayerSpec};
 
     const NW: usize = 4;
@@ -165,6 +170,10 @@ mod tests {
                 .zip(&self.targets)
                 .map(|(l, t)| (l.d_nm - t).powi(2))
                 .sum())
+        }
+
+        fn simulate(&self, _stack: &DesignStack) -> Result<SimCurves, String> {
+            Err("mock context has no simulator".into())
         }
 
         fn optimize_thicknesses(
@@ -214,24 +223,38 @@ mod tests {
 
     #[test]
     fn max_removals_budget_respected() {
-        // Non-optimizable films stay thin across re-opt passes, so the loop
-        // keeps finding candidates until the budget cuts it off at 2.
-        let mk_thin = |d: f64| {
-            let mut l = film("H", d);
-            l.optimize = false;
-            l
-        };
+        // Free films parked below threshold stay thin across re-opt passes
+        // (targets == starts), so the loop keeps finding candidates until
+        // the budget cuts it off at 2. Derived rows (optimize=false) are
+        // never candidates — cleanup removes free parameters, not physics.
+        let mk_thin = |d: f64| film("H", d);
         let mut stack = DesignStack::with_films(
             air(), sub(),
             vec![mk_thin(1.0), mk_thin(1.5), mk_thin(1.7)],
         )
         .unwrap();
-        let mut ctx = MockCtx { targets: vec![10.0; 3], n_opt_calls: 0 };
+        let mut ctx = MockCtx { targets: vec![1.0, 1.5, 1.7], n_opt_calls: 0 };
 
         let removed =
             remove_thin_layers(&mut ctx, &mut stack, Some(3.0), Some(2)).unwrap();
         assert_eq!(removed, 2);
         assert_eq!(stack.films().len(), 1); // budget stopped before third
+    }
+
+    #[test]
+    fn derived_rows_never_candidates() {
+        // A thin derived row (slice-like: optimize=false) survives even
+        // with budget to spare; the thin free row is removed.
+        let mut derived = film("H", 0.2);
+        derived.optimize = false;
+        derived.needle = false;
+        let mut stack =
+            DesignStack::with_films(air(), sub(), vec![film("L", 0.2), derived]).unwrap();
+        let mut ctx = MockCtx { targets: vec![0.2, 0.2], n_opt_calls: 0 };
+        let removed = remove_thin_layers(&mut ctx, &mut stack, Some(0.5), None).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(stack.films().len(), 1);
+        assert!(!stack.films()[0].optimize);
     }
 
     #[test]

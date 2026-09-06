@@ -1,0 +1,4 @@
+[alias]
+# Pure-Rust gate: everything a crates.io consumer gets, no Python needed.
+# (Binding crates `*-py` need an interpreter + libpython and are excluded.)
+test-pure = "test -p navette -p navette-color -p navette-interpolate -p navette-materials -p navette-smatrix -p navette-spectralweave -p navette-structure"

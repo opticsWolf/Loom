@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use ahash::AHashMap;
 use std::sync::Arc;
 
-/// How a target activates the residual: exact match, one-sided above/below.
+/// How a target activates the residual: exact, one-sided, or banded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TargetKind {
     /// Penalise any deviation (residual = sim minus target).
@@ -19,16 +19,36 @@ pub enum TargetKind {
     Above,
     /// Penalise only excess (residual = max(0, sim minus target)).
     Below,
+    /// Hard box of half-width `band`: zero inside, quadratic exceedance
+    /// outside (equivalent to paired `a`/`b` targets at centre∓band).
+    Range,
+    /// Soft box of half-width `band`: reduced quadratic `(d/band)^2`
+    /// inside (i.e. exact penalisation scaled by `(tol/band)^2`), quadratic
+    /// exceedance plus continuity offset outside.
+    CenterBand,
 }
 
 impl TargetKind {
-    /// Parse "e"/"a"/"b" (exact/above/below); None for anything else.
+    /// Parse "e"/"a"/"b"/"r"/"c"; None for anything else.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "e" => Some(TargetKind::Exact),
             "a" => Some(TargetKind::Above),
             "b" => Some(TargetKind::Below),
+            "r" => Some(TargetKind::Range),
+            "c" => Some(TargetKind::CenterBand),
             _ => None,
+        }
+    }
+
+    /// Canonical code for export (converters, round-trips).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TargetKind::Exact => "e",
+            TargetKind::Above => "a",
+            TargetKind::Below => "b",
+            TargetKind::Range => "r",
+            TargetKind::CenterBand => "c",
         }
     }
 }
@@ -44,15 +64,42 @@ pub enum ResolvedNormMode {
     Complex,
 }
 
+impl ResolvedNormMode {
+    /// Canonical name for export (converters, round-trips).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResolvedNormMode::Linear => "linear",
+            ResolvedNormMode::Log => "log",
+            ResolvedNormMode::Phase => "phase",
+            ResolvedNormMode::Complex => "complex",
+        }
+    }
+}
+
 #[derive(Clone)]
-/// One ingested target curve: activation kind, normalisation, and the
-/// pre-normalized values plus per-point tolerances.
+/// One ingested target curve: activation kind, normalisation, the
+/// pre-normalized values plus per-point tolerances, and the scaled band
+/// half-widths for the `r`/`c` kinds (zeros when unused).
 pub struct TargetEntry {
     pub kind: TargetKind,
     pub resolved_mode: ResolvedNormMode,
     pub norm_factor: f64,
     pub normalized_targets: Arc<[f64]>,
     pub tolerances: Arc<[f64]>,
+    pub band: Arc<[f64]>,
+    /// User weight (default 1): multiplies the frame's merit sum.
+    /// Validated at the bindings (finite, >= 0).
+    pub weight: f64,
+    /// Count normalization divisor (default None = off): the frame's sum
+    /// is divided by this (target-level point count — the bindings resolve
+    /// it, since angular targets span many single-point entries). None
+    /// keeps the legacy pure sum.
+    pub count_norm: Option<f64>,
+    /// Integral target: merit constrains the MEAN of the scaled diffs
+    /// (single residual `R = mean(d)/mean(tol)`), not each point. Kinds
+    /// apply once to the mean (integral-`a` = lower bound on the average).
+    /// Rejected in combination with `count_norm` (the mean already is one).
+    pub integral: bool,
 }
 
 #[derive(Default, Clone)]
@@ -90,8 +137,12 @@ impl TargetWeaver {
         Ok(new_frame)
     }
 
-    /// Pre-calculates normalizations and transforms targets upon ingestion.
-    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str) {
+    /// Resolve the normalization for one curve: mode + factor, shared by
+    /// every point of the curve. Spectral curves resolve per call (one
+    /// curve per call); angular targets MUST resolve once over the full
+    /// angle curve and share the result across points — per-point
+    /// resolution would weight each angle by its own magnitude.
+    pub fn resolve_norm(raw_targets: &[f64], mode_str: &str) -> (ResolvedNormMode, f64) {
         let mut t_min = f64::MAX;
         let mut t_max = f64::MIN;
         let mut t_sum = 0.0;
@@ -117,27 +168,77 @@ impl TargetWeaver {
             }
         };
 
-        let norm_factor: f64;
-        let mut normalized_targets = Vec::with_capacity(raw_targets.len());
+        let norm_factor =
+            Self::norm_factor_for(&resolved_mode, raw_targets, t_min, t_max, t_sum);
+        (resolved_mode, norm_factor)
+    }
 
+    /// Normalization factor for a resolved mode (see `resolve_norm`).
+    /// Linear falls back to half-range scaling on zero-mean/cancelling
+    /// data and to raw scale on constant data; log falls back to raw log
+    /// scale on ~= 1 data. Everywhere else this is the legacy formula.
+    fn norm_factor_for(
+        resolved_mode: &ResolvedNormMode,
+        raw_targets: &[f64],
+        t_min: f64,
+        t_max: f64,
+        t_sum: f64,
+    ) -> f64 {
+        match resolved_mode {
+            ResolvedNormMode::Phase | ResolvedNormMode::Complex => 1.0,
+            ResolvedNormMode::Log => {
+                let n = raw_targets.len() as f64;
+                let mut log_min = f64::MAX;
+                let mut log_max = f64::MIN;
+                let mut log_sum = 0.0;
+                for &v in raw_targets {
+                    let lv = v.max(1e-12).log10().abs();
+                    if lv < log_min { log_min = lv; }
+                    if lv > log_max { log_max = lv; }
+                    log_sum += lv;
+                }
+                let log_avg = log_sum / n;
+                let log_scale = if log_avg <= 1e-9 * (log_max - log_min).max(1e-300) {
+                    1.0
+                } else {
+                    log_avg
+                };
+                1.0 / log_scale.max(1e-300)
+            },
+            ResolvedNormMode::Linear => {
+                let t_avg = (t_sum / raw_targets.len() as f64).abs();
+                let spread = t_max - t_min;
+                let scale = if t_avg <= 1e-9 * spread { spread / 2.0 } else { t_avg };
+                if scale > 0.0 { 1.0 / scale } else { 1.0 }
+            },
+        }
+    }
+
+    /// Pre-calculates normalizations and transforms targets upon ingestion.
+    /// `band` holds raw-unit half-widths for the `r`/`c` kinds (empty or
+    /// all-zero when unused); it is scaled by the same `norm_factor` as the
+    /// targets (per-point exact mapping in log mode, first-order otherwise).
+    pub fn register_metadata(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, mode_str: &str, band: &[f64], weight: f64, count_norm: Option<f64>, integral: bool) {
+        let (resolved_mode, norm_factor) = Self::resolve_norm(raw_targets, mode_str);
+        self.register_metadata_resolved(uid, key, raw_targets, tolerances, kind, resolved_mode, norm_factor, band, weight, count_norm, integral)
+    }
+
+    /// `register_metadata` with a pre-resolved `(mode, factor)` — the
+    /// angular path resolves once over the full curve and shares it.
+    pub fn register_metadata_resolved(&self, uid: usize, key: OpticalKey, raw_targets: &[f64], tolerances: &[f64], kind: TargetKind, resolved_mode: ResolvedNormMode, norm_factor: f64, band: &[f64], weight: f64, count_norm: Option<f64>, integral: bool) {
+        // Normalization itself lives in `norm_factor_for` (shared); here we
+        // only apply it. Phase/Complex resolve to nf == 1 by construction.
+        let mut normalized_targets = Vec::with_capacity(raw_targets.len());
         match resolved_mode {
             ResolvedNormMode::Phase | ResolvedNormMode::Complex => {
-                norm_factor = 1.0;
                 normalized_targets.extend_from_slice(raw_targets);
             },
             ResolvedNormMode::Log => {
-                let log_sum: f64 = raw_targets.iter().map(|&v| v.max(1e-12).log10().abs()).sum();
-                let log_avg = log_sum / raw_targets.len() as f64;
-                norm_factor = 1.0 / log_avg.max(1e-12);
-
                 for &v in raw_targets {
                     normalized_targets.push(v.max(1e-12).log10() * norm_factor);
                 }
             },
             ResolvedNormMode::Linear => {
-                let t_avg = (t_sum / raw_targets.len() as f64).abs();
-                norm_factor = 1.0 / t_avg.max(1e-12);
-
                 for &v in raw_targets {
                     normalized_targets.push(v * norm_factor);
                 }
@@ -149,12 +250,33 @@ impl TargetWeaver {
             .map(|&t| t.max(self.tolerance_floor))
             .collect();
 
+        // Scale the raw band half-widths into the normalized residual space.
+        let band_scaled: Vec<f64> = match resolved_mode {
+            ResolvedNormMode::Linear | ResolvedNormMode::Phase | ResolvedNormMode::Complex => {
+                raw_targets.iter().enumerate().map(|(i, _)| {
+                    band.get(i).copied().unwrap_or(0.0).max(0.0) * norm_factor
+                }).collect()
+            },
+            ResolvedNormMode::Log => {
+                raw_targets.iter().enumerate().map(|(i, &t)| {
+                    let b = band.get(i).copied().unwrap_or(0.0).max(0.0);
+                    if b <= 0.0 { return 0.0; }
+                    let t_pos = t.max(1e-12);
+                    ((t_pos + b).max(1e-12).log10() - t_pos.log10()).abs() * norm_factor
+                }).collect()
+            },
+        };
+
         let entry = TargetEntry {
             kind,
             resolved_mode,
             norm_factor,
             normalized_targets: Arc::from(normalized_targets),
             tolerances: Arc::from(floored_tols),
+            band: Arc::from(band_scaled),
+            weight,
+            count_norm,
+            integral,
         };
 
         let mut meta_guard = self.target_metadata.write();

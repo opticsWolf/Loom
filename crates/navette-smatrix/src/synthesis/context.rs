@@ -10,6 +10,7 @@
 //! tomorrow without touching their decision logic (which must stay
 //! byte-comparable to needle_synthesis.py).
 
+use crate::synthesis::merit::SimCurves;
 use crate::synthesis::structure::DesignStack;
 
 pub trait DesignContext {
@@ -17,6 +18,12 @@ pub trait DesignContext {
     ///
     /// Mirrors `NeedleSynthesizer.evaluate_merit(structure)`.
     fn evaluate_merit(&self, stack: &DesignStack) -> Result<f64, String>;
+
+    /// Full simulation on the context grid (rows + PD metadata).
+    ///
+    /// Used for per-cycle needle-target re-folds; contexts without a
+    /// solver return `Err` and callers fall back to the static fold.
+    fn simulate(&self, stack: &DesignStack) -> Result<SimCurves, String>;
 
     /// Bounded thickness re-optimization IN PLACE.
     ///

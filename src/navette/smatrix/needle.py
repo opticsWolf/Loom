@@ -23,6 +23,12 @@ Conventions
 * Merit convention (half-gradient): a single point contributes
   ``2·w·(R − R_target)·Re{conj(r)·∂r/∂δ}``; aggregate over points at the call
   site, e.g. for a GDD merit ``∂F/∂δ(z) = Σ_k 2·w_k·(GDD_k − GDD_t_k)·dgdd[k,z]``.
+  The T/A siblings follow the same convention with flux-corrected
+  ``T = |t_fwd|²·f`` and ``A = 1 − R − T`` (front incidence); the phase
+  channel is the full gradient ``2·w·wrap(φ − φ_t)·Q`` (phase is not an
+  intensity, so no half factor applies).
+* ``Pmb`` covers R/T/A through the intensity cascade (``P_MB``/``P_MB_T``/
+  ``P_MB_A``); only phase gradients are coherent-path only.
 * Results are returned as ``(n_angles, n_wavs, n_depths)`` float64 arrays.
 """
 
@@ -39,6 +45,17 @@ try:
         needle_engine as _rs_needle_engine,
         NREQ_P as _NREQ_P,
         NREQ_P_MB as _NREQ_P_MB,
+        NREQ_P_T as _NREQ_P_T,
+        NREQ_P_A as _NREQ_P_A,
+        NREQ_P_PHI as _NREQ_P_PHI,
+        NREQ_P_MB_T as _NREQ_P_MB_T,
+        NREQ_P_MB_A as _NREQ_P_MB_A,
+        NREQ_P_TB as _NREQ_P_TB,
+        NREQ_P_RB as _NREQ_P_RB,
+        NREQ_P_AB as _NREQ_P_AB,
+        NREQ_P_MB_TB as _NREQ_P_MB_TB,
+        NREQ_P_MB_RB as _NREQ_P_MB_RB,
+        NREQ_P_MB_AB as _NREQ_P_MB_AB,
         NREQ_DPHI as _NREQ_DPHI,
         NREQ_DGD as _NREQ_DGD,
         NREQ_DGDD as _NREQ_DGDD,
@@ -64,6 +81,17 @@ class NeedleRequest(IntFlag):
 
     P = _NREQ_P            # coherent merit gradient P(z)
     P_MB = _NREQ_P_MB      # multiblock P(z) through the intensity cascade
+    P_T = _NREQ_P_T        # coherent transmission-merit gradient P_T(z)
+    P_A = _NREQ_P_A        # coherent absorption-merit gradient P_A(z)
+    P_PHI = _NREQ_P_PHI    # coherent phase-merit gradient P_PHI(z)
+    P_MB_T = _NREQ_P_MB_T  # multiblock P(z) for transmittance
+    P_MB_A = _NREQ_P_MB_A  # multiblock P(z) for absorptance
+    P_TB = _NREQ_P_TB      # coherent back-transmission gradient P_TB(z)
+    P_RB = _NREQ_P_RB      # coherent back-reflection gradient P_RB(z)
+    P_AB = _NREQ_P_AB      # coherent back-absorption gradient P_AB(z)
+    P_MB_TB = _NREQ_P_MB_TB  # multiblock P(z) for back-transmittance
+    P_MB_RB = _NREQ_P_MB_RB  # multiblock P(z) for back-reflectance
+    P_MB_AB = _NREQ_P_MB_AB  # multiblock P(z) for back-absorptance
     DPHI = _NREQ_DPHI      # ∂φ/∂δ
     DGD = _NREQ_DGD        # ∂(dφ/dω)/∂δ  (group delay)
     DGDD = _NREQ_DGDD      # ∂(d²φ/dω²)/∂δ  (group-delay dispersion)
@@ -87,6 +115,19 @@ def needle_gradient(
     *,
     targets_r: Union[float, Sequence[float], np.ndarray, None] = None,
     weights_r: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_t: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_t: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_a: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_a: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_phi: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_phi: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_tb: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_tb: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_rb: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_rb: Union[float, Sequence[float], np.ndarray, None] = None,
+    targets_ab: Union[float, Sequence[float], np.ndarray, None] = None,
+    weights_ab: Union[float, Sequence[float], np.ndarray, None] = None,
+    gain_shift_phi: float = 0.0,
     start_idx: int = 0,
     end_idx: Optional[int] = None,
     channel: int = 0,
@@ -108,6 +149,19 @@ def needle_gradient(
     targets_r / weights_r : None, scalar, or (n_angles·n_wavs,) array
         Per-spectral-point reflectance targets / merit weights (angle-major).
         Defaults: target 0, weight 1.
+    targets_t / weights_t : same layout, for ``P_T`` (flux-corrected
+        transmittance ``|t_fwd|²·f``, front incidence).
+    targets_a / weights_a : same layout, for ``P_A`` (absorptance
+        ``1 − R − T``, front incidence).
+    targets_phi / weights_phi : same layout, for ``P_PHI`` (phase of the
+        ``channel`` element, in radians; residual wrapped to [-π, π]).
+        Only honoured when ``P_PHI`` is requested.
+    targets_tb / weights_tb : same layout, for ``P_TB``/``P_MB_TB``
+        (back-transmittance ``|t_back|²·fb``).
+    targets_rb / weights_rb : same layout, for ``P_RB``/``P_MB_RB``
+        (back-reflectance ``|r_back|²``).
+    targets_ab / weights_ab : same layout, for ``P_AB``/``P_MB_AB``
+        (back-absorptance ``1 − Rb − Tb``).
     start_idx, end_idx : int
         Coherent sub-block confinement; ``end_idx`` is the *index* of the
         terminating medium (default: last layer). Hosts must lie strictly
@@ -119,12 +173,22 @@ def needle_gradient(
         Polarization branches to evaluate ('sp' = both in one sweep).
     host_mask : (n_layers,) bool array, optional
         Restricts admissible hosts for the multiblock path.
+    gain_shift_phi : float
+        Uniform correction subtracted from ``P_PHI`` outputs for
+        differential-phase (``PDts``/``PDtp``) demands: inserting thickness
+        ``δ`` anywhere grows the equivalent-medium reference by the same
+        ``δ``, contributing ``dM/dD = Σ −2·kz·w·Δ/tol²``. Take it from the
+        folded ``phi{ch}["gain_shift"]`` (``build_needle_targets``); it is
+        z-independent, so the needle site (``argmax``) never moves — only
+        predicted-gain bookkeeping shifts. Default 0 (absolute phase).
 
     Returns
     -------
     dict[str, ndarray]
-        ``P_s``, ``P_p``, ``Pmb_s``, ``Pmb_p``, ``dphi_s``, ``dgdd_p``, ...
-        depending on ``request`` and ``pol``; each shaped
+        ``P_s``, ``P_p``, ``Pmb_s``, ``Pmb_p``, ``P_T_s``, ``P_A_p``,
+        ``P_PHI_s``, ``Pmb_T_s``, ``Pmb_A_s``, ``P_TB_s``, ``P_RB_s``,
+        ``P_AB_s``, ``Pmb_TB_s``, ``Pmb_RB_s``, ``Pmb_AB_s``, ``dphi_s``,
+        ``dgdd_p``, ... depending on ``request`` and ``pol``; each shaped
         ``(n_angles, n_wavs, n_depths)``.
     """
     if pol not in ("s", "p", "sp"):
@@ -158,6 +222,18 @@ def needle_gradient(
 
     tgt = _per_point(targets_r, "targets_r", np.float64)
     wgt = _per_point(weights_r, "weights_r", np.float64)
+    tgt_t = _per_point(targets_t, "targets_t", np.float64)
+    wgt_t = _per_point(weights_t, "weights_t", np.float64)
+    tgt_a = _per_point(targets_a, "targets_a", np.float64)
+    wgt_a = _per_point(weights_a, "weights_a", np.float64)
+    tgt_phi = _per_point(targets_phi, "targets_phi", np.float64)
+    wgt_phi = _per_point(weights_phi, "weights_phi", np.float64)
+    tgt_tb = _per_point(targets_tb, "targets_tb", np.float64)
+    wgt_tb = _per_point(weights_tb, "weights_tb", np.float64)
+    tgt_rb = _per_point(targets_rb, "targets_rb", np.float64)
+    wgt_rb = _per_point(weights_rb, "weights_rb", np.float64)
+    tgt_ab = _per_point(targets_ab, "targets_ab", np.float64)
+    wgt_ab = _per_point(weights_ab, "weights_ab", np.float64)
     mask = None if host_mask is None else np.ascontiguousarray(
         np.asarray(host_mask, dtype=bool).ravel()
     )
@@ -176,9 +252,21 @@ def needle_gradient(
         npw,
         z,
         req,
-        stack.incoherent_flags if (req & NeedleRequest.P_MB) else None,
+        stack.incoherent_flags if (req & (NeedleRequest.P_MB | NeedleRequest.P_MB_T | NeedleRequest.P_MB_A | NeedleRequest.P_MB_TB | NeedleRequest.P_MB_RB | NeedleRequest.P_MB_AB)) else None,
         tgt,
         wgt,
+        tgt_t,
+        wgt_t,
+        tgt_a,
+        wgt_a,
+        tgt_phi,
+        wgt_phi,
+        tgt_tb,
+        wgt_tb,
+        tgt_rb,
+        wgt_rb,
+        tgt_ab,
+        wgt_ab,
         int(start_idx),
         None if end_idx is None else int(end_idx),
         int(channel),
@@ -189,6 +277,11 @@ def needle_gradient(
 
     # Reshape flat [n_points, n_z] buffers into (n_angles, n_wavs, n_depths).
     nz = z.size
-    return {
+    reshaped = {
         k: np.asarray(v).reshape(n_angles, n_wavs, nz) for k, v in out.items()
     }
+    if gain_shift_phi:
+        for kk in list(reshaped):
+            if kk.startswith("P_PHI"):
+                reshaped[kk] = reshaped[kk] - float(gain_shift_phi)
+    return reshaped

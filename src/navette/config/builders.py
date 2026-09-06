@@ -7,7 +7,7 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 """
 
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Mapping, Optional
 from navette.structure import (
     MaterialProvider,
     MaterialObjectProvider,
@@ -17,7 +17,7 @@ from navette.structure import (
     Navette_Architect,
 )
 from navette.materials import MaterialSpec
-from .models import MaterialDefinition, LayerConfig, GroupConfig
+from .models import MaterialDefinition, LayerConfig, GroupConfig, BlockConfig
 
 def material_from_config(
     cfg: MaterialDefinition,
@@ -71,7 +71,7 @@ def layer_from_config(cfg: LayerConfig, material_provider: MaterialProvider) -> 
         thickness=cfg.thickness_nm,
         material_name=cfg.material_code,
         coherent=cfg.coherent,
-        roughness=cfg.roughness_angstrom,
+        roughness=cfg.roughness_nm,
         rough_type=cfg.rough_type,
         inhomogen=cfg.inhomogen,
         inh_delta=cfg.inh_delta,
@@ -79,7 +79,7 @@ def layer_from_config(cfg: LayerConfig, material_provider: MaterialProvider) -> 
         interface_thickness=cfg.interface_thickness_nm,
         optimize=cfg.optimize,
         needle=cfg.needle,
-        layer_typ=cfg.layer_type,
+        layer_type=cfg.layer_type,
     )
 
 def group_from_config(cfg: GroupConfig) -> Group:
@@ -94,25 +94,62 @@ def group_from_config(cfg: GroupConfig) -> Group:
         roughness_summand=cfg.roughness_summand,
         interface_summand=cfg.interface_summand,
     )
-    # Set error masks and parameters
+    # Set error masks and parameters (bound setters; params replaced whole).
     group.error_mask = cfg.error_mask.copy()
     group.optimization_mask = cfg.optimization_mask.copy()
-    group.thickness_error_type = cfg.thickness_error_type
-    group.n_error_type = cfg.n_error_type
-    group.k_error_type = cfg.k_error_type
-    group.inh_delta_error_type = cfg.inh_delta_error_type
-    group.roughness_error_type = cfg.roughness_error_type
-    group.interface_error_type = cfg.interface_error_type
+    group.set_error_type("thickness", cfg.thickness_error_type)
+    group.set_error_type("n", cfg.n_error_type)
+    group.set_error_type("k", cfg.k_error_type)
+    group.set_error_type("inh_delta", cfg.inh_delta_error_type)
+    group.set_error_type("roughness", cfg.roughness_error_type)
+    group.set_error_type("interface", cfg.interface_error_type)
 
-    def copy_params(src, dst):
-        for key in src.model_dump().keys():
-            dst[key] = getattr(src, key)
+    def copy_params(src, channel):
+        group.set_error_params(channel, src.model_dump())
 
-    copy_params(cfg.thickness_error_params, group.thickness_error_params)
-    copy_params(cfg.inh_delta_error_params, group.inh_delta_error_params)
-    copy_params(cfg.roughness_error_params, group.roughness_error_params)
-    copy_params(cfg.interface_error_params, group.interface_error_params)
-    copy_params(cfg.n_error_params, group.n_error_params)
-    copy_params(cfg.k_error_params, group.k_error_params)
+    copy_params(cfg.thickness_error_params, "thickness")
+    copy_params(cfg.inh_delta_error_params, "inh_delta")
+    copy_params(cfg.roughness_error_params, "roughness")
+    copy_params(cfg.interface_error_params, "interface")
+    copy_params(cfg.n_error_params, "n")
+    copy_params(cfg.k_error_params, "k")
 
     return group
+
+
+def structure_from_config(
+    layer_cfgs: List[LayerConfig],
+    group_cfgs: List[GroupConfig],
+    materials: Any,
+) -> Navette_Structure:
+    """Build a Navette_Structure from typed configs (the live config path).
+
+    Groups are keyed by config name, which by convention equals the
+    governed material name (the expander looks groups up by material;
+    `validate()` flags keys that govern nothing).
+    """
+    layers = [layer_from_config(c, materials) for c in layer_cfgs]
+    groups = {c.name: group_from_config(c) for c in group_cfgs}
+    # Navette_Structure auto-wraps plain dicts into DictMaterialProvider.
+    return Navette_Structure(layer_list=layers, group_dict=groups, materials=materials)
+
+
+def architect_from_config(
+    structures: Mapping[str, Navette_Structure],
+    blocks: List[BlockConfig],
+    materials: Any = None,
+) -> Navette_Architect:
+    """Build a Navette_Architect: blocks reference structures by label.
+
+    Missing labels raise KeyError naming the block index and label.
+    """
+    from navette.structure import Navette_Architect
+    arch = Navette_Architect(materials=materials)
+    for i, b in enumerate(blocks):
+        if b.structure not in structures:
+            raise KeyError(
+                f"architect block {i}: unknown structure label '{b.structure}'."
+            )
+        arch.add_structure(structures[b.structure], inverted=b.inverted,
+                           repeat=b.repeat_count, label=b.label, kind=b.kind)
+    return arch

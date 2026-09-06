@@ -18,8 +18,9 @@ use num_complex::Complex64;
 
 use crate::synthesis::context::DesignContext;
 use crate::synthesis::needle_pass::{
-    build_scan_sites, run_needle_pass, NeedlePassInput,
+    build_scan_sites, run_needle_pass, NeedlePassInput, NeedleTargets,
 };
+use crate::synthesis::pipeline::SpectralInputs;
 use crate::synthesis::structure::{DesignStack, LayerSpec};
 
 /// Knobs for the inner insertion loop (Python `NeedleConfig` subset).
@@ -33,6 +34,10 @@ pub struct NeedleCycleConfig {
     pub needle_seed_thickness_nm: f64,
     /// Scan resolution (nm).
     pub scan_step_nm: f64,
+    /// Re-fold needle targets against the live sim each cycle (op-point
+    /// masking for one-sided/banded/integral kinds + live PD gain shift).
+    /// `false` keeps the static conservative fold (A/B benchmark switch).
+    pub refold_per_cycle: bool,
 }
 
 impl Default for NeedleCycleConfig {
@@ -42,6 +47,7 @@ impl Default for NeedleCycleConfig {
             convergence_threshold: 1e-4,
             needle_seed_thickness_nm: 5.0,
             scan_step_nm: 2.0,
+            refold_per_cycle: true,
         }
     }
 }
@@ -76,25 +82,50 @@ pub type ContrastMap = HashMap<Arc<str>, LayerSpec>;
 /// Run one full needle pass on `stack`.
 ///
 /// Mirrors `synth.run(max_needles = cfg.max_needles)`:
-/// initial optimization → [scan → select → insert → optimize]×N.
+/// initial optimization → [re-fold → scan → select → insert → optimize]×N.
+///
+/// The fold refreshes against the live sim each cycle (when
+/// `cfg.refold_per_cycle` and the context simulates): one-sided/banded
+/// demands mask at the operating point and PD gain shifts go live, so
+/// insertion tracks the merit the optimizer actually sees. Any simulate
+/// or fold failure keeps the previous fold (mock contexts without a
+/// solver run the static conservative fold throughout).
 pub fn run_needle_cycles<C: DesignContext + ?Sized>(
     ctx: &mut C,
     stack: &mut DesignStack,
-    wavls: &[f64],
-    sin_theta: &[f64],
-    targets_r: &[f64],
-    weights_r: &[f64],
+    spectral: &SpectralInputs,
     contrast: &ContrastMap,
     cfg: &NeedleCycleConfig,
 ) -> Result<Vec<NeedleCycleResult>, String> {
+    use crate::synthesis::needle_pass::build_needle_targets;
+
+    let wavls = &spectral.wavls;
+    let sin_theta = &spectral.sin_theta;
+    let mut fold = spectral.fold.clone();
     let mut history = Vec::new();
 
     // Initial optimization.
     ctx.optimize_thicknesses(stack)?;
 
     for cycle in 0..cfg.max_needles {
+        // Refresh the fold against the live operating point.
+        if cfg.refold_per_cycle {
+            if let Ok(sim) = ctx.simulate(stack) {
+                if let Ok(f) = build_needle_targets(
+                    &spectral.spec,
+                    &spectral.angles_deg,
+                    &spectral.wavls,
+                    Some(&sim),
+                ) {
+                    fold = f;
+                }
+            }
+        }
         // 1. Build candidate sites restricted to films whose material has a
-        //    contrast entry (Python skips layers without a mapping).
+        //    contrast entry (Python skips layers without a mapping) AND
+        //    that are needle hosts. The flag check is load-bearing:
+        //    interface slices and pinned graded rows share their carrier's
+        //    material (hence a contrast entry) but must never host seeds.
         let sites = build_scan_sites(stack.films(), cfg.scan_step_nm);
         let sites: Vec<_> = sites
             .into_iter()
@@ -102,7 +133,7 @@ pub fn run_needle_cycles<C: DesignContext + ?Sized>(
                 stack
                     .films()
                     .get(s.film_idx)
-                    .map(|l| contrast.contains_key(&l.material))
+                    .map(|l| l.needle && contrast.contains_key(&l.material))
                     .unwrap_or(false)
             })
             .collect();
@@ -135,10 +166,9 @@ pub fn run_needle_cycles<C: DesignContext + ?Sized>(
                 rough_types: &sa.rough_types,
                 rough_vals: &sa.rough_vals,
                 n_layers: sa.n_layers as usize,
-                wavls,
-                sin_theta,
-                targets_r,
-                weights_r,
+                wavls: wavls.as_slice(),
+                sin_theta: sin_theta.as_slice(),
+                fold: &fold,
                 needle_n_per_wav: &mat.nk,
                 start_idx: 0,
                 end_idx: (sa.n_layers - 1) as usize,
@@ -181,7 +211,12 @@ pub fn run_needle_cycles<C: DesignContext + ?Sized>(
                 break;
             }
             Some((ins, p)) => {
-                let predicted = -p * cfg.needle_seed_thickness_nm;
+                // Inserting a seed of thickness δ also grows the
+                // equivalent-medium reference by δ, so the true slope is
+                // P(z*) + Σ gain_shift (0 for absolute-phase demand sets;
+                // the site itself is unaffected, only this bookkeeping).
+                let gtot: f64 = fold.phi_gain_shift.iter().sum();
+                let predicted = -(p + gtot) * cfg.needle_seed_thickness_nm;
                 if predicted < cfg.convergence_threshold {
                     history.push(NeedleCycleResult {
                         cycle: cycle + 1,
@@ -230,4 +265,222 @@ pub fn run_needle_cycles<C: DesignContext + ?Sized>(
     }
 
     Ok(history)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::synthesis::merit::{MeritSpec, SimCurves};
+    use std::sync::Arc;
+
+    /// Frozen context: merit constant, optimization a no-op (keeps the
+    /// analytic AR condition intact so the scan sees exact zeros).
+    struct StillCtx;
+    impl DesignContext for StillCtx {
+        fn evaluate_merit(&self, _s: &DesignStack) -> Result<f64, String> {
+            Ok(0.0)
+        }
+        fn simulate(&self, _s: &DesignStack) -> Result<SimCurves, String> {
+            Err("mock context has no simulator".into())
+        }
+        fn optimize_thicknesses(&mut self, s: &mut DesignStack) -> Result<f64, String> {
+            self.evaluate_merit(s)
+        }
+    }
+
+    /// air | G(200 nm, n = 1.52, host) | glass: all matched, so R is
+    /// exactly the single-interface value ((n−1)/(n+1))² ≈ 0.04258 and
+    /// T = 1 − R (lossless) at normal incidence.
+    /// (A lossless R = 0 point would NOT discriminate: T = 1 − R
+    /// identically there, so every intensity gradient vanishes with R's.)
+    fn glass_stack() -> (DesignStack, f64) {
+        let nw = 1;
+        let r0 = ((1.52_f64 - 1.0) / (1.52_f64 + 1.0)).powi(2);
+        let mut ambient = LayerSpec::constant("air", 1.0, 0.0, 0.0, nw);
+        ambient.optimize = false;
+        ambient.needle = false;
+        let mut substrate = LayerSpec::constant("sub", 1.52, 0.0, 0.0, nw);
+        substrate.optimize = false;
+        substrate.needle = false;
+        let stack = DesignStack::with_films(
+            ambient,
+            substrate,
+            vec![LayerSpec::constant("G", 1.52, 0.0, 200.0, nw)],
+        )
+        .unwrap();
+        (stack, r0)
+    }
+
+    fn fold_with(bucket: &str, target: f64) -> NeedleTargets {
+        let zero = || (vec![0.0f64; 1], vec![0.0f64; 1]);
+        let demand = || (vec![target; 1], vec![1.0f64; 1]);
+        let (r, t) = match bucket {
+            "r" => (demand(), zero()),
+            "t" => (zero(), demand()),
+            _ => unreachable!(),
+        };
+        NeedleTargets {
+            r,
+            t,
+            a: zero(),
+            rb: zero(),
+            tb: zero(),
+            ab: zero(),
+            phi: [zero(), zero(), zero(), zero()],
+            phi_gain_shift: [0.0; 4],
+        }
+    }
+
+    fn contrast_h() -> ContrastMap {
+        let mut m = ContrastMap::new();
+        m.insert(Arc::from("G"), LayerSpec::constant("H", 2.35, 0.0, 0.0, 1));
+        m
+    }
+
+    fn cycle_cfg() -> NeedleCycleConfig {
+        NeedleCycleConfig {
+            max_needles: 2,
+            convergence_threshold: 1e-4,
+            needle_seed_thickness_nm: 5.0,
+            scan_step_nm: 2.0,
+            refold_per_cycle: true,
+        }
+    }
+
+    /// SpectralInputs wrapping a hand-built fold (empty spec — the
+    /// StillCtx simulator errors, so the static fold stands).
+    fn spectral_of(fold: NeedleTargets) -> SpectralInputs {
+        SpectralInputs {
+            wavls: vec![1000.0],
+            sin_theta: vec![0.0],
+            fold,
+            spec: MeritSpec::new(),
+            angles_deg: vec![0.0],
+        }
+    }
+
+    /// Non-host rows (needle=false) are never insertion sites even when
+    /// their material has a contrast entry (interface slices, pinned
+    /// graded spans). The run breaks with the stack untouched.
+    #[test]
+    fn non_host_rows_never_seed() {
+        let nw = 1;
+        let mut ambient = LayerSpec::constant("air", 1.0, 0.0, 0.0, nw);
+        ambient.optimize = false;
+        ambient.needle = false;
+        let mut substrate = LayerSpec::constant("sub", 1.52, 0.0, 0.0, nw);
+        substrate.optimize = false;
+        substrate.needle = false;
+        let mut host = LayerSpec::constant("G", 1.52, 0.0, 200.0, nw);
+        host.needle = false; // contrast entry exists, host flag refuses
+        let mut stack =
+            DesignStack::with_films(ambient, substrate, vec![host]).unwrap();
+        let mut ctx = StillCtx;
+        let spectral = spectral_of(fold_with("t", 2.0));
+        let hist = run_needle_cycles(&mut ctx, &mut stack, &spectral, &contrast_h(), &cycle_cfg())
+            .unwrap();
+        assert!(hist.is_empty());
+        assert_eq!(stack.films().len(), 1);
+        assert!((stack.films()[0].d_nm - 200.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn satisfied_r_demand_inserts_nothing() {
+        // R demanded at its exact value → residual ~1e-16 → dust profile,
+        // convergence gate stops: no insertion, film count untouched.
+        let (mut stack, r0) = glass_stack();
+        let mut ctx = StillCtx;
+        let spectral = spectral_of(fold_with("r", r0));
+        let hist = run_needle_cycles(
+            &mut ctx,
+            &mut stack,
+            &spectral,
+            &contrast_h(),
+            &cycle_cfg(),
+        )
+        .unwrap();
+        assert_eq!(hist.len(), 1);
+        assert!(hist[0].insertion.is_none());
+        assert!(hist[0].best_p.map(|p| p > -1e-9).unwrap_or(true));
+        assert_eq!(stack.films().len(), 1);
+    }
+
+    #[test]
+    fn live_refold_masks_satisfied_above_demand() {
+        // Glass R ≈ 0.0426 against Above 0.01: satisfied (sim ≥ target)
+        // at the operating point. The static conservative fold would
+        // insert (Above folds active without a sim); the per-cycle live
+        // re-fold masks it, so nothing is inserted. Real solver context.
+        use crate::synthesis::evaluator::SmatrixContext;
+        use crate::synthesis::merit::{
+            ConstraintKind, MeritKey, MeritTarget, SimTransform,
+        };
+        use crate::synthesis::thick_opt::LmConfig;
+
+        let mut spec = MeritSpec::new();
+        let k = spec.add_key(MeritKey { angle: 0.0, curve: crate::synthesis::merit::CurveId::Rs });
+        spec.add_target(MeritTarget {
+            key_idx: k as u32,
+            wavelengths: vec![1000.0].into(),
+            kind: ConstraintKind::Above,
+            transform: SimTransform::Linear,
+            norm_factor: 1.0,
+            normalized_targets: vec![0.01].into(),
+            tolerances: vec![0.05].into(),
+            band: vec![].into(),
+            phase: false,
+            differential_passes: None,
+            integral: false,
+            weight: 1.0,
+            count_norm: None,
+        })
+        .unwrap();
+        let mut ctx = SmatrixContext {
+            wavls: vec![1000.0],
+            sin_theta: vec![0.0],
+            spec: spec.clone(),
+            clamp_min_nm: 2.0,
+            clamp_max_nm: 1000.0,
+            lm: LmConfig::default(),
+        };
+        let spectral = SpectralInputs::from_spec(&spec, &[0.0], &[1000.0]).unwrap();
+        let (mut stack, _) = glass_stack();
+        let hist = run_needle_cycles(
+            &mut ctx,
+            &mut stack,
+            &spectral,
+            &contrast_h(),
+            &cycle_cfg(),
+        )
+        .unwrap();
+        assert!(hist.iter().all(|h| h.insertion.is_none()));
+        assert_eq!(stack.films().len(), 1);
+    }
+
+    #[test]
+    fn violated_t_demand_drives_insertion() {
+        // Same stack, T ≈ 0.957 against a T = 0 demand: inserting H
+        // disrupts the matching and lowers T, so the scan must find a
+        // negative-P site and the host film must split.
+        let (mut stack, _) = glass_stack();
+        let mut ctx = StillCtx;
+        let spectral = spectral_of(fold_with("t", 0.0));
+        let hist = run_needle_cycles(
+            &mut ctx,
+            &mut stack,
+            &spectral,
+            &contrast_h(),
+            &cycle_cfg(),
+        )
+        .unwrap();
+        // max_needles = 2 and T stays violated → two insertions
+        // (1 → 3 → 5 films), both H into the original host lineage.
+        assert_eq!(hist.len(), 2);
+        for h in &hist {
+            let ins = h.insertion.as_ref().expect("expected an insertion");
+            assert!(h.best_p.unwrap() < 0.0);
+            assert_eq!(ins.material.as_ref(), "H");
+        }
+        assert_eq!(stack.films().len(), 5);
+    }
 }

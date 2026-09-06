@@ -1,631 +1,274 @@
 # -*- coding: utf-8 -*-
-"""
-Navette: Weaving the mathematics of light in thin film systems
-Copyright (c) 2026 opticsWolf
+"""Positioned composition of structures over the native model.
 
-SPDX-License-Identifier: LGPL-3.0-or-later
-
-Module: navette_architect.py — High-level governing module for arranging
-Navette_Structure objects into a contiguous simulation stack.
-
-Rework notes (v2):
-  1.  All expansion logic delegated to _LayerExpander from navette_structure.
-      No more copy-pasted flatten code — the Architect builds a layer
-      *iterator* of (Layer, is_inverted) tuples that handles inversion,
-      repetition, and cross-structure boundaries, then hands it to the
-      shared expander.
-  2.  StructureBlock replaces StructureNode (avoids collision with the
-      Qt node-graph concept of "Node").
-  3.  Serialisable via get_state / from_state for node-graph persistence.
-  4.  Accepts MaterialProvider protocol (auto-wraps legacy dicts).
-  5.  CAUTION: Structures are stored by reference. Mutating a Navette_Structure
-      that is used in multiple blocks will affect all those blocks. Use
-      `clone()` to create independent copies.
-
-Phase 4 improvements:
-  - Removed __len__ (replaced by block_count property) to avoid confusion.
-  - Module hygiene: __all__ defined, unused imports cleaned.
-
-Phase 5 improvements:
-  - get_error_solver_inputs accepts an optional np.random.Generator (rng) and
-    forwards it to _LayerExpander for reproducible Monte-Carlo runs.
-  - Dropped the now-unused `field` import.  (numpy is retained: it is
-    referenced by the rng type annotation.)
+:class:`Navette_Architect` wraps the bound ``Architect`` and tracks the
+calling-side shells (so ``map_global_index_to_layer`` returns the exact
+objects that were added, and provider propagation reaches them). Core
+sharing/aliasing semantics live in Rust (`Rc`-shared handles).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import (
-    Any,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    Union,
-)
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
-from .structure import Navette_Structure
-from .models import Layer, Group
-from .materials import MaterialProvider, DictMaterialProvider
-from .types import SolverArrays
-from .expander import _LayerExpander
+from navette._structure import Architect as _RsArchitect
 
 __all__ = [
-    "StructureBlock",
-    "Navette_Architect",
+  "BlockKind",
+  "StructureBlock",
+  "Navette_Architect",
 ]
 
+from .types import BlockKind
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# StructureBlock — lightweight chain entry
-# ═══════════════════════════════════════════════════════════════════════════════
+
 @dataclass
 class StructureBlock:
-    """
-    A positioned reference to a Navette_Structure in the Architect's chain.
+  """Positioned reference view: shell + traversal flags + role.
 
-    Attributes
-    ----------
-    structure : Navette_Structure
-        The layer-stack definition (shared reference — edits propagate).
-    inverted : bool
-        If True, layers are traversed last → first.
-    repeat_count : int
-        Number of consecutive repetitions of this block.
-    label : str
-        Optional human-readable tag (for node-graph display).
-    """
-    structure: Navette_Structure
-    inverted: bool = False
-    repeat_count: int = 1
-    label: str = ""
+  Views are rebuilt per access (:meth:`Navette_Architect.blocks`); the
+  ``structure`` attribute is the tracked shell (identity-stable).
+  """
+  structure: Any
+  inverted: bool = False
+  repeat_count: int = 1
+  label: str = ""
+  kind: Union[BlockKind, int] = BlockKind.STACK
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Navette_Architect
-# ═══════════════════════════════════════════════════════════════════════════════
 class Navette_Architect:
+  """Positioned composition of structures with global-index addressing.
+
+  Thin wrapper over the bound ``Architect``. Still dropped vs the legacy
+  Python class: ``index``, ``get_block_index_by_label`` (no in-tree
+  users — one-liners over :meth:`blocks` if a GUI needs them),
+  ``insert/replace_structure``, ``move_block``, ``remove_structure``,
+  ``clear`` (chain surgery needs core support),
+  ``get_optimization_parameters`` (bound-only, unwrapped —
+  ``optimization_entries`` covers reads), block-identity
+  ``__contains__`` (murky across view rebuilds; use ``block in
+  arch.blocks``).
+  """
+
+  def __init__(self, materials: Any = None) -> None:
+    self._inner = _RsArchitect()
+    self._shells: List[Any] = []
+    self._view_cache: Optional[tuple] = None  # (blocks fingerprint, views)
+    if materials is not None:
+      self.materials = materials
+
+  # -- provider ----------------------------------------------------------
+  @property
+  def materials(self) -> Any:
+    return self._inner.materials
+
+  @materials.setter
+  def materials(self, value: Any) -> None:
+    from .materials import DictMaterialProvider
+    if isinstance(value, dict):
+      value = DictMaterialProvider(value)
+    self._inner.materials = value  # warns per distinct shell provider
+    for shell in self._shells:
+      shell.materials = value
+
+  # -- composition ---------------------------------------------------------
+  def add_structure(self, structure: Any, inverted: bool = False,
+                    repeat: int = 1, label: str = "",
+                    kind: Union[BlockKind, int] = BlockKind.STACK) -> None:
+    self._inner.add_structure(structure._inner, inverted=inverted,
+                              repeat=repeat, label=label, kind=int(kind))
+    if structure not in self._shells:
+      self._shells.append(structure)
+    if self._inner.materials is not None:
+      structure.materials = self._inner.materials
+
+  def clone_structure(self, index: int) -> None:
+    self._inner.clone_structure(index)
+
+  def __len__(self) -> int:
+    return len(self._inner)
+
+  @property
+  def block_count(self) -> int:
+    return len(self._inner)
+
+  @property
+  def blocks(self) -> List[StructureBlock]:
+    fingerprint = self._inner.blocks_info()
+    if self._view_cache is None or self._view_cache[0] != fingerprint:
+      self._view_cache = (fingerprint, [
+        StructureBlock(structure=self._shell_for_core(cid), inverted=inv,
+                       repeat_count=rep, label=lab, kind=BlockKind(k))
+        for cid, inv, rep, lab, k in fingerprint])
+    return self._view_cache[1]
+
+  def __getitem__(self, index: int) -> StructureBlock:
+    return self.blocks[index]
+
+  def __iter__(self):
+    return iter(self.blocks)
+
+  @property
+  def is_empty(self) -> bool:
+    return len(self._inner) == 0
+
+  def _shell_for_core(self, core_id: int) -> Any:
+    for shell in self._shells:
+      if shell._inner.core_id() == core_id:
+        return shell
+    # New core (post-clone): adopt a fresh shell around it.
+    from .structure import Navette_Structure
+    for bound in self._inner.unique_structures():
+      if bound.core_id() == core_id:
+        shell = Navette_Structure.__new__(Navette_Structure)
+        shell._inner = bound
+        if self._inner.materials is not None:
+          shell.materials = self._inner.materials
+        self._shells.append(shell)
+        return shell
+    raise AssertionError("Navette_Architect: block core vanished.")
+
+  @property
+  def unique_structures(self) -> List[Any]:
+    seen, out = set(), []
+    for shell in self._shells:
+      cid = shell._inner.core_id()
+      if cid not in seen:
+        seen.add(cid)
+        out.append(shell)
+    return out
+
+  def get_global_layer_count(self) -> int:
+    return self._inner.global_layer_count()
+
+  # -- model API (delegated) ----------------------------------------------
+  def validate(self) -> List[str]:
+    return self._inner.validate()
+
+  def get_solver_inputs(self) -> Any:
+    return self._inner.solver_inputs()
+
+  def get_error_solver_inputs(self, rng=None) -> Any:
+    return self._inner.error_inputs(rng)
+
+  def total_sub_layers(self) -> int:
+    return self._inner.total_sub_layers()
+
+  @staticmethod
+  def _oob(exc: Exception, what: str):
+    if "out of bounds" in str(exc):
+      raise IndexError(f"{what}: {exc}") from exc
+    raise exc
+
+  def map_global_index_to_layer(self, global_idx: int):
+    try:
+      bi, local = self._inner.map_global_index_to_layer(global_idx)
+    except ValueError as exc:
+      self._oob(exc, "Global index")
+    return self._shell_for_core(self._inner.block_core_id(bi)), local
+
+  def map_solver_index_to_layer(self, solver_idx: int):
+    try:
+      bi, local = self._inner.map_solver_index_to_layer(solver_idx)
+    except ValueError as exc:
+      self._oob(exc, "Solver index")
+    return self._shell_for_core(self._inner.block_core_id(bi)), local
+
+  def get_layer_at_global(self, global_idx: int) -> Any:
+    shell, local = self.map_global_index_to_layer(global_idx)
+    return shell[local]
+
+  def insert_layer_at_global(self, global_idx: int, new_layer: Any) -> None:
+    self._inner.insert_layer_at_global(global_idx, new_layer)
+
+  def split_layer_at_global(self, global_idx: int, split_ratio: float = 0.5) -> None:
+    self._inner.split_layer_at_global(global_idx, split_ratio)
+
+  def duplicate_layer_at_global(self, global_idx: int) -> None:
+    self._inner.duplicate_layer_at_global(global_idx)
+
+  def remove_layer_at_global(self, global_idx: int) -> None:
+    self._inner.remove_layer_at_global(global_idx)
+
+  def prune_thin_layers(self, min_thickness: float = 0.001) -> int:
+    return self._inner.prune_thin_layers(min_thickness)
+
+  def bake_films(self) -> int:
+    return self._inner.bake_films()
+
+  def bake_materials(self, wavelengths) -> Dict[str, str]:
+    from .structure import _pour_back
+    wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
+    mapping, target = self._inner.bake_materials(wl)
+    _pour_back(mapping, target, self._inner.materials, wl)
+    return mapping
+
+  def set_optimization_mask(self, group_name: str, mask: List[int]) -> None:
+    self._inner.set_optimization_mask(group_name, mask)
+
+  # -- GUI conveniences (restored) --------------------------------------
+  @property
+  def active_material_dict(self) -> Any:
+    """Alias of :attr:`materials` (legacy name)."""
+    return self.materials
+
+  @active_material_dict.setter
+  def active_material_dict(self, value: Any) -> None:
+    self.materials = value
+
+  def replace_material(self, old_name: str, new_name: str) -> int:
+    """Replace all occurrences of old material name with new. Returns count."""
+    return sum(shell.replace_material(old_name, new_name)
+               for shell in self.unique_structures)
+
+  def get_total_physical_thickness(self) -> float:
+    """Sum of all film thicknesses [nm] across the chain (× repeat)."""
+    return sum(view.structure.total_physical_thickness() * view.repeat_count
+               for view in self.blocks)
+
+  def copy(self) -> "Navette_Architect":
+    """Deep copy: all structures cloned, chain flags preserved.
+
+    The carried provider is shared by reference (dicts are re-wrapped
+    into an equal provider — same content, new object).
     """
-    Governing class that strings together multiple Navette_Structure objects.
-
-    Capabilities:
-      1. Reuse of Navette_Structure instances (changes map to all references).
-      2. Inversion of structures (optical path reversal).
-      3. Centralized solver input generation across structure boundaries.
-      4. Global-to-Local mapping for Needle optimization.
-      5. Serialisable for node-graph persistence (get_state / from_state).
-
-    CAUTION: Structures are stored by reference. If you modify a structure
-    (e.g., change thicknesses, materials, groups), ALL blocks that reference
-    it will see the changes. Use `clone_structure()` or `Navette_Structure.clone()`
-    to create independent copies when needed.
-
-    Group merging: if the same group name appears in two different structures
-    with differing parameters, get_solver_inputs() raises ValueError rather
-    than silently letting one win.  Use unique group names or keep them
-    consistent across structures.
-    """
-
-    def __init__(
-        self,
-        materials: Optional[Union[MaterialProvider, Dict[str, Any]]] = None,
-    ) -> None:
-        """
-        Parameters
-        ----------
-        materials : MaterialProvider | dict, optional
-            Shared material data source.  A plain dict is auto-wrapped in
-            DictMaterialProvider for backward compatibility.
-        """
-        self._blocks: List[StructureBlock] = []
-
-        if materials is None:
-            self._materials: Optional[MaterialProvider] = None
-        elif isinstance(materials, dict):
-            self._materials = DictMaterialProvider(materials)
-        else:
-            self._materials = materials
-
-    def __len__(self) -> int:
-        """Return the total number of logical layers (sum over blocks)."""
-        return self.get_global_layer_count()
-
-    def __getitem__(self, index: int) -> StructureBlock:
-        return self._blocks[index]
-    
-    def __iter__(self) -> Iterator[StructureBlock]:
-        return iter(self._blocks)
-
-    def __bool__(self) -> bool:
-        return not self.is_empty
-
-    def __contains__(self, block: StructureBlock) -> bool:
-        return block in self._blocks
-
-    def __repr__(self) -> str:
-        total = self.get_global_layer_count()
-        return (
-            f"Navette_Architect(blocks={len(self._blocks)}, "
-            f"unique_structs={len(self.unique_structures)}, "
-            f"total_layers={total})"
-        )
-
-    def copy(self) -> Navette_Architect:
-        """Create a deep copy (all structures cloned)."""
-        new_arch = Navette_Architect(materials=self._materials)
-        for block in self._blocks:
-            new_arch.add_structure(
-                block.structure.clone(),
-                inverted=block.inverted,
-                repeat=block.repeat_count,
-                label=block.label,
-            )
-        return new_arch
-    
-    def validate(self) -> List[str]:
-        """Return list of warnings/errors (empty if all good)."""
-        issues = []
-        # Check groups
-        try:
-            self._merged_group_dict()
-        except ValueError as e:
-            issues.append(str(e))
-        # Check materials exist for all layers
-        if self._materials:
-            for layer, _ in self._iter_layers():
-                if not self._materials.has_material(layer.material):
-                    issues.append(f"Material '{layer.material}' not found")
-        return issues
-
-    @property
-    def is_empty(self) -> bool:
-        """True when the chain holds no structure blocks."""
-        return len(self._blocks) == 0
-
-    # -- material provider -------------------------------------------------
-    @property
-    def materials(self) -> Optional[MaterialProvider]:
-        """Shared provider, propagated to every block on assignment."""
-        return self._materials
-
-    @materials.setter
-    def materials(self, value: Any) -> None:
-        if isinstance(value, dict):
-            self._materials = DictMaterialProvider(value)
-        else:
-            self._materials = value
-        # Propagate to all structures
-        for block in self._blocks:
-            block.structure.materials = self._materials
-
-    # Backward compat
-    @property
-    def active_material_dict(self) -> Optional[MaterialProvider]:
-        """Alias of :attr:`materials` (legacy name)."""
-        return self._materials
-
-    @active_material_dict.setter
-    def active_material_dict(self, value: Any) -> None:
-        self.materials = value
-
-    def replace_material(self, old_name: str, new_name: str) -> int:
-        """Replace all occurrences of old material name with new. Returns count."""
-        count = 0
-        for layer, _ in self._iter_layers():
-            if layer.material == old_name:
-                layer.material = new_name
-                count += 1
-        return count
-
-    # -- block management --------------------------------------------------
-    @property
-    def blocks(self) -> List[StructureBlock]:
-        """The structure blocks in chain order."""
-        return self._blocks
-
-    @property
-    def block_count(self) -> int:
-        """Number of StructureBlocks in the architect chain."""
-        return len(self._blocks)
-
-    def index(self, block: StructureBlock) -> int:
-        """Position of `block` in the chain (ValueError when absent)."""
-        return self._blocks.index(block)
-
-    def get_block_index_by_label(self, label: str) -> List[int]:
-        """Chain positions of all blocks carrying `label`."""
-        return [i for i, blk in enumerate(self._blocks) if blk.label == label]
-
-    def add_structure(
-        self,
-        structure: Navette_Structure,
-        inverted: bool = False,
-        repeat: int = 1,
-        label: str = "",
-    ) -> None:
-        """
-        Append a Navette_Structure to the simulation stack.
-
-        WARNING: The structure is stored by reference. If you modify this
-        structure later, ALL blocks that reference it will see the changes.
-        To avoid this, call `structure.clone()` before passing it to
-        multiple blocks.
-
-        The structure's material provider is overwritten with the Architect's
-        shared provider so all structures resolve from the same data source.
-        """
-        if repeat < 1:
-            raise ValueError("repeat_count must be >= 1")
-        if self._materials is not None:
-            structure.materials = self._materials
-
-        self._blocks.append(
-            StructureBlock(structure, inverted, repeat, label)
-        )
-
-    def insert_structure(
-        self,
-        index: int,
-        structure: Navette_Structure,
-        inverted: bool = False,
-        repeat: int = 1,
-        label: str = "",
-    ) -> None:
-        """Insert a structure block (optionally inverted/repeated/labelled)."""
-        if repeat < 1:
-            raise ValueError("repeat_count must be >= 1")
-        if self._materials is not None:
-            structure.materials = self._materials
-        self._blocks.insert(
-            index,
-            StructureBlock(structure, inverted, repeat, label)
-        )
-
-    def replace_structure(self, block_index: int, new_structure: Navette_Structure) -> None:
-        """Replace the structure at block_index while preserving inversion/repeat/label."""
-        block = self._blocks[block_index]
-        if self._materials is not None:
-            new_structure.materials = self._materials
-        self._blocks[block_index] = StructureBlock(
-            structure=new_structure,
-            inverted=block.inverted,
-            repeat_count=block.repeat_count,
-            label=block.label,
-        )
-
-    def move_block(self, from_index: int, to_index: int) -> None:
-        """Move a block from one position to another."""
-        block = self._blocks.pop(from_index)
-        self._blocks.insert(to_index, block)
-
-    def remove_structure(self, index: int) -> StructureBlock:
-        """Remove and return the block at *index*."""
-        return self._blocks.pop(index)
-
-    def clear(self) -> None:
-        """Remove all blocks."""
-        self._blocks.clear()
-
-    @property
-    def unique_structures(self) -> List[Navette_Structure]:
-        """Deduplicated list of referenced structures (by identity)."""
-        seen: Set[int] = set()
-        result: List[Navette_Structure] = []
-        for block in self._blocks:
-            sid = id(block.structure)
-            if sid not in seen:
-                seen.add(sid)
-                result.append(block.structure)
-        return result
-
-    # -- clone structure (break aliasing) ---------------------------------
-    def clone_structure(self, index: int) -> None:
-        """
-        Clone the structure at block `index` and replace the block's reference.
-        This breaks aliasing with other blocks that used the same original structure.
-        """
-        if not 0 <= index < len(self._blocks):
-            raise IndexError("Block index out of range")
-        block = self._blocks[index]
-        cloned_struct = block.structure.clone()
-        # Ensure the cloned structure uses the same material provider
-        cloned_struct.materials = self._materials
-        self._blocks[index] = StructureBlock(
-            structure=cloned_struct,
-            inverted=block.inverted,
-            repeat_count=block.repeat_count,
-            label=block.label,
-        )
-
-    # -- layer counting ----------------------------------------------------
-    def get_global_layer_count(self) -> int:
-        """Total number of *logical* layers (before sub-layer expansion)."""
-        return sum(
-            len(b.structure.layer_list) * b.repeat_count
-            for b in self._blocks
-        )
-
-    # -- layer iteration (the key abstraction) -----------------------------
-    def _iter_layers(self) -> Iterator[Tuple[Layer, bool]]:
-        """
-        Yield (layer, is_inverted) for every logical layer across all
-        blocks, respecting inversion and repetition.
-
-        The first layer yielded is the ambient; the last is the substrate.
-        This is exactly the contract _LayerExpander.expand consumes.
-        """
-        for block in self._blocks:
-            layers = block.structure.layer_list
-            n = len(layers)
-            if n == 0:
-                continue
-
-            for _ in range(block.repeat_count):
-                if block.inverted:
-                    for i in range(n - 1, -1, -1):
-                        yield layers[i], True
-                else:
-                    for i in range(n):
-                        yield layers[i], False
-
-    # -- solver array generation -------------------------------------------
-    def _merged_group_dict(self) -> Dict[str, Group]:
-        """
-        Merge group dicts from all unique structures.
-
-        Raises
-        ------
-        ValueError
-            If the same group name is defined with different parameters
-            in two structures.
-        """
-        merged: Dict[str, Group] = {}
-        for struct in self.unique_structures:
-            for name, group in struct.group_dict.items():
-                if name in merged:
-                    # Compare group states instead of object identity
-                    if merged[name].get_state() != group.get_state():
-                        raise ValueError(
-                            f"Group name '{name}' defined differently in two structures. "
-                            f"Cannot merge automatically. Use unique group names or "
-                            f"ensure consistency."
-                        )
-                    # If identical state, keep the existing one (no need to replace)
-                else:
-                    merged[name] = group
-        return merged
-
-    def get_solver_inputs(self) -> SolverArrays:
-        """
-        Generate flattened Structure-of-Arrays for the solver across ALL
-        structures.  Handles cross-structure interfaces, inversion, and
-        inhomogeneous expansion.
-
-        Returns
-        -------
-        SolverArrays
-        """
-        if not self._blocks:
-            raise ValueError("Navette_Architect is empty.")
-        if self._materials is None:
-            raise ValueError("No material provider set.")
-
-        return _LayerExpander.expand(
-            self._iter_layers(),   # yields (layer, bool) tuples
-            self._materials,
-            self._merged_group_dict(),
-            apply_errors=False,
-        )
-
-    def get_error_solver_inputs(
-        self, rng: Optional[np.random.Generator] = None
-    ) -> SolverArrays:
-        """
-        Generate solver arrays WITH stochastic manufacturing errors.
-
-        Parameters
-        ----------
-        rng : np.random.Generator, optional
-            Generator for reproducible Monte-Carlo runs.  If None, the legacy
-            global np.random state is used.
-        """
-        if not self._blocks:
-            raise ValueError("Navette_Architect is empty.")
-        if self._materials is None:
-            raise ValueError("No material provider set.")
-
-        return _LayerExpander.expand(
-            self._iter_layers(),
-            self._materials,
-            self._merged_group_dict(),
-            apply_errors=True,
-            rng=rng,
-        )
-
-    # -- global ↔ local index mapping (for Needle optimization) ------------
-    def map_global_index_to_layer(
-        self, global_idx: int
-    ) -> Tuple[Navette_Structure, int]:
-        """
-        Map a global simulation layer index to the specific Navette_Structure
-        and its internal layer index.
-
-        Returns
-        -------
-        (Navette_Structure, local_layer_index)
-
-        Raises
-        ------
-        IndexError
-            If global_idx is out of bounds.
-        """
-        current = 0
-
-        for block in self._blocks:
-            struct = block.structure
-            n = len(struct.layer_list)
-
-            for _ in range(block.repeat_count):
-                if current <= global_idx < current + n:
-                    local_offset = global_idx - current
-                    if block.inverted:
-                        return struct, (n - 1) - local_offset
-                    return struct, local_offset
-                current += n
-
-        raise IndexError(
-            f"Global index {global_idx} out of bounds "
-            f"(total logical layers: {current})"
-        )
-
-
-    # -- layer manipulation at global indices ------------------------------
-    def get_layer_at_global(self, global_idx: int) -> Layer:
-        """Layer at a chain-wide index (spans block boundaries)."""
-        struct, local = self.map_global_index_to_layer(global_idx)
-        return struct.layer_list[local]
-
-    def insert_layer_at_global(
-        self, global_idx: int, new_layer: Layer
-    ) -> None:
-        """
-        Insert a new layer at the specified global index.
-
-        NOTE: This mutates the underlying Navette_Structure. If that structure
-        is referenced elsewhere, the change will appear everywhere.
-        """
-        struct, local = self.map_global_index_to_layer(global_idx)
-        struct.layer_list.insert(local, new_layer)
-
-    def split_layer_at_global(
-        self, global_idx: int, split_ratio: float = 0.5
-    ) -> None:
-        """Split the layer at global_idx into two layers of the same material."""
-        struct, local = self.map_global_index_to_layer(global_idx)
-        original = struct.layer_list[local]
-
-        l1 = original.clone()
-        l2 = original.clone()
-        l1.thickness = original.thickness * split_ratio
-        l2.thickness = original.thickness * (1.0 - split_ratio)
-
-        struct.layer_list[local] = l1
-        struct.layer_list.insert(local + 1, l2)
-
-    def duplicate_layer_at_global(self, global_idx: int) -> None:
-        """Duplicate the layer at the global index."""
-        struct, local = self.map_global_index_to_layer(global_idx)
-        struct.layer_list.insert(local, struct.layer_list[local].clone())
-
-    def remove_layer_at_global(self, global_idx: int) -> None:
-        """Remove the layer at the global index."""
-        struct, local = self.map_global_index_to_layer(global_idx)
-        del struct.layer_list[local]
-
-    def prune_thin_layers(self, min_thickness: float = 0.001) -> int:
-        """Remove layers thinner than *min_thickness* from ALL structures."""
-        removed = 0
-        for struct in self.unique_structures:
-            before = len(struct.layer_list)
-            struct.layer_list = [
-                l for l in struct.layer_list if l.thickness >= min_thickness
-            ]
-            removed += before - len(struct.layer_list)
-        return removed
-
-    def get_optimization_parameters(self) -> List[Layer]:
-        """
-        Return a UNIQUE list of layers eligible for optimisation.
-        Even if a structure is referenced 5 times, its layers appear once.
-        """
-        params: List[Layer] = []
-        for struct in self.unique_structures:
-            for layer in struct.layer_list:
-                if layer.optimize:
-                    params.append(layer)
-        return params
-
-    def total_sub_layers(self) -> int:
-        """Number of physical slices after inhomogeneous subdivision (no error application)."""
-        # Quick approximation: iterate layers and sum sub_layer_count
-        total = 0
-        prev_exists = False
-        for layer, _ in self._iter_layers():
-            if layer._inhomogen and layer.sub_layer_count > 1:
-                total += layer.sub_layer_count
-            else:
-                total += 1
-            # Interfaces add one extra slice per interface (except first layer)
-            # But careful: interface adds only if previous layer exists
-            # This is a simplified version; a full expander call would be more accurate
-            # but may be expensive.
-            # For exact count, use:
-            # arrays = self.get_solver_inputs()
-            # return len(arrays.thicknesses)
-            # But that's heavy. Consider caching or a dedicated counter.
-            # Count interface layer if present (adds one extra slice)
-            if layer.interface and prev_exists:
-                total += 1
-            prev_exists = True
-        return total
-
-    def get_total_physical_thickness(self) -> float:
-        """Sum of all film thicknesses [nm] across the chain."""
-        return sum(layer.thickness for layer, _ in self._iter_layers())
-
-    # -- serialisation (node-graph persistence) ----------------------------
-    def get_state(self) -> Dict[str, Any]:
-        """Serialise the entire architect to a dict."""
-        # Map structure id(obj) → index for reference tracking
-        struct_map: Dict[int, int] = {}
-        struct_states: List[Dict[str, Any]] = []
-        for struct in self.unique_structures:
-            struct_map[id(struct)] = len(struct_states)
-            struct_states.append(struct.get_state())
-
-        block_states = [
-            {
-                "structure_ref": struct_map[id(b.structure)],
-                "inverted": b.inverted,
-                "repeat_count": b.repeat_count,
-                "label": b.label,
-            }
-            for b in self._blocks
-        ]
-
-        return {
-            "structures": struct_states,
-            "blocks": block_states,
-        }
-
-    @classmethod
-    def from_state(
-        cls,
-        state: Dict[str, Any],
-        materials: Optional[Union[MaterialProvider, Dict[str, Any]]] = None,
-    ) -> "Navette_Architect":
-        """Reconstruct from a serialised dict."""
-        arch = cls(materials=materials)
-
-        # Rebuild structures
-        structs: List[Navette_Structure] = [
-            Navette_Structure.from_state(ss, materials=materials)
-            for ss in state.get("structures", [])
-        ]
-
-        # Rebuild blocks with structure references
-        for bs in state.get("blocks", []):
-            ref = bs.get("structure_ref", 0)
-            if 0 <= ref < len(structs):
-                arch.add_structure(
-                    structs[ref],
-                    inverted=bs.get("inverted", False),
-                    repeat=bs.get("repeat_count", 1),
-                    label=bs.get("label", ""),
-                )
-        return arch
+    new = Navette_Architect()
+    if self.materials is not None:
+      new.materials = self.materials
+    for view in self.blocks:
+      new.add_structure(view.structure.clone(), inverted=view.inverted,
+                        repeat=view.repeat_count, label=view.label,
+                        kind=view.kind)
+    return new
+
+  def get_state(self) -> Dict[str, Any]:
+    return self._inner.get_state()
+
+  @classmethod
+  def from_state(cls, state: Dict[str, Any], materials: Any = None) -> "Navette_Architect":
+    obj = cls.__new__(cls)
+    obj._inner = _RsArchitect.from_state(state)
+    obj._shells = []
+    obj._view_cache = None
+    if materials is not None:
+      obj.materials = materials
+    # Adopt one shell per unique core (propagation-consistent).
+    from .structure import Navette_Structure
+    for bound in obj._inner.unique_structures():
+      shell = Navette_Structure.__new__(Navette_Structure)
+      shell._inner = bound
+      if materials is not None:
+        shell.materials = materials
+      obj._shells.append(shell)
+    # Re-link blocks order: replay shells per block core order.
+    ordered: List[Any] = []
+    for cid, _inv, _rep, _lab, _k in obj._inner.blocks_info():
+      for shell in obj._shells:
+        if shell._inner.core_id() == cid and shell not in ordered:
+          ordered.append(shell)
+          break
+    obj._shells = ordered
+    return obj

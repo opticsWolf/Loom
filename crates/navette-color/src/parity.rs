@@ -4,8 +4,8 @@
 #[path = "golden.rs"]
 mod golden;
 
-use navette_color::common::REF_WHITE_D65;
-use navette_color::prelude::*;
+use crate::common::REF_WHITE_D65;
+use crate::prelude::*;
 
 const EPS: f64 = 1e-12;
 
@@ -121,9 +121,9 @@ fn func_07_ucs() {
 #[test]
 fn func_08_bradford() {
     let mut out = vec![[0.0; 3]; golden::XYZ_IN.len()];
-    adapt(&golden::XYZ_IN, &navette_color::common::REF_WHITE_D65, &navette_color::common::REF_WHITE_D50, true, &mut out);
+    adapt(&golden::XYZ_IN, &crate::common::REF_WHITE_D65, &crate::common::REF_WHITE_D50, true, &mut out);
     assert_rows(&out, &golden::F08_ADAPT_D65_TO_D50, "func_08_adapt_d65_to_d50");
-    let m = calc_transform_matrix(&navette_color::common::REF_WHITE_D65, &navette_color::common::REF_WHITE_D50);
+    let m = calc_transform_matrix(&crate::common::REF_WHITE_D65, &crate::common::REF_WHITE_D50);
     assert_rows(&m, &golden::F08_BRADFORD_MATRIX, "func_08_bradford_matrix");
 }
 

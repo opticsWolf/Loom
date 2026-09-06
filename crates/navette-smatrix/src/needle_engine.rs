@@ -42,6 +42,28 @@ pub const NREQ_DGDD: u64 = 1 << 4;
 pub const NREQ_DTOD: u64 = 1 << 5;
 /// Request FOD sensitivity (dispersion-order needle channel).
 pub const NREQ_DFOD: u64 = 1 << 6;
+/// Request coherent transmission-merit gradient P_T(z) (t_fwd + flux).
+pub const NREQ_P_T: u64 = 1 << 7;
+/// Request coherent absorption-merit gradient P_A(z) (A = 1 − R − T).
+pub const NREQ_P_A: u64 = 1 << 8;
+/// Request coherent phase-merit gradient P_PHI(z) for the selected channel.
+pub const NREQ_P_PHI: u64 = 1 << 9;
+/// Request multiblock transmission-merit gradient Pmb_T(z).
+pub const NREQ_P_MB_T: u64 = 1 << 10;
+/// Request multiblock absorption-merit gradient Pmb_A(z).
+pub const NREQ_P_MB_A: u64 = 1 << 11;
+/// Request coherent back-transmission-merit gradient P_TB(z) (t_back + flux).
+pub const NREQ_P_TB: u64 = 1 << 12;
+/// Request coherent back-reflection-merit gradient P_RB(z).
+pub const NREQ_P_RB: u64 = 1 << 13;
+/// Request coherent back-absorption-merit gradient P_AB(z).
+pub const NREQ_P_AB: u64 = 1 << 14;
+/// Request multiblock back-transmission-merit gradient Pmb_TB(z).
+pub const NREQ_P_MB_TB: u64 = 1 << 15;
+/// Request multiblock back-reflection-merit gradient Pmb_RB(z).
+pub const NREQ_P_MB_RB: u64 = 1 << 16;
+/// Request multiblock back-absorption-merit gradient Pmb_AB(z).
+pub const NREQ_P_MB_AB: u64 = 1 << 17;
 
 /// Highest dispersion derivative order implied by the request mask.
 pub fn max_disp_order(requested: u64) -> Option<usize> {

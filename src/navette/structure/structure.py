@@ -1,172 +1,212 @@
 # -*- coding: utf-8 -*-
-"""Ordered thin-film stack: layers, groups and the material provider.
+"""Thin-film design stacks over the native model (provider plumbing).
 
-A :class:`Navette_Structure` validates the stack, flattens it into
-:class:`SolverArrays` for the native engine, and serializes via
-``get_state``/``from_state``. Behaves like a read sequence of layers
-(``len()``, indexing, iteration, ``+`` concatenation).
+:class:`Navette_Structure` wraps the bound ``Structure`` and adds the two
+things that stay Python-side: the carried material provider (any
+provider-like object — snapshotted at solve time) and ``bake_materials``
+pour-back (new Table specs are registered into the carried Python
+provider). Everything else — validation, expansion, states, film baking —
+delegates to the core.
 """
-from typing import Any, Dict, Iterator, List, Optional, Union
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 
-from .types import SolverArrays
-from .materials import DictMaterialProvider, MaterialProvider
-from .models import Group, Layer
-from .expander import _DEFAULT_GROUP, _LayerExpander
+from navette._structure import Structure as _RsStructure
+
+
+def gate_validation(issues: List[str], what: str) -> None:
+  """Solve gate shared by structures and architects: re-emit advisory
+  warnings via `warnings.warn` (flow continues), raise `ValueError` on
+  errors. See `Navette_Structure.validate` for the severity contract."""
+  import warnings
+  from .types import is_warning
+  for issue in issues:
+    if is_warning(issue):
+      warnings.warn(f"{what}: {issue}", stacklevel=3)
+  errs = [i for i in issues if not is_warning(i)]
+  if errs:
+    raise ValueError(f"{what} invalid:\n" + "\n".join(errs))
+
+
+def _pour_back(mapping: Dict[str, str], target: Any, carried: Any, wavelengths: np.ndarray) -> None:
+  """Register baked Table specs from a bound target shelf into a Python provider."""
+  from navette.materials import MaterialSpec
+  if isinstance(carried, dict):
+    shelf, gridless = carried, True
+  else:
+    shelf = getattr(carried, "_dict", None)
+    gridless = False
+  if shelf is None:
+    raise ValueError(
+      "bake_materials pour-back needs a dict-backed provider "
+      "(dict/DictMaterialProvider/MaterialObjectProvider); "
+      f"got {type(carried).__name__}."
+    )
+  for _old, new in mapping.items():
+    payload = target.export_entry(new)
+    if isinstance(payload, dict):
+      shelf[new] = MaterialSpec(model=payload["model"], params=payload["params"])
+    else:
+      shelf[new] = payload
+    if hasattr(carried, "invalidate"):
+      try:
+        carried.invalidate(new)
+      except Exception:
+        pass
+  # Bare dicts stay gridless (bridge warns); Dict providers gain the grid.
+  if not gridless and getattr(carried, "_wavelength", "sentinel") is None:
+    carried._wavelength = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
+
 
 class Navette_Structure:
-    """Ordered stack of :class:`Layer` with groups and a material provider."""
-    def __init__(
-        self,
-        layer_list: Optional[List[Layer]] = None,
-        group_dict: Optional[Dict[str, Group]] = None,
-        materials: Optional[Union[MaterialProvider, Dict[str, Any]]] = None,
-    ):
-        self.layer_list: List[Layer] = layer_list or []
-        self.group_dict: Dict[str, Group] = group_dict or {}
+  """One design stack: ordered layers + material-keyed groups + provider.
 
-        if materials is None:
-            self._materials: Optional[MaterialProvider] = None
-        elif isinstance(materials, dict):
-            self._materials = DictMaterialProvider(materials)
-        else:
-            self._materials = materials
+  Thin wrapper over the bound ``Structure`` (first-class Rust model).
+  ``materials`` accepts any provider-like object (provider, dict, None);
+  it is snapshotted at solve time. Still dropped vs the legacy Python
+  class: ``generate_simple_layer_list`` (legacy row adapter —
+  ``get_solver_inputs()`` is the clean source), structure-level
+  ``prune_thin_layers`` and ``get_optimization_parameters``,
+  ``set_optimization_mask`` (bound-only, unwrapped — architect-level
+  covers the live paths).
+  """
 
-        self.simple_layer_list: List[List[Any]] = []
+  def __init__(self, layer_list=None, group_dict=None, materials=None) -> None:
+    self._inner = _RsStructure(layer_list or [], group_dict or {})
+    if materials is not None:
+      self.materials = materials
 
-    @property
-    def materials(self) -> Optional[MaterialProvider]:
-        """Material provider (dicts are auto-wrapped on assignment)."""
-        return self._materials
-    @materials.setter
-    def materials(self, value: Any) -> None:
-        self._materials = DictMaterialProvider(value) if isinstance(value, dict) else value
+  def __add__(self, other: "Navette_Structure") -> "Navette_Structure":
+    if self._inner.materials is not None and other._inner.materials is not None \
+            and self._inner.materials is not other._inner.materials:
+      raise ValueError("Cannot merge structures with different material providers (same name could resolve differently).")
+    new = self.clone()
+    for layer in other._inner.layer_list:
+      new._inner.append_layer(layer)
+    for name, group in other._inner.group_dict.items():
+      mine = new._inner.group_dict
+      if name in mine:
+        if mine[name].get_state() != group.get_state():
+          raise ValueError(f"Group '{name}' defined differently. Cannot merge.")
+      else:
+        new._inner.insert_group(name, group)
+    return new
 
-    @property
-    def active_material_dict(self) -> Optional[MaterialProvider]:
-        """Alias of :attr:`materials` (legacy name)."""
-        return self.materials
-    @active_material_dict.setter
-    def active_material_dict(self, value: Any) -> None: self.materials = value
+  # -- provider ----------------------------------------------------------
+  @property
+  def materials(self) -> Any:
+    return self._inner.materials
 
-    def validate(self) -> List[str]:
-        """Check thicknesses, roughness and material coverage; returns error strings."""
-        errors: List[str] = []
-        if not self.layer_list:
-            errors.append("Structure contains no layers.")
-            return errors
+  @materials.setter
+  def materials(self, value: Any) -> None:
+    from .materials import DictMaterialProvider
+    if isinstance(value, dict):
+      value = DictMaterialProvider(value)
+    self._inner.materials = value
 
-        for i, layer in enumerate(self.layer_list):
-            if layer.thickness < 0:
-                errors.append(f"Layer {i} ({layer.material}): Negative thickness {layer.thickness} nm.")
-            if layer.roughness < 0:
-                errors.append(f"Layer {i} ({layer.material}): Negative roughness {layer.roughness} A.")
-            if layer.interface and layer.interface_thickness >= layer.thickness:
-                errors.append(f"Layer {i} ({layer.material}): Interface thickness ({layer.interface_thickness}) >= layer thickness ({layer.thickness}).")
-            if self._materials and not self._materials.contains(layer.material):
-                errors.append(f"Layer {i}: Material '{layer.material}' not found in material provider.")
-        return errors
+  @property
+  def group_dict(self) -> Dict[str, Any]:
+    return self._inner.group_dict
 
-    def get_solver_inputs(self) -> SolverArrays:
-        """Flatten the stack to engine arrays (nominal values, no errors)."""
-        if not self.layer_list: raise ValueError("Structure is empty.")
-        if self._materials is None: raise ValueError("No material provider set.")
-        return _LayerExpander.expand(((layer, False) for layer in self.layer_list), self._materials, self.group_dict, apply_errors=False)
+  @property
+  def layer_list(self) -> List[Any]:
+    return self._inner.layer_list
 
-    def get_error_solver_inputs(self, rng: Optional[np.random.Generator] = None) -> SolverArrays:
-        """Flatten the stack with group fabrication errors drawn (see Group)."""
-        if not self.layer_list: raise ValueError("Structure is empty.")
-        if self._materials is None: raise ValueError("No material provider set.")
-        return _LayerExpander.expand(((layer, False) for layer in self.layer_list), self._materials, self.group_dict, apply_errors=True, rng=rng)
+  # -- sequence protocol (live clones) ------------------------------------
+  def __len__(self) -> int:
+    return len(self._inner)
 
-    def generate_simple_layer_list(self) -> List[List[Any]]:
-        """Legacy [thickness, index, coherent, roughness, rough_type] rows."""
-        sa = self.get_solver_inputs()
-        self.simple_layer_list = [
-            [sa.thicknesses[i], sa.indices[i], not sa.incoherent_flags[i], sa.rough_vals[i], sa.rough_types[i]]
-            for i in range(sa.thicknesses.shape[0])
-        ]
-        return self.simple_layer_list
+  def __getitem__(self, index: int) -> Any:
+    return self._inner[index]
 
-    def get_state(self) -> Dict[str, Any]:
-        """Serialize layers, groups and materials to a plain dict."""
-        return {
-            "layers": [layer.get_state() for layer in self.layer_list],
-            "groups": {name: group.get_state() for name, group in self.group_dict.items()},
-        }
+  def __iter__(self):  # noqa: ANN204 (delegated iterator)
+    return iter(self._inner)
 
-    @classmethod
-    def from_state(cls, state: Dict[str, Any], materials: Optional[Union[MaterialProvider, Dict[str, Any]]] = None) -> "Navette_Structure":
-        """Rebuild a structure from :meth:`get_state` output."""
-        layers = [Layer.from_state(ls) for ls in state.get("layers", [])]
-        groups = {name: Group.from_state(gs) for name, gs in state.get("groups", {}).items()}
-        return cls(layer_list=layers, group_dict=groups, materials=materials)
+  def __bool__(self) -> bool:
+    return len(self) > 0
 
-    def clone(self) -> "Navette_Structure":
-        """Deep copy (layers, groups and provider state)."""
-        return Navette_Structure(
-            layer_list=[layer.clone() for layer in self.layer_list],
-            group_dict={name: group.clone() for name, group in self.group_dict.items()},
-            materials=self._materials,
-        )
+  # -- model API (delegated) ----------------------------------------------
+  def validate(self) -> List[str]:
+    return self._inner.validate()
 
-    def __len__(self) -> int: return len(self.layer_list)
-    def __getitem__(self, index: int) -> Layer: return self.layer_list[index]
-    def __iter__(self) -> Iterator[Layer]: return iter(self.layer_list)
-    def __bool__(self) -> bool: return len(self.layer_list) > 0
+  def get_solver_inputs(self) -> Any:
+    return self._inner.solver_inputs()
 
-    def total_physical_thickness(self) -> float: return sum(layer.thickness for layer in self.layer_list)
-    def get_optimization_parameters(self) -> List[Layer]: return [layer for layer in self.layer_list if layer.optimize]
-    
-    def replace_material(self, old_name: str, new_name: str) -> int:
-        count = 0
-        for layer in self.layer_list:
-            if layer.material == old_name:
-                layer.material = new_name
-                count += 1
-        return count
+  def get_error_solver_inputs(self, rng=None) -> Any:
+    return self._inner.error_inputs(rng)
 
-    def insert_layer(self, index: int, layer: Layer) -> None: self.layer_list.insert(index, layer)
-    def remove_layer(self, index: int) -> Layer: return self.layer_list.pop(index)
-    def replace_layer(self, index: int, new_layer: Layer) -> None: self.layer_list[index] = new_layer
+  def total_sub_layers(self) -> int:
+    return self._inner.total_sub_layers()
 
-    def prune_thin_layers(self, min_thickness: float = 0.001) -> int:
-        before = len(self.layer_list)
-        self.layer_list = [l for l in self.layer_list if l.thickness >= min_thickness]
-        return before - len(self.layer_list)
+  def bake_films(self) -> int:
+    return self._inner.bake_films()
 
-    def total_sub_layers(self) -> int:
-        total = 0
-        for i, layer in enumerate(self.layer_list):
-            total += layer.sub_layer_count if (layer.inhomogen and layer.sub_layer_count > 1) else 1
-            if layer.interface and i > 0: total += 1
-        return total
+  def bake_materials(self, wavelengths) -> Dict[str, str]:
+    wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
+    mapping, target = self._inner.bake_materials(wl)
+    _pour_back(mapping, target, self._inner.materials, wl)
+    return mapping
 
-    def find_layers_by_material(self, material_name: str) -> List[int]:
-        return [i for i, layer in enumerate(self.layer_list) if layer.material == material_name]
+  def replace_material(self, old_name: str, new_name: str) -> int:
+    return self._inner.replace_material(old_name, new_name)
 
-    def count_material(self, material_name: str) -> int:
-        return sum(1 for layer in self.layer_list if layer.material == material_name)
+  def get_group_for_material(self, material_name: str) -> Any:
+    return self._inner.get_group_for_material(material_name)
 
-    def apply_to_all_layers(self, func: callable) -> None:
-        for layer in self.layer_list: func(layer)
+  def get_state(self) -> Dict[str, Any]:
+    return self._inner.get_state()
 
-    def __add__(self, other: "Navette_Structure") -> "Navette_Structure":
-        new = self.clone()
-        new.layer_list.extend(other.clone().layer_list)
-        for name, group in other.group_dict.items():
-            if name in new.group_dict:
-                if new.group_dict[name].get_state() != group.get_state():
-                    raise ValueError(f"Group '{name}' defined differently. Cannot merge.")
-            else:
-                new.group_dict[name] = group
-        return new
+  @classmethod
+  def from_state(cls, state: Dict[str, Any], materials: Any = None) -> "Navette_Structure":
+    obj = cls.__new__(cls)
+    obj._inner = _RsStructure.from_state(state, materials)
+    return obj
 
-    def get_group_for_material(self, material_name: str) -> Group:
-        return self.group_dict.get(material_name, _DEFAULT_GROUP)
+  def clone(self) -> "Navette_Structure":
+    obj = self.__class__.__new__(self.__class__)
+    obj._inner = self._inner.clone()
+    return obj
 
-    def __contains__(self, material_name: str) -> bool:
-        return any(layer.material == material_name for layer in self.layer_list)
+  # -- GUI conveniences (restored) --------------------------------------
+  @property
+  def active_material_dict(self) -> Any:
+    """Alias of :attr:`materials` (legacy name)."""
+    return self.materials
 
-    def __repr__(self) -> str:
-        return f"Navette_Structure(layers={len(self.layer_list)}, groups={len(self.group_dict)})"
+  @active_material_dict.setter
+  def active_material_dict(self, value: Any) -> None:
+    self.materials = value
+
+  def find_layers_by_material(self, material_name: str) -> List[int]:
+    return [i for i, layer in enumerate(self._inner.layer_list)
+            if layer.material == material_name]
+
+  def count_material(self, material_name: str) -> int:
+    return len(self.find_layers_by_material(material_name))
+
+  def apply_to_all_layers(self, func) -> None:
+    """Call ``func(layer)`` on every layer, writing mutations back."""
+    for i in range(len(self._inner)):
+      layer = self._inner[i]
+      func(layer)
+      self._inner.replace_layer(i, layer)
+
+  def insert_layer(self, index: int, layer: Any) -> None:
+    self._inner.insert_layer(index, layer)
+
+  def remove_layer(self, index: int) -> Any:
+    return self._inner.remove_layer(index)
+
+  def replace_layer(self, index: int, new_layer: Any) -> None:
+    self._inner.replace_layer(index, new_layer)
+
+  def total_physical_thickness(self) -> float:
+    return sum(layer.thickness for layer in self._inner.layer_list)
+
+  def __contains__(self, material_name: str) -> bool:
+    return any(layer.material == material_name
+               for layer in self._inner.layer_list)
