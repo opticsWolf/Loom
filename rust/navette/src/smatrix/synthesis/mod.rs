@@ -32,4 +32,5 @@ pub mod stagnation;
 pub mod evaluator;
 pub mod cycle;
 pub mod design_config;
+pub mod driver;
 pub mod pipeline;

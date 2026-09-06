@@ -195,14 +195,18 @@ def run_needle(layers: Sequence[Tuple[Any, float]],
     Returns the native result dict (``termination``, ``final_mf``,
     ``phases``, final ``stack``).
     """
+    # Thin over native run_design: evaluate + key/flag shaping here,
+    # assembly + macro-loop in Rust. Contrast-key normalization stays
+    # (presentation over the film order).
+    from navette._smatrix import run_design as _run_design
     wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
     angs = np.ascontiguousarray(np.asarray(angles_deg, dtype=np.float64))
     names = stack_kwargs.pop("names", None)
     if names is None:
         names = [f"film{i}" for i in range(len(layers))]
-    # Normalize contrast keys to host material names: int index, "film{i}"
-    # strings, or names as given (unknown names match no host → no sites
-    # there, by design).
+    names = list(names)
+    if len(names) != len(layers):
+        raise ValueError("names length must match layers length.")
     def _host_key(k):
         if isinstance(k, bool):
             return str(k)
@@ -214,12 +218,63 @@ def run_needle(layers: Sequence[Tuple[Any, float]],
         if s.startswith("film") and s[4:].isdigit() and int(s[4:]) < len(names):
             return names[int(s[4:])]
         return s
-    cmap_in = {_host_key(k): v for k, v in contrast.items()}
-    stack, cmap = stack_from_layers(layers, wl, cmap_in, names=names,
-                                     **stack_kwargs)
+    ambient = stack_kwargs.pop("ambient", (1.0, "air"))
+    substrate = stack_kwargs.pop("substrate", (1.52, "sub"))
+    film_flags = stack_kwargs.pop("film_flags", None) or {}
+    groups = stack_kwargs.pop("groups", None) or {}
+    per_film_flags = stack_kwargs.pop("per_film_flags", None) or {}
+    if stack_kwargs:
+        raise TypeError(f"run_needle: unknown stack options {sorted(stack_kwargs)}.")
+    base = dict(coherent=True, optimize=True, needle=True,
+                roughness=0.0, rough_type=0, inhomogen=False, inh_delta=0.1,
+                interface=False, interface_thickness=0.0)
+    layer_keys = ("roughness", "rough_type", "interface", "interface_thickness")
+    if "rough_val" in film_flags:
+        film_flags = dict(film_flags)
+        base["roughness"] = film_flags.pop("rough_val")
+    for k in layer_keys:
+        if k in film_flags:
+            base[k] = film_flags[k]
+    rest_flags = {k: v for k, v in film_flags.items() if k not in layer_keys}
+    films = []
+    for (mat, d), nm in zip(layers, names):
+        fd = dict(base)
+        fd.update(rest_flags)
+        fd.update(dict(per_film_flags.get(nm, {})))
+        if "rough_val" in fd:
+            fd["roughness"] = fd.pop("rough_val")
+        films.append({
+            "name": str(nm), "nk": _eval_nk(mat, wl), "d_nm": float(d),
+            "coherent": bool(fd.get("coherent", True)),
+            "roughness": float(fd.get("roughness", 0.0)),
+            "rough_type": int(fd.get("rough_type", 0)),
+            "inhomogen": bool(fd.get("inhomogen", False)),
+            "inh_delta": float(fd.get("inh_delta", 0.1)),
+            "interface": bool(fd.get("interface", False)),
+            "interface_thickness": float(fd.get("interface_thickness", 0.0)),
+            "optimize": bool(fd.get("optimize", True)),
+            "needle": bool(fd.get("needle", True)),
+        })
+    from navette._structure import Group as _RsGroup
+    gmap = {}
+    for name, g in groups.items():
+        gmap[str(name)] = g if isinstance(g, _RsGroup) else _RsGroup(str(name), **dict(g))
+    seeds = []
+    for k, v in contrast.items():
+        host = _host_key(k)
+        seeds.append((host, f"{host}_seed", _eval_nk(v, wl)))
     spec = (_build_merit_spec(targets) if isinstance(targets, TargetCollection)
             else targets)
-    pipe = NeedlePipeline(stack, spec, angs, wl, cmap,
-                          pipeline_config=pipeline_config,
-                          needle_config=needle_config, lm=lm_config)
-    return pipe.run(callback=callback)
+    def _half_nk(value):
+        # Mirrors the old fixed() helper: constant indices broadcast.
+        if isinstance(value, (int, float, complex)):
+            return np.full(wl.shape, complex(value), dtype=np.complex128)
+        return _eval_nk(value, wl)
+    amb_nk = _half_nk(ambient[0])
+    sub_nk = _half_nk(substrate[0])
+    return _run_design(
+        amb_nk, str(ambient[1] if len(ambient) > 1 else "air"),
+        sub_nk, str(substrate[1] if len(substrate) > 1 else "sub"),
+        films, gmap, seeds, wl, angs, spec,
+        pipeline_config=pipeline_config, needle_config=needle_config,
+        lm=lm_config, callback=callback)
