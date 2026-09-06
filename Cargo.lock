@@ -279,6 +279,7 @@ dependencies = [
 name = "navette-smatrix"
 version = "0.3.0"
 dependencies = [
+ "navette-structure",
  "num-complex",
  "rayon",
 ]

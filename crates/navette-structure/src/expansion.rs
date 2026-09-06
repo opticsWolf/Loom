@@ -31,6 +31,9 @@ pub struct Span {
   pub start: usize,
   pub end: usize,
   pub logical: usize,
+  /// Row `start` is an interface slice (derived row: never a free
+  /// parameter, never a needle host). Set at emission time.
+  pub slice: bool,
 }
 
 /// Engine-ready arrays: row-major `indices` (`n_rows × n_wavelengths`).
@@ -182,6 +185,7 @@ pub fn expand(
     };
 
     let start = col_thick.len();
+    let mut emitted_slice = false;
 
     // Plane slice (flag owner's group governs summand + draws).
     if let Some(oi) = o {
@@ -220,6 +224,7 @@ pub fn expand(
           0.0,
           RoughnessType::None as i32,
         );
+        emitted_slice = true;
       }
     }
 
@@ -265,7 +270,7 @@ pub fn expand(
         rtype,
       );
     }
-    spans.push(Span { start, end: col_thick.len(), logical: k });
+    spans.push(Span { start, end: col_thick.len(), logical: k, slice: emitted_slice });
     bulk_spans.push((bulk_start, col_thick.len()));
 
     prev_eff_nk = Some(layer_nk);
@@ -406,11 +411,11 @@ mod tests {
     close_c(sa.row(1), &[2.35, 2.33], &[0.01, 0.008]);
     assert_eq!(sa.incoherent, vec![false; 3]);
     assert_eq!(sa.rough_types, vec![0; 3]);
-    assert_eq!(spans, vec![
-      Span { start: 0, end: 1, logical: 0 },
-      Span { start: 1, end: 2, logical: 1 },
-      Span { start: 2, end: 3, logical: 2 },
-    ]);
+    assert_eq!(
+      spans.iter().map(|s| (s.start, s.end, s.logical)).collect::<Vec<_>>(),
+      vec![(0, 1, 0), (1, 2, 1), (2, 3, 2)]
+    );
+    assert!(spans.iter().all(|s| !s.slice));
   }
 
   /// Oracle twin: scaling + slice + grading + roughness (Python FULL).
@@ -434,8 +439,9 @@ mod tests {
     g.roughness_summand = 1.0;
     g.interface_summand = 2.0;
     groups.insert("TiO2".to_string(), g);
-    let (sa, _) = expand(&layers, &mats(), &WL, &groups, ExpandOptions::deterministic()).unwrap();
+    let (sa, spans) = expand(&layers, &mats(), &WL, &groups, ExpandOptions::deterministic()).unwrap();
     assert_eq!(sa.n_rows(), 13);
+    assert!(spans[1].slice && spans[1].start == 1);
     let mut want_t = vec![0.0, 8.0];
     want_t.extend(vec![48.0 / 11.0; 11]);
     close(&sa.thicknesses, &want_t);

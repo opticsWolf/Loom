@@ -318,6 +318,9 @@ impl PyLayer {
   pub(crate) fn from_inner(inner: Layer) -> Self {
     Self { inner }
   }
+  pub(crate) fn inner_clone(&self) -> Layer {
+    self.inner.clone()
+  }
 }
 
 // ---- Group ----
@@ -633,6 +636,9 @@ impl PyGroup {
 impl PyGroup {
   pub(crate) fn from_inner(inner: Group) -> Self {
     Self { inner: Rc::new(RefCell::new(inner)) }
+  }
+  pub(crate) fn inner_clone(&self) -> Group {
+    self.inner.borrow().clone()
   }
 }
 
