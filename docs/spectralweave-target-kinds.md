@@ -249,3 +249,28 @@ $0.0$ for `r`), but the *slope* has a kink there. A needle step that
 crosses an edge is evaluated with the pre-step linearization and
 self-corrects on the next re-fold; persistent oscillation around an edge
 means the step size is too large — damp it.
+
+## Color demands (`ColorTarget`, v1)
+
+One demand = front R/T intensity curve × angle × illuminant × observer ×
+quantity × distance × weight. Defaults D65 + 1931 2°, all overridable;
+names (`"D65"`, `"1931_2deg"`) resolve to the embedded defaults, anything
+else must be an explicit table (no registry to drift).
+
+- **Quantities/distances:** Lab|XyY × DeltaE2000|DeltaE76|Channels, with
+  the compat matrix enforced at compile (XyY takes Channels only — DeltaE
+  is Lab-space). Lab white is always the demand illuminant's own white
+  (computed at compile from native tables, never adapted).
+- **Kinds/transforms:** `Exact` + `linear` only. No `integral` /
+  `count_norm` / `phase` / `band` — a color demand already is integral
+  (one residual per demand, not per wavelength).
+- **Merit path:** missing curve fails the whole key group (standard
+  missing-penalty path, parity with pointwise); empty table/sim overlap
+  errors instead of skipping (a demand that sees nothing is a spec bug).
+- **Needle fold (Option B):** each demand deposits its analytic gradient
+  g(point) = dF/dcurve (weight, residual, and the U-curve half included)
+  into the `grad_r`/`grad_t` buckets — not a (target, weight) pair. `Ru`
+  / `Tu` split half per polarization branch (Ru is the Rs/Rp mean); s/p
+  demands ride the shared bucket under the same convention as pointwise
+  targets. Zero points are skipped in the hot pass, so color-free sets
+  are bitwise unaffected.

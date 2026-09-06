@@ -121,6 +121,7 @@ def build_merit_spec(collection: TargetCollection,
     doc = {
         "spectral": [t._dump() for t in collection.spectral_targets],
         "angular": [t._dump() for t in collection.angular_targets],
+        "color": [t._dump() for t in collection.color_targets],
         "cache_size": int(cache_size), "tolerance_floor": float(tolerance_floor),
     }
     return _compile(_json.dumps(doc))

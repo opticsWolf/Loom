@@ -412,6 +412,106 @@ fn export_all(weaver: &TargetWeaver) -> Vec<Exported> {
   out
 }
 
+/// Validate + resolve one color demand (shared by `compile_merit_spec`
+/// and the fail-fast `validate_targets` hook — single validator, no
+/// duplication). `key_idx` is a placeholder (`u32::MAX`); the compile arm
+/// stamps the real key after validation (range-checked at intake).
+/// `pub` for the `validate_targets` binding only (same crate would be
+/// `pub(crate)`); allowlisted, entry point `validate_targets`.
+pub fn check_color_demand(t: &ColorTargetJson) -> Result<ColorDemand, String> {
+    match CurveId::from_str(&t.curve) {
+      Some(id) if id.is_back() => {
+        return Err(format!(
+          "color: back-incidence color is not supported yet (got {:?}).",
+          t.curve
+        ))
+      }
+      Some(id) if !id.is_absorption() => {}
+      _ => {
+        return Err(format!(
+          "color: color needs a front R/T intensity curve, got {:?}.",
+          t.curve
+        ))
+      }
+    };
+    if t.kind != "Exact" {
+      return Err(format!("color: only kind 'Exact' in v1, got {:?}.", t.kind));
+    }
+    if t.transform != "linear" {
+      return Err(format!(
+        "color: only transform 'linear' in v1, got {:?}.",
+        t.transform
+      ));
+    }
+    if t.integral {
+      return Err("color: 'integral' is refused (a color demand already is integral).".to_string());
+    }
+    if t.count_norm.is_some() {
+      return Err("color: 'count_norm' is refused (no double counting).".to_string());
+    }
+    if t.phase {
+      return Err("color: 'phase' is refused (intensity curves only).".to_string());
+    }
+    if t.band.is_some() {
+      return Err("color: 'band' is refused (no sub-range in a demand).".to_string());
+    }
+    check_weight(t.weight, "ColorTarget")?;
+    let quantity = match t.quantity.as_str() {
+      "Lab" => ColorQuantity::Lab,
+      "XyY" => ColorQuantity::XyY,
+      q => {
+        return Err(format!(
+          "color: unknown quantity {q:?} (P1 serves 'Lab'|'XyY')."
+        ))
+      }
+    };
+    let distance = match t.distance.as_str() {
+      "DeltaE2000" => ColorDistance::DeltaE2000,
+      "DeltaE76" => ColorDistance::DeltaE76,
+      "Channels" => ColorDistance::Channels,
+      d => {
+        return Err(format!(
+          "color: unknown distance {d:?} (one of 'DeltaE2000'|'DeltaE76'|'Channels')."
+        ))
+      }
+    };
+    let reference = match &t.reference {
+      ReferenceJson::Valid(r) => r.clone(),
+      ReferenceJson::Other(v) => {
+        return Err(format!(
+          "color: reference must be a [3] triple (scalar for 'Y'), got {v}."
+        ))
+      }
+    };
+    let (illum_wl, illum) = match &t.illuminant {
+      IllumJson::Name(n) if n == "D65" => {
+        let d = default_tables();
+        (d.illum_wl.clone(), d.illum.clone())
+      }
+      IllumJson::Name(n) => {
+        return Err(format!(
+          "color: unknown illuminant {n:?} (supported names: 'D65'; or pass an explicit table)."
+        ))
+      }
+      IllumJson::Table(tab) => (tab.wavelengths.clone(), tab.values.clone()),
+    };
+    let (cmf_wl, cmf) = match &t.observer {
+      CmfJson::Name(n) if n == "1931_2deg" => {
+        let d = default_tables();
+        (d.cmf_wl.clone(), d.cmf_xyz.clone())
+      }
+      CmfJson::Name(n) => {
+        return Err(format!(
+          "color: unknown observer {n:?} (supported names: '1931_2deg'; or pass an explicit table)."
+        ))
+      }
+      CmfJson::Table(tab) => (tab.wavelengths.clone(), tab.xyz.clone()),
+    };
+    ColorDemand::new(
+      u32::MAX, cmf, cmf_wl, illum, illum_wl, quantity, reference, distance, t.weight,
+    )
+}
+
 /// Compile a [`TargetSet`] into a native `MeritSpec`.
 pub fn compile_merit_spec(set: &TargetSet) -> Result<MeritSpec, String> {
   let weaver = TargetWeaver::new(set.cache_size, set.tolerance_floor);
@@ -574,98 +674,12 @@ pub fn compile_merit_spec(set: &TargetSet) -> Result<MeritSpec, String> {
   }
   // Color demands (after spectral/angular — same key registry, so a color
   // demand on a shared (angle, curve) group dedupes by content).
+  // Full validation first (curve vocabulary included): the get_key expect
+  // below is provably safe afterwards.
   for t in &set.color {
-    match CurveId::from_str(&t.curve) {
-      Some(id) if id.is_back() => {
-        return Err(format!(
-          "color: back-incidence color is not supported yet (got {:?}).",
-          t.curve
-        ))
-      }
-      Some(id) if !id.is_absorption() => {}
-      _ => {
-        return Err(format!(
-          "color: color needs a front R/T intensity curve, got {:?}.",
-          t.curve
-        ))
-      }
-    };
-    if t.kind != "Exact" {
-      return Err(format!("color: only kind 'Exact' in v1, got {:?}.", t.kind));
-    }
-    if t.transform != "linear" {
-      return Err(format!(
-        "color: only transform 'linear' in v1, got {:?}.",
-        t.transform
-      ));
-    }
-    if t.integral {
-      return Err("color: 'integral' is refused (a color demand already is integral).".to_string());
-    }
-    if t.count_norm.is_some() {
-      return Err("color: 'count_norm' is refused (no double counting).".to_string());
-    }
-    if t.phase {
-      return Err("color: 'phase' is refused (intensity curves only).".to_string());
-    }
-    if t.band.is_some() {
-      return Err("color: 'band' is refused (no sub-range in a demand).".to_string());
-    }
-    check_weight(t.weight, "ColorTarget")?;
-    let quantity = match t.quantity.as_str() {
-      "Lab" => ColorQuantity::Lab,
-      "XyY" => ColorQuantity::XyY,
-      q => {
-        return Err(format!(
-          "color: unknown quantity {q:?} (P1 serves 'Lab'|'XyY')."
-        ))
-      }
-    };
-    let distance = match t.distance.as_str() {
-      "DeltaE2000" => ColorDistance::DeltaE2000,
-      "DeltaE76" => ColorDistance::DeltaE76,
-      "Channels" => ColorDistance::Channels,
-      d => {
-        return Err(format!(
-          "color: unknown distance {d:?} (one of 'DeltaE2000'|'DeltaE76'|'Channels')."
-        ))
-      }
-    };
-    let reference = match &t.reference {
-      ReferenceJson::Valid(r) => r.clone(),
-      ReferenceJson::Other(v) => {
-        return Err(format!(
-          "color: reference must be a [3] triple (scalar for 'Y'), got {v}."
-        ))
-      }
-    };
-    let (illum_wl, illum) = match &t.illuminant {
-      IllumJson::Name(n) if n == "D65" => {
-        let d = default_tables();
-        (d.illum_wl.clone(), d.illum.clone())
-      }
-      IllumJson::Name(n) => {
-        return Err(format!(
-          "color: unknown illuminant {n:?} (supported names: 'D65'; or pass an explicit table)."
-        ))
-      }
-      IllumJson::Table(tab) => (tab.wavelengths.clone(), tab.values.clone()),
-    };
-    let (cmf_wl, cmf) = match &t.observer {
-      CmfJson::Name(n) if n == "1931_2deg" => {
-        let d = default_tables();
-        (d.cmf_wl.clone(), d.cmf_xyz.clone())
-      }
-      CmfJson::Name(n) => {
-        return Err(format!(
-          "color: unknown observer {n:?} (supported names: '1931_2deg'; or pass an explicit table)."
-        ))
-      }
-      CmfJson::Table(tab) => (tab.wavelengths.clone(), tab.xyz.clone()),
-    };
+    let mut demand = check_color_demand(t)?;
     let ki = get_key(&mut spec, t.angle, &t.curve);
-    let demand =
-      ColorDemand::new(ki, cmf, cmf_wl, illum, illum_wl, quantity, reference, distance, t.weight)?;
+    demand.key_idx = ki;
     spec
       .add_color_demand(demand)
       .map_err(|e| format!("compile_merit_spec: {e}"))?;
@@ -863,5 +877,20 @@ mod tests {
     )
     .unwrap();
     assert_eq!(d.white, white);
+  }
+
+  #[test]
+  fn color_target_set_json_roundtrips() {
+    // Serialize -> parse -> compile: same demands, same white (schema v1
+    // carries color demands without loss).
+    let set = color_set();
+    let text = serde_json::to_string(&set).unwrap();
+    let back: TargetSet = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.color.len(), 1);
+    let a = compile_merit_spec(&set).unwrap();
+    let b = compile_merit_spec(&back).unwrap();
+    assert_eq!(a.color_demands().len(), b.color_demands().len());
+    assert_eq!(a.color_demands()[0].white, b.color_demands()[0].white);
+    assert_eq!(a.n_residuals(), b.n_residuals());
   }
 }

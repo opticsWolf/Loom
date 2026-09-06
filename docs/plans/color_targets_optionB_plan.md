@@ -341,7 +341,19 @@ kernel first) would touch every arm twice.
     convention — no new error class). The planned s-only-branch test was
     replaced by branch-additivity (branch gating is out of scope).
     318+22+15 Rust, exposure 206/92, 334 green, refold bench OK.
-  - 0.4.26: D6+D7 Python surface + docs + R5 tests.
+  - 0.4.26: D6+D7 Python surface + docs + R5 tests. DONE 2026-09-06
+    (dev): `ColorTarget` (frozen, `_dump` + native `__post_init__` check) +
+    `TargetCollection.color_targets` + `build_merit_spec` color section +
+    `validate_targets` color arm via shared `check_color_demand` (cross-
+    crate `pub` + allowlisted); target-kinds doc color section. R5: 5
+    Python tests (refusal mirroring, passthrough dump, collection+compile,
+    JSON roundtrip HEX, named-vs-explicit HEX) + 1 Rust roundtrip test.
+    DEVIATIONS: (1) `_dump` passes names through (no 471-pt bake into docs;
+    embedded resolution is sync-guarded identical — proven HEX-equal);
+    (2) no program-document roundtrip — program schema carries no targets
+    section (TargetSet JSON roundtrip instead); (3) `check_color_demand`
+    is `pub` (navette-py is a separate crate) + allowlisted.
+    319+22+15 Rust, exposure 207/93, 339 green.
 - **P2 — extended quantities (0.4.27):** LCh + Oklab + Y-scalar through
   all arms in one patch: scalar-`reference` JSON shape, §D2 compat
   matrix, hue-wrap, Oklab D65-adapt rule. New twins: LCh-Channels vs

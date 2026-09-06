@@ -107,6 +107,13 @@ pub(crate) fn validate_targets(request_json: &str) -> PyResult<()> {
       t.kind.as_str(),
     )?;
   }
+  // Color demands: full single-validator check (curve vocabulary, compat
+  // matrix, table resolution) — key stamped at compile, unchecked here.
+  for t in &set.color {
+    navette::smatrix::synthesis::targets::check_color_demand(t)
+      .map(|_| ())
+      .map_err(PyValueError::new_err)?;
+  }
   Ok(())
 }
 

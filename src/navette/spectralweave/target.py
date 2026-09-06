@@ -164,7 +164,93 @@ class AngularTarget:
         object.__setattr__(self, 'band', band)
         _validate(_json.dumps({"spectral": [], "angular": [self._dump()]}))
 
-BaseTarget = Union[SpectralTarget, AngularTarget]
+ColorQuantity = Literal["Lab", "XyY", "LCh", "Oklab", "Y"]
+ColorDistance = Literal["DeltaE2000", "DeltaE76", "Channels"]
+
+
+@dataclass(slots=True, frozen=True)
+class ColorTarget:
+    """One colorimetric demand: front R/T intensity curve at fixed angle,
+    integrated against an illuminant x observer pair.
+
+    Defaults are D65 + 1931 2 deg; every field is overridable. ``reference``
+    is a triple (e.g. Lab ``(62, 18, -34)``) — or a scalar for quantity
+    ``"Y"`` (P2); mismatched shapes are refused natively. ``illuminant`` /
+    ``observer`` are ``"D65"`` / ``"1931_2deg"`` or explicit table dicts
+    (``{"wavelengths", "values"}`` / ``{"wavelengths", "xyz"}``);
+    unknown names are refused natively (no registry to drift).
+    Lab white point is always the demand illuminant's own white.
+    v1 limits (all refused natively with named messages): front R/T curves
+    only (no back, no absorption/phase curves), kind ``"Exact"`` only,
+    ``"linear"`` only, quantities Lab|XyY x DeltaE2000|DeltaE76|Channels
+    (XyY takes Channels only — DeltaE is Lab-space). No ``integral`` /
+    ``count_norm`` / ``phase`` / ``band`` — a color demand already is
+    integral. ``weight`` scales the demand's merit sum (default 1).
+    Needle note: ``Ru``/``Tu`` demands split half per polarization branch
+    (Ru is the Rs/Rp mean); s/p demands ride their shared bucket, same
+    convention as pointwise targets — see
+    ``docs/plans/color_targets_optionB_plan.md`` D5.
+    All checks run natively, once, via validate_targets (single validator,
+    no duplication) — shaping here is normalization only.
+    """
+    curve:        str = "Ru"
+    angle:        float = 0.0
+    illuminant:   Union[str, dict] = "D65"
+    observer:     Union[str, dict] = "1931_2deg"
+    quantity:     str = "Lab"
+    reference:    Union[tuple, list, float] = (62.0, 18.0, -34.0)
+    distance:     str = "DeltaE2000"
+    weight:       float = 1.0
+    kind:         str = "Exact"
+    transform:    str = "linear"
+
+    def _dump(self) -> dict:
+        return {
+            "curve": str(self.curve), "angle": float(self.angle),
+            "illuminant": _dump_table(self.illuminant, "illuminant"),
+            "observer": _dump_table(self.observer, "observer"),
+            "quantity": str(self.quantity),
+            "reference": _dump_reference(self.reference),
+            "distance": str(self.distance),
+            "weight": float(self.weight) if isinstance(self.weight, (int, float)) else self.weight,
+            "kind": str(self.kind), "transform": str(self.transform),
+        }
+
+    def __post_init__(self) -> None:
+        from navette._structure import validate_targets as _validate
+        import json as _json
+        _validate(_json.dumps({"spectral": [], "angular": [], "color": [self._dump()]}))
+
+
+def _dump_table(spec: Union[str, dict], role: str):
+    """Name passthrough (native resolves ``D65``/``1931_2deg`` from the
+    embedded defaults) or explicit table dict with array normalization.
+    No rule checks here — the native validator owns them."""
+    if isinstance(spec, str):
+        return spec
+    if isinstance(spec, dict):
+        out = {}
+        for key, value in spec.items():
+            if isinstance(value, np.ndarray):
+                value = np.ascontiguousarray(np.asarray(value, dtype=np.float64)).ravel().tolist()
+            out[key] = value
+        return out
+    return spec
+
+
+def _dump_reference(ref: Union[tuple, list, float]):
+    """Triple -> [f, f, f], scalar -> float; anything else passes through
+    for the native validator to refuse with a named message."""
+    if isinstance(ref, bool):
+        return ref
+    if isinstance(ref, (int, float)):
+        return float(ref)
+    if isinstance(ref, (tuple, list)):
+        return [float(v) for v in ref]
+    return ref
+
+
+BaseTarget = Union[SpectralTarget, AngularTarget, ColorTarget]
 
 # ---------------------------------------------------------------------------
 # 2. TargetCollection (lightweight, standalone)
@@ -176,20 +262,25 @@ class TargetCollection:
     """
     _spectral_targets: list[SpectralTarget] = field(default_factory=list)
     _angular_targets:  list[AngularTarget]  = field(default_factory=list)
+    _color_targets:    list[ColorTarget]    = field(default_factory=list)
 
     def add(self, target: BaseTarget) -> None:
-        """Append a :class:`SpectralTarget` or :class:`AngularTarget`."""
+        """Append a :class:`SpectralTarget`, :class:`AngularTarget`, or
+        :class:`ColorTarget`."""
         if isinstance(target, SpectralTarget):
             self._spectral_targets.append(target)
         elif isinstance(target, AngularTarget):
             self._angular_targets.append(target)
+        elif isinstance(target, ColorTarget):
+            self._color_targets.append(target)
         else:
             raise TypeError(f"Unsupported target type: {type(target)}")
 
     def clear(self) -> None:
-        """Remove all spectral and angular targets."""
+        """Remove all spectral, angular, and color targets."""
         self._spectral_targets.clear()
         self._angular_targets.clear()
+        self._color_targets.clear()
 
     @property
     def spectral_targets(self) -> list[SpectralTarget]:
@@ -202,9 +293,14 @@ class TargetCollection:
         return self._angular_targets
 
     @property
+    def color_targets(self) -> list[ColorTarget]:
+        """The ingested colorimetric demands."""
+        return self._color_targets
+
+    @property
     def count(self) -> int:
-        """Total number of spectral plus angular targets."""
-        return len(self._spectral_targets) + len(self._angular_targets)
+        """Total number of spectral plus angular plus color targets."""
+        return len(self._spectral_targets) + len(self._angular_targets) + len(self._color_targets)
 
     def build_weaver(self, cache_size: int = 128, tolerance_floor: float = 1e-12) -> TargetWeaver:
         """

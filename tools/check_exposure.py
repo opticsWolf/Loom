@@ -30,6 +30,8 @@ ALLOWLIST = {
     "p_coherent_phi_from_fields", "p_coherent_rb_from_fields",
     # Option-B color gradient buckets (via run_needle_pass hot pass)
     "p_coherent_grad_r_from_fields", "p_coherent_grad_t_from_fields",
+    # color demand validator (via validate_targets binding)
+    "check_color_demand",
     "p_coherent_t_from_fields", "p_coherent_tb_from_fields",
     "p_function", "p_function_multiblock", "p_multiblock_point",
     "partition_blocks", "phase_dispersion_sensitivity", "spacer_tau",
