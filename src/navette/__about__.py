@@ -8,7 +8,7 @@ __description__: Final[str] = (
   "A high-performance optical engine utilizing a Scattering Matrix "
   "algorithm for stable simulation of light in stratified media."
 )
-__version__: Final[str] = "0.4.19"
+__version__: Final[str] = "0.4.20"
 __author__: Final[str] = "opticsWolf"
 __license__: Final[str] = "LGPL-3.0-or-later"
 __copyright__: Final[str] = "Copyright (c) 2026 opticsWolf"

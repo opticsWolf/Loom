@@ -1018,8 +1018,8 @@ fn program_to_dict(
     .ok_or_else(|| PyValueError::new_err("load_program: missing materials"))?
     .extract()?;
   let structures = PyDict::new(py);
-  for (label, st) in prog.structures {
-    let shared: SharedStructure = std::rc::Rc::new(std::cell::RefCell::new(st));
+  for (label, shared) in prog.structures {
+    // Reuse the shared handle: architect blocks alias these same cores.
     structures.set_item(
       label,
       PyStructure { inner: shared, materials: Some(mats.clone_ref(py)) },
@@ -1156,11 +1156,13 @@ fn load_architect_section(
   prefix: Option<String>,
 ) -> PyResult<Py<PyArchitect>> {
   let v = json_value(payload)?;
-  let map: HashMap<String, navette::structure::Structure> = structures
+  // Pass the live shared handles: blocks alias the caller's structures.
+  let map: HashMap<String, SharedStructure> = structures
     .iter()
-    .map(|(k, s)| (k.clone(), s.bind(py).borrow().inner.borrow().clone()))
+    .map(|(k, s)| (k.clone(), s.bind(py).borrow().inner.clone()))
     .collect();
-  let arch = ver(navette::config::load_architect(&v, &map, prefix.as_deref()))?;
+  let arch =
+    ver(navette::config::load_architect_shared(&v, &map, prefix.as_deref()))?;
   Ok(Py::new(py, PyArchitect { inner: arch, materials: None })?)
 }
 

@@ -99,3 +99,31 @@ def test_legacy_flat_files(tmp_path):
   prog = load_program(str(q), WL,
                       context={"materials": P.load_materials(flat_mat["materials"], WL)})
   assert set(prog.structures) == {"stack"}
+
+
+def _assert_shared_blocks(prog, label):
+  named = prog.structures[label]
+  block_shell = prog.architect.blocks[0].structure
+  assert block_shell._inner.core_id() == named._inner.core_id()
+  # Edits propagate through the shared handle.
+  before = prog.architect.get_global_layer_count()
+  named._inner.append_layer(named._inner.layer_list[0])
+  try:
+    assert prog.architect.get_global_layer_count() == before + 1
+  finally:
+    named._inner.remove_layer(len(named._inner.layer_list) - 1)
+
+
+def test_restored_blocks_alias_structures():
+  # Whole-document native path.
+  _assert_shared_blocks(load_program(EXAMPLE, WL), "ar")
+
+
+def test_context_path_blocks_alias_structures():
+  # Section-wise context path keeps the same invariant.
+  from navette.config.program import load_materials
+  kind, name, payload = load_document(EXAMPLE)
+  mats = load_materials(payload["materials"] if kind == "program"
+                        else payload, WL)
+  prog = load_program(EXAMPLE, WL, context={"materials": mats})
+  _assert_shared_blocks(prog, "ar")

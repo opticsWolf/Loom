@@ -18,7 +18,7 @@ use crate::smatrix::synthesis::design_config::{
 };
 use crate::structure::{
   Architect, BlockKind, Entry, Group, Layer, LayerType, MaterialProvider, SharedGroup,
-  SpecProvider, Structure,
+  SharedStructure, SpecProvider, Structure,
 };
 
 /// Program envelope version (single canonical gate).
@@ -205,7 +205,9 @@ pub struct LoadedProgram {
   pub name: Option<String>,
   pub materials: Option<SpecProvider>,
   pub groups: HashMap<String, Group>,
-  pub structures: HashMap<String, crate::structure::Structure>,
+  /// Named structures as shared handles: architect blocks built by
+  /// [`load_program_parts`] alias these (edits propagate both ways).
+  pub structures: HashMap<String, SharedStructure>,
   pub architect: Option<Architect>,
 }
 
@@ -431,6 +433,9 @@ fn assemble_named(
   Ok(Structure { layers, groups: merged })
 }
 
+/// Native `Architect` over shared handles: blocks alias the map entries
+/// (shared-block invariant — matches the live-composition path).
+///
 /// Native `Architect`: blocks reference `structures` by label.
 pub fn load_architect(
   payload: &Value,
@@ -457,6 +462,38 @@ pub fn load_architect(
     let label = if b.label.is_empty() { b.label.clone() } else { px(&b.label, prefix) };
     arch
       .add_structure(st.clone(), b.inverted, b.repeat_count as usize, label, kind)
+      .map_err(|e| format!("architect block {i}: {e}"))?;
+  }
+  Ok(arch)
+}
+
+/// Shared-handle variant of [`load_architect`] for whole-program restore:
+/// blocks alias the structures-map entries (edits propagate both ways).
+pub fn load_architect_shared(
+  payload: &Value,
+  structures: &HashMap<String, SharedStructure>,
+  prefix: Option<&str>,
+) -> Result<Architect, String> {
+  let blocks: Vec<Value> = payload
+    .get("blocks")
+    .and_then(|v| v.as_array())
+    .ok_or_else(|| "architect section needs 'blocks'.".to_string())?
+    .clone();
+  let mut arch = Architect::new();
+  for (i, raw) in blocks.iter().enumerate() {
+    let b: BlockCfg = from_json(raw, "block")?;
+    let target = px(&b.structure, prefix);
+    let st = structures.get(&target).ok_or_else(|| {
+      format!("architect block {i}: unknown structure label '{target}'.")
+    })?;
+    if b.repeat_count < 1 {
+      return Err(format!("architect block {i}: repeat_count must be >= 1."));
+    }
+    let kind = BlockKind::try_from_i32(b.kind)
+      .map_err(|e| format!("architect block {i}: {e}"))?;
+    let label = if b.label.is_empty() { b.label.clone() } else { px(&b.label, prefix) };
+    arch
+      .add_shared(st.clone(), b.inverted, b.repeat_count as usize, label, kind)
       .map_err(|e| format!("architect block {i}: {e}"))?;
   }
   Ok(arch)
@@ -511,6 +548,9 @@ fn load_program_parts(
     prog.groups = load_groups(items, prefix)?;
   }
   let provider = prog.materials.as_ref().map(|p| p as &dyn MaterialProvider);
+  // Wrap named structures as shared handles FIRST so architect blocks
+  // below alias the same cores (shared-block invariant).
+  let share = |st: Structure| SharedStructure::new(std::cell::RefCell::new(st));
 
   if kind == "structure" {
     let label = payload
@@ -519,25 +559,27 @@ fn load_program_parts(
       .unwrap_or("stack");
     prog.structures.insert(
       px(label, prefix),
-      load_structure(payload, provider, &prog.groups, prefix)?,
+      share(load_structure(payload, provider, &prog.groups, prefix)?),
     );
   } else if let Some(items) = sections.get("structures") {
-    prog.structures = load_named_structures(items, provider, &prog.groups, prefix)?;
+    for (label, st) in load_named_structures(items, provider, &prog.groups, prefix)? {
+      prog.structures.insert(label, share(st));
+    }
   }
 
   if kind == "architect" {
     if payload.get("structures").is_none() {
       return Err("standalone architect document needs 'structures' + 'blocks'.".to_string());
     }
-    prog.structures = load_named_structures(
-      &payload["structures"],
-      provider,
-      &prog.groups,
-      prefix,
-    )?;
+    for (label, st) in
+      load_named_structures(&payload["structures"], provider, &prog.groups, prefix)?
+    {
+      prog.structures.insert(label, share(st));
+    }
   }
   if let Some(arch_payload) = sections.get("architect") {
-    prog.architect = Some(load_architect(arch_payload, &prog.structures, prefix)?);
+    prog.architect =
+      Some(load_architect_shared(arch_payload, &prog.structures, prefix)?);
   }
   Ok(prog)
 }
@@ -600,10 +642,22 @@ mod tests {
     assert_eq!(prog.name.as_deref(), Some("demo"));
     assert!(prog.materials.as_ref().unwrap().contains("L"));
     assert!(prog.groups.contains_key("H"));
-    assert_eq!(prog.structures["main"].layers.len(), 2);
+    assert_eq!(prog.structures["main"].borrow().layers.len(), 2);
     let arch = prog.architect.unwrap();
     assert_eq!(arch.blocks.len(), 1);
     assert_eq!(arch.blocks[0].repeat_count, 2);
+  }
+
+  #[test]
+  fn blocks_alias_named_structures() {
+    let prog = load_program_json(&program_json(), &grid()).unwrap();
+    let arch = prog.architect.as_ref().unwrap();
+    let shared = &arch.blocks[0].structure;
+    let named = prog.structures.get("main").unwrap();
+    assert!(std::rc::Rc::ptr_eq(shared, named));
+    // Edits propagate both ways through the shared handle.
+    named.borrow_mut().layers.pop();
+    assert_eq!(arch.blocks[0].structure.borrow().layers.len(), 1);
   }
 
   #[test]
