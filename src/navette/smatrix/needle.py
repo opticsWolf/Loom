@@ -42,7 +42,6 @@ import numpy as np
 # --- compiled Rust extension -------------------------------------------------
 try:
     from navette._smatrix import (
-        needle_engine as _rs_needle_engine,
         NREQ_P as _NREQ_P,
         NREQ_P_MB as _NREQ_P_MB,
         NREQ_P_T as _NREQ_P_T,
@@ -191,97 +190,48 @@ def needle_gradient(
         ``dgdd_p``, ... depending on ``request`` and ``pol``; each shaped
         ``(n_angles, n_wavs, n_depths)``.
     """
+    # Thin over the native Solver: normalization, the parallel sweep and
+    # the gain shift live in Rust; only the result reshape stays here.
     if pol not in ("s", "p", "sp"):
         raise ValueError("pol must be 's', 'p', or 'sp'.")
-    req = int(request)
-    if req == 0:
-        raise ValueError("Empty request mask.")
 
-    n_wavs, n_angles, n_layers = stack.n_wavs, stack.n_angles, stack.n_layers
-    total_points = n_angles * n_wavs
-
-    z = np.ascontiguousarray(z_grid, dtype=np.float64).ravel()
-    if z.size == 0:
-        raise ValueError("`z_grid` must be non-empty.")
-
-    npw = np.broadcast_to(np.asarray(needle_n, dtype=np.complex128), (n_wavs,))
-    npw = np.ascontiguousarray(npw)
-
-    def _per_point(value, name, dtype):
+    def _vec(value, dtype):
         if value is None:
             return None
-        arr = np.asarray(value, dtype=dtype).ravel()
-        if arr.size == 1:
-            arr = np.full(total_points, arr[0], dtype=dtype)
-        elif arr.size != total_points:
-            raise ValueError(
-                f"`{name}` must be a scalar or have n_angles*n_wavs = "
-                f"{total_points} entries (angle-major); got {arr.size}."
-            )
-        return np.ascontiguousarray(arr)
+        return np.ascontiguousarray(np.asarray(value, dtype=dtype).ravel())
 
-    tgt = _per_point(targets_r, "targets_r", np.float64)
-    wgt = _per_point(weights_r, "weights_r", np.float64)
-    tgt_t = _per_point(targets_t, "targets_t", np.float64)
-    wgt_t = _per_point(weights_t, "weights_t", np.float64)
-    tgt_a = _per_point(targets_a, "targets_a", np.float64)
-    wgt_a = _per_point(weights_a, "weights_a", np.float64)
-    tgt_phi = _per_point(targets_phi, "targets_phi", np.float64)
-    wgt_phi = _per_point(weights_phi, "weights_phi", np.float64)
-    tgt_tb = _per_point(targets_tb, "targets_tb", np.float64)
-    wgt_tb = _per_point(weights_tb, "weights_tb", np.float64)
-    tgt_rb = _per_point(targets_rb, "targets_rb", np.float64)
-    wgt_rb = _per_point(weights_rb, "weights_rb", np.float64)
-    tgt_ab = _per_point(targets_ab, "targets_ab", np.float64)
-    wgt_ab = _per_point(weights_ab, "weights_ab", np.float64)
-    mask = None if host_mask is None else np.ascontiguousarray(
-        np.asarray(host_mask, dtype=bool).ravel()
+    z = np.ascontiguousarray(z_grid, dtype=np.float64).ravel()
+    npw = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(needle_n, dtype=np.complex128), (stack.n_wavs,))
     )
-
-    if (req & NeedleRequest.P_MB) and not np.any(stack.incoherent_flags):
-        pass  # legal: all-coherent flags reduce exactly onto the P path
-
-    out = _rs_needle_engine(
-        stack.wavls,
-        stack.sin_theta,
-        int(n_layers),
-        stack._n_stack_cache,
-        stack.thicknesses,
-        stack.roughness_types,
-        stack.roughness_values,
-        npw,
-        z,
-        req,
-        stack.incoherent_flags if (req & (NeedleRequest.P_MB | NeedleRequest.P_MB_T | NeedleRequest.P_MB_A | NeedleRequest.P_MB_TB | NeedleRequest.P_MB_RB | NeedleRequest.P_MB_AB)) else None,
-        tgt,
-        wgt,
-        tgt_t,
-        wgt_t,
-        tgt_a,
-        wgt_a,
-        tgt_phi,
-        wgt_phi,
-        tgt_tb,
-        wgt_tb,
-        tgt_rb,
-        wgt_rb,
-        tgt_ab,
-        wgt_ab,
-        int(start_idx),
-        None if end_idx is None else int(end_idx),
-        int(channel),
-        pol != "p",
-        pol != "s",
-        mask,
+    out = stack._native.needle_gradient(
+        npw, z, int(request),
+        incoherent_flags=np.ascontiguousarray(stack.incoherent_flags),
+        targets_r=_vec(targets_r, np.float64),
+        weights_r=_vec(weights_r, np.float64),
+        targets_t=_vec(targets_t, np.float64),
+        weights_t=_vec(weights_t, np.float64),
+        targets_a=_vec(targets_a, np.float64),
+        weights_a=_vec(weights_a, np.float64),
+        targets_phi=_vec(targets_phi, np.float64),
+        weights_phi=_vec(weights_phi, np.float64),
+        targets_tb=_vec(targets_tb, np.float64),
+        weights_tb=_vec(weights_tb, np.float64),
+        targets_rb=_vec(targets_rb, np.float64),
+        weights_rb=_vec(weights_rb, np.float64),
+        targets_ab=_vec(targets_ab, np.float64),
+        weights_ab=_vec(weights_ab, np.float64),
+        start_idx=int(start_idx),
+        end_idx=None if end_idx is None else int(end_idx),
+        channel=int(channel),
+        calc_s=pol != "p",
+        calc_p=pol != "s",
+        host_mask=None if host_mask is None else np.ascontiguousarray(
+            np.asarray(host_mask, dtype=bool).ravel()),
+        gain_shift_phi=float(gain_shift_phi),
     )
-
     # Reshape flat [n_points, n_z] buffers into (n_angles, n_wavs, n_depths).
-    nz = z.size
-    reshaped = {
-        k: np.asarray(v).reshape(n_angles, n_wavs, nz) for k, v in out.items()
+    return {
+        k: np.asarray(v).reshape(stack.n_angles, stack.n_wavs, z.size)
+        for k, v in out.items()
     }
-    if gain_shift_phi:
-        for kk in list(reshaped):
-            if kk.startswith("P_PHI"):
-                reshaped[kk] = reshaped[kk] - float(gain_shift_phi)
-    return reshaped

@@ -177,7 +177,83 @@ impl PySolver {
     fn n_wavs(&self) -> usize {
         self.inner.n_wavs()
     }
-}
+    #[pyo3(signature = (needle_n_per_wav, z_grid, requested, incoherent_flags=None, targets_r=None, weights_r=None, targets_t=None, weights_t=None, targets_a=None, weights_a=None, targets_phi=None, weights_phi=None, targets_tb=None, weights_tb=None, targets_rb=None, weights_rb=None, targets_ab=None, weights_ab=None, start_idx=0, end_idx=None, channel=0, calc_s=true, calc_p=true, host_mask=None, gain_shift_phi=0.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn needle_gradient(
+        &self,
+        py: Python<'_>,
+        needle_n_per_wav: PyReadonlyArray1<Complex64>,
+        z_grid: PyReadonlyArray1<f64>,
+        requested: u64,
+        incoherent_flags: Option<PyReadonlyArray1<i32>>,
+        targets_r: Option<PyReadonlyArray1<f64>>,
+        weights_r: Option<PyReadonlyArray1<f64>>,
+        targets_t: Option<PyReadonlyArray1<f64>>,
+        weights_t: Option<PyReadonlyArray1<f64>>,
+        targets_a: Option<PyReadonlyArray1<f64>>,
+        weights_a: Option<PyReadonlyArray1<f64>>,
+        targets_phi: Option<PyReadonlyArray1<f64>>,
+        weights_phi: Option<PyReadonlyArray1<f64>>,
+        targets_tb: Option<PyReadonlyArray1<f64>>,
+        weights_tb: Option<PyReadonlyArray1<f64>>,
+        targets_rb: Option<PyReadonlyArray1<f64>>,
+        weights_rb: Option<PyReadonlyArray1<f64>>,
+        targets_ab: Option<PyReadonlyArray1<f64>>,
+        weights_ab: Option<PyReadonlyArray1<f64>>,
+        start_idx: usize,
+        end_idx: Option<usize>,
+        channel: usize,
+        calc_s: bool,
+        calc_p: bool,
+        host_mask: Option<PyReadonlyArray1<bool>>,
+        gain_shift_phi: f64,
+    ) -> PyResult<Py<PyDict>> {
+        let opt = |o: &Option<PyReadonlyArray1<f64>>| -> PyResult<Option<Vec<f64>>> {
+            o.as_ref()
+                .map(|a| a.as_slice().map(|v| v.to_vec()).map_err(|e| e.into()))
+                .transpose()
+        };
+        let t = |o: &Option<PyReadonlyArray1<f64>>| opt(o).unwrap();
+        let (npn, zg) = (
+            needle_n_per_wav.as_slice()?.to_vec(),
+            z_grid.as_slice()?.to_vec(),
+        );
+        let inc = incoherent_flags
+            .as_ref()
+            .map(|a| a.as_slice().map(|v| v.to_vec()))
+            .transpose()
+            .map_err(|e| -> pyo3::PyErr { e.into() })?;
+        let hm = host_mask
+            .as_ref()
+            .map(|a| a.as_slice().map(|v| v.to_vec()))
+            .transpose()
+            .map_err(|e| -> pyo3::PyErr { e.into() })?;
+        let (tr, wr, tt, wt, ta, wa, tp, wp, ttb, wtb, trb, wrb, tab, wab) = (
+            t(&targets_r), t(&weights_r), t(&targets_t), t(&weights_t), t(&targets_a),
+            t(&weights_a), t(&targets_phi), t(&weights_phi), t(&targets_tb),
+            t(&weights_tb), t(&targets_rb), t(&weights_rb), t(&targets_ab), t(&weights_ab),
+        );
+        let sol = py
+            .detach(|| {
+                self.inner.needle_gradient(
+                    &npn, &zg, requested, inc.as_deref(),
+                    tr.as_deref(), wr.as_deref(), tt.as_deref(), wt.as_deref(),
+                    ta.as_deref(), wa.as_deref(), tp.as_deref(), wp.as_deref(),
+                    ttb.as_deref(), wtb.as_deref(), trb.as_deref(), wrb.as_deref(),
+                    tab.as_deref(), wab.as_deref(),
+                    start_idx, end_idx, channel, calc_s, calc_p, hm.as_deref(),
+                    gain_shift_phi,
+                )
+            })
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let shape = [sol.n_points, sol.n_depths];
+        let out = PyDict::new(py);
+        for (k, b) in &sol.maps {
+            out.set_item(k, PyArray::from_vec(py, b.clone()).reshape(shape)?)?;
+        }
+        Ok(out.into())
+    }}
+
 
 // ---- view request masks + energy kernel (thin over solver) ----
 #[pyfunction]
@@ -343,529 +419,58 @@ pub fn needle_engine<'py>(
     calc_p: bool,
     host_mask: Option<PyReadonlyArray1<bool>>,
 ) -> PyResult<Py<PyDict>> {
-    if requested == 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err("empty request mask"));
-    }
-    let wav_slice = wavls.as_slice()?;
-    let sin_slice = sin_theta_arr.as_slice()?;
-    let thick_slice = thicknesses.as_slice()?;
-    let rt_slice = rough_types.as_slice()?;
-    let rv_slice = rough_vals.as_slice()?;
-    let np_slice = needle_n_per_wav.as_slice()?;
-    let z_slice = z_grid.as_slice()?;
-    let cache_slice = n_stack_cache.as_slice()?;
-
-    let num_wavs = wav_slice.len();
-    let num_angles = sin_slice.len();
-    let total_points = num_wavs * num_angles;
-    let nl = n_layers as usize;
-    let nz = z_slice.len();
-
-    if !(0..nl).contains(&start_idx) {
-        return Err(pyo3::exceptions::PyValueError::new_err("start_idx out of range"));
-    }
-    let idx_end = end_idx.unwrap_or(nl - 1);
-    if idx_end < start_idx + 2 || idx_end >= nl {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "end_idx must leave at least one host layer inside [start_idx, end_idx]",
-        ));
-    }
-    if num_wavs == 0 || num_angles == 0 || nz == 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err("empty grid"));
-    }
-    if np_slice.len() != num_wavs {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "needle_n_per_wav must have one complex index per wavelength",
-        ));
-    }
-    if cache_slice.len() != num_wavs * nl * 2 {
-        return Err(pyo3::exceptions::PyValueError::new_err("n_stack_cache layout mismatch"));
-    }
-    let want_p = requested & NREQ_P != 0;
-    let want_pmb = requested & NREQ_P_MB != 0;
-    let want_pmb_t = requested & NREQ_P_MB_T != 0;
-    let want_pmb_a = requested & NREQ_P_MB_A != 0;
-    let want_ptb = requested & NREQ_P_TB != 0;
-    let want_prb = requested & NREQ_P_RB != 0;
-    let want_pab = requested & NREQ_P_AB != 0;
-    let want_pmb_tb = requested & NREQ_P_MB_TB != 0;
-    let want_pmb_rb = requested & NREQ_P_MB_RB != 0;
-    let want_pmb_ab = requested & NREQ_P_MB_AB != 0;
-    let want_pt = requested & NREQ_P_T != 0;
-    let want_pa = requested & NREQ_P_A != 0;
-    let want_pphi = requested & NREQ_P_PHI != 0;
-    let want_disp = max_disp_order(requested).is_some();
-    if !calc_s && !calc_p {
-        return Err(pyo3::exceptions::PyValueError::new_err("no polarization branch enabled"));
-    }
-    if channel > 3 {
-        return Err(pyo3::exceptions::PyValueError::new_err("channel must be 0..=3"));
-    }
-
-    // Optional per-point merit inputs (default: target 0, weight 1).
-    let tgt = match &targets_r {
-        Some(a) => {
-            let v = a.as_slice()?;
-            if v.len() != total_points {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "targets_r must have num_angles*num_wavs entries (angle-major)",
-                ));
-            }
-            Some(v.to_vec())
-        }
-        None => None,
+    // Thin over the native needle_gradient: extract slices, solve
+    // detached, reshape flat buffers. No physics here.
+    use navette::smatrix::solver::needle_gradient as core_needle;
+    let opt = |o: &Option<PyReadonlyArray1<f64>>| -> PyResult<Option<Vec<f64>>> {
+        o.as_ref()
+            .map(|a| a.as_slice().map(|v| v.to_vec()).map_err(|e| e.into()))
+            .transpose()
     };
-    let wgt = match &weights_r {
-        Some(a) => {
-            let v = a.as_slice()?;
-            if v.len() != total_points {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "weights_r must have num_angles*num_wavs entries (angle-major)",
-                ));
-            }
-            Some(v.to_vec())
-        }
-        None => None,
-    };
-    let target_of = |k: usize| tgt.as_ref().map(|t| t[k]).unwrap_or(0.0);
-    let weight_of = |k: usize| wgt.as_ref().map(|t| t[k]).unwrap_or(1.0);
-    // Optional per-point merit inputs for the T/A/phase gradients
-    // (default: target 0, weight 1 — same as the R pair).
-    let load_pair = |a: &Option<PyReadonlyArray1<f64>>, name: &str| -> PyResult<Option<Vec<f64>>> {
-        match a {
-            Some(arr) => {
-                let v = arr.as_slice()?;
-                if v.len() != total_points {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "{name} must have num_angles*num_wavs entries (angle-major)",
-                    )));
-                }
-                Ok(Some(v.to_vec()))
-            }
-            None => Ok(None),
-        }
-    };
-    let tgt_t = load_pair(&targets_t, "targets_t")?;
-    let wgt_t = load_pair(&weights_t, "weights_t")?;
-    let tgt_a = load_pair(&targets_a, "targets_a")?;
-    let wgt_a = load_pair(&weights_a, "weights_a")?;
-    let tgt_phi = load_pair(&targets_phi, "targets_phi")?;
-    let wgt_phi = load_pair(&weights_phi, "weights_phi")?;
-    let target_t_of = |k: usize| tgt_t.as_ref().map(|t| t[k]).unwrap_or(0.0);
-    let weight_t_of = |k: usize| wgt_t.as_ref().map(|t| t[k]).unwrap_or(1.0);
-    let target_a_of = |k: usize| tgt_a.as_ref().map(|t| t[k]).unwrap_or(0.0);
-    let weight_a_of = |k: usize| wgt_a.as_ref().map(|t| t[k]).unwrap_or(1.0);
-    let target_phi_of = |k: usize| tgt_phi.as_ref().map(|t| t[k]).unwrap_or(0.0);
-    let weight_phi_of = |k: usize| wgt_phi.as_ref().map(|t| t[k]).unwrap_or(1.0);
-    let tgt_tb = load_pair(&targets_tb, "targets_tb")?;
-    let wgt_tb = load_pair(&weights_tb, "weights_tb")?;
-    let tgt_rb = load_pair(&targets_rb, "targets_rb")?;
-    let wgt_rb = load_pair(&weights_rb, "weights_rb")?;
-    let tgt_ab = load_pair(&targets_ab, "targets_ab")?;
-    let wgt_ab = load_pair(&weights_ab, "weights_ab")?;
-    let target_tb_of = |k: usize| tgt_tb.as_ref().map(|t| t[k]).unwrap_or(0.0);
-    let weight_tb_of = |k: usize| wgt_tb.as_ref().map(|t| t[k]).unwrap_or(1.0);
-    let target_rb_of = |k: usize| tgt_rb.as_ref().map(|t| t[k]).unwrap_or(0.0);
-    let weight_rb_of = |k: usize| wgt_rb.as_ref().map(|t| t[k]).unwrap_or(1.0);
-    let target_ab_of = |k: usize| tgt_ab.as_ref().map(|t| t[k]).unwrap_or(0.0);
-    let weight_ab_of = |k: usize| wgt_ab.as_ref().map(|t| t[k]).unwrap_or(1.0);
-
-    // Incoherent flags only needed for the multiblock path.
-    let want_any_pmb =
-        want_pmb || want_pmb_t || want_pmb_a || want_pmb_tb || want_pmb_rb || want_pmb_ab;
-    let inc = match (&incoherent_flags, want_any_pmb) {
-        (_, false) => None,
-        (None, true) => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "NREQ_P_MB requires incoherent_flags",
-            ))
-        }
-        (Some(a), true) => {
-            let v = a.as_slice()?;
-            if v.len() != nl {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "incoherent_flags must have n_layers entries",
-                ));
-            }
-            Some(v.to_vec())
-        }
-    };
-    let mask = match &host_mask {
-        Some(a) => {
-            let v = a.as_slice()?;
-            if v.len() != nl {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "host_mask must have n_layers entries",
-                ));
-            }
-            Some(v.to_vec())
-        }
-        None => None,
-    };
-
-    // Host maps are geometry-only: compute once, share across all points.
-    let mb_locs = match &inc {
-        Some(flags) => Some(locate_hosts_multiblock(thick_slice, flags, z_slice, mask.as_deref())
-            .map_err(pyo3::exceptions::PyValueError::new_err)?),
-        None => None,
-    };
-    let coh_locs: Vec<(usize, f64)> =
-        if want_p || want_pt || want_pa || want_pphi || want_ptb || want_prb || want_pab || want_disp {
-        z_slice
-            .iter()
-            .map(|&z| locate_depth_in(thick_slice, start_idx, idx_end, z))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    struct PointOut {
-        p: [Option<Vec<f64>>; 2],
-        pmb: [Option<Vec<f64>>; 2],
-        q: [Option<Vec<f64>>; 2], // Q rows (order 0), flattened nz
-        pt: [Option<Vec<f64>>; 2],
-        pa: [Option<Vec<f64>>; 2],
-        pphi: [Option<Vec<f64>>; 2],
-        pmb_t: [Option<Vec<f64>>; 2],
-        pmb_a: [Option<Vec<f64>>; 2],
-        ptb: [Option<Vec<f64>>; 2],
-        prb: [Option<Vec<f64>>; 2],
-        pab: [Option<Vec<f64>>; 2],
-        pmb_tb: [Option<Vec<f64>>; 2],
-        pmb_rb: [Option<Vec<f64>>; 2],
-        pmb_ab: [Option<Vec<f64>>; 2],
-    }
-    impl PointOut {
-        fn empty() -> Self {
-            PointOut {
-                p: [None, None], pmb: [None, None], q: [None, None],
-                pt: [None, None], pa: [None, None], pphi: [None, None],
-                pmb_t: [None, None], pmb_a: [None, None],
-                ptb: [None, None], prb: [None, None], pab: [None, None],
-                pmb_tb: [None, None], pmb_rb: [None, None], pmb_ab: [None, None],
-            }
-        }
-    }
-
-    let pol_on = [calc_s, calc_p];
-
-    // ── Phase A: everything expressible per point, in parallel ──
-    let outs: Vec<PointOut> = py.detach(|| {
-        (0..total_points)
-            .into_par_iter()
-            .map(|k| {
-                let a = k / num_wavs;
-                let w = k % num_wavs;
-                let lam = wav_slice[w];
-                let sin_t = sin_slice[a];
-                let base = w * nl * 2;
-                let ns: Vec<Complex64> = (0..nl)
-                    .map(|l| Complex64::new(cache_slice[base + l * 2], cache_slice[base + l * 2 + 1]))
-                    .collect();
-                let nsin_fi = ns[0] * Complex64::new(sin_t, 0.0);
-                let np_c = np_slice[w];
-                let tgt_k = target_of(k);
-                let wgt_k = weight_of(k);
-
-                let mut o = PointOut::empty();
-
-                // Coherent observables share ONE fields build per polarization.
-                if want_p || want_pt || want_pa || want_pphi || want_ptb || want_prb || want_pab || want_disp {
-                    for (pi, &on) in pol_on.iter().enumerate() {
-                        if !on {
-                            continue;
-                        }
-                        let pol = pi as i32;
-                        let fields = build_stack_fields_range(
-                            start_idx, idx_end, &ns, thick_slice, rv_slice, rt_slice,
-                            lam, nsin_fi, pol,
-                        );
-                        if want_p {
-                            o.p[pi] = Some(p_coherent_from_fields(
-                                &fields, nsin_fi, lam, pol, np_c, tgt_k, wgt_k,
-                                thick_slice, start_idx, idx_end, z_slice,
-                            ));
-                        }
-                        if want_pt {
-                            o.pt[pi] = Some(p_coherent_t_from_fields(
-                                &fields, nsin_fi, lam, pol, np_c,
-                                target_t_of(k), weight_t_of(k),
-                                thick_slice, start_idx, idx_end, z_slice,
-                            ));
-                        }
-                        if want_pa {
-                            o.pa[pi] = Some(p_coherent_a_from_fields(
-                                &fields, nsin_fi, lam, pol, np_c,
-                                target_a_of(k), weight_a_of(k),
-                                thick_slice, start_idx, idx_end, z_slice,
-                            ));
-                        }
-                        if want_pphi {
-                            o.pphi[pi] = Some(p_coherent_phi_from_fields(
-                                &fields, nsin_fi, lam, pol, np_c, channel,
-                                target_phi_of(k), weight_phi_of(k),
-                                thick_slice, start_idx, idx_end, z_slice,
-                            ));
-                        }
-                        if want_ptb {
-                            o.ptb[pi] = Some(p_coherent_tb_from_fields(
-                                &fields, nsin_fi, lam, pol, np_c,
-                                target_tb_of(k), weight_tb_of(k),
-                                thick_slice, start_idx, idx_end, z_slice,
-                            ));
-                        }
-                        if want_prb {
-                            o.prb[pi] = Some(p_coherent_rb_from_fields(
-                                &fields, nsin_fi, lam, pol, np_c,
-                                target_rb_of(k), weight_rb_of(k),
-                                thick_slice, start_idx, idx_end, z_slice,
-                            ));
-                        }
-                        if want_pab {
-                            o.pab[pi] = Some(p_coherent_ab_from_fields(
-                                &fields, nsin_fi, lam, pol, np_c,
-                                target_ab_of(k), weight_ab_of(k),
-                                thick_slice, start_idx, idx_end, z_slice,
-                            ));
-                        }
-                        if want_disp {
-                            let m = fields.s_left[idx_end];
-                            let amp = [m.0, m.1, m.2, m.3][channel];
-                            let r2 = amp.norm_sqr();
-                            let mut qv = vec![0.0_f64; nz];
-                            if r2 > 1e-20 {
-                                for (zi, &(j, xi)) in coh_locs.iter().enumerate() {
-                                    // Per-channel slope (channel-0 here would
-                                    // mix r-motion into t-phase).
-                                    let da = needle_slopes4_ddz(
-                                        &fields, nsin_fi, j, xi, np_c, pol, lam)[channel];
-                                    qv[zi] = (amp.conj() * da).im / r2;
-                                }
-                            }
-                            o.q[pi] = Some(qv);
-                        }
-                    }
-                }
-
-                if let (Some(flags), Some(locs)) = (&inc, &mb_locs) {
-                    for (pi, &on) in pol_on.iter().enumerate() {
-                        if !on {
-                            continue;
-                        }
-                        if want_pmb {
-                            o.pmb[pi] = Some(p_multiblock_point(
-                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
-                                np_c, PmbQuantity::R, tgt_k, wgt_k, locs, pi as i32,
-                            ));
-                        }
-                        if want_pmb_t {
-                            o.pmb_t[pi] = Some(p_multiblock_point(
-                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
-                                np_c, PmbQuantity::T,
-                                target_t_of(k), weight_t_of(k), locs, pi as i32,
-                            ));
-                        }
-                        if want_pmb_a {
-                            o.pmb_a[pi] = Some(p_multiblock_point(
-                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
-                                np_c, PmbQuantity::A,
-                                target_a_of(k), weight_a_of(k), locs, pi as i32,
-                            ));
-                        }
-                        if want_pmb_tb {
-                            o.pmb_tb[pi] = Some(p_multiblock_point(
-                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
-                                np_c, PmbQuantity::TB,
-                                target_tb_of(k), weight_tb_of(k), locs, pi as i32,
-                            ));
-                        }
-                        if want_pmb_rb {
-                            o.pmb_rb[pi] = Some(p_multiblock_point(
-                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
-                                np_c, PmbQuantity::RB,
-                                target_rb_of(k), weight_rb_of(k), locs, pi as i32,
-                            ));
-                        }
-                        if want_pmb_ab {
-                            o.pmb_ab[pi] = Some(p_multiblock_point(
-                                lam, sin_t, &ns, thick_slice, flags, rv_slice, rt_slice,
-                                np_c, PmbQuantity::AB,
-                                target_ab_of(k), weight_ab_of(k), locs, pi as i32,
-                            ));
-                        }
-                    }
-                }
-
-                o
-            })
-            .collect::<Vec<_>>()
-    });
-
-    // ── Phase B: spectral differentiation chain (crosses wavelengths) ──
-    let max_order = max_disp_order(requested);
-    // chains[pol][order][k*nz+zi]
-    let disp_chain: Vec<Option<Vec<Vec<Vec<f64>>>>> = match max_order {
-        None => vec![None, None],
-        Some(mo) => {
-            let omega: Vec<f64> =
-                wav_slice.iter().map(|&l| 2.0 * std::f64::consts::PI * C_NM_PER_FS / l).collect();
-            pol_on
-                .iter()
-                .enumerate()
-                .map(|(pi, &on)| {
-                    if !on || !want_disp {
-                        return None;
-                    }
-                    if outs.iter().any(|o| o.q[pi].is_none()) {
-                        return None;
-                    }
-                    let q0: Vec<Vec<f64>> =
-                        outs.iter().map(|o| o.q[pi].clone().unwrap()).collect();
-                    let mut chain = vec![q0.clone()];
-                    for _ in 0..mo {
-                        let prev = chain.last().unwrap();
-                        chain.push(spectral_gradient_step(prev, &omega, num_wavs, num_angles, nz));
-                    }
-                    Some(chain)
-                })
-                .collect()
-        }
-    };
-    let _ = channel;
-
-    // ── Assemble dict ──
-    let shape = [total_points, nz];
+    let (wv, st, cache, th, rt, rv, npn, zg) = (
+        wavls.as_slice()?.to_vec(),
+        sin_theta_arr.as_slice()?.to_vec(),
+        n_stack_cache.as_slice()?.to_vec(),
+        thicknesses.as_slice()?.to_vec(),
+        rough_types.as_slice()?.to_vec(),
+        rough_vals.as_slice()?.to_vec(),
+        needle_n_per_wav.as_slice()?.to_vec(),
+        z_grid.as_slice()?.to_vec(),
+    );
+    let inc = incoherent_flags
+        .as_ref()
+        .map(|a| a.as_slice().map(|v| v.to_vec()))
+        .transpose()
+        .map_err(|e| -> pyo3::PyErr { e.into() })?;
+    let hm = host_mask
+        .as_ref()
+        .map(|a| a.as_slice().map(|v| v.to_vec()))
+        .transpose()
+        .map_err(|e| -> pyo3::PyErr { e.into() })?;
+    let t = |o: &Option<PyReadonlyArray1<f64>>| opt(o).unwrap();
+    let (tr, wr, tt, wt, ta, wa, tp, wp, ttb, wtb, trb, wrb, tab, wab) = (
+        t(&targets_r), t(&weights_r), t(&targets_t), t(&weights_t), t(&targets_a),
+        t(&weights_a), t(&targets_phi), t(&weights_phi), t(&targets_tb),
+        t(&weights_tb), t(&targets_rb), t(&weights_rb), t(&targets_ab), t(&weights_ab),
+    );
+    let sol = py
+        .detach(|| {
+            core_needle(
+                &wv, &st, n_layers as usize, &cache, &th, &rt, &rv, &npn, &zg,
+                requested, inc.as_deref(),
+                tr.as_deref(), wr.as_deref(), tt.as_deref(), wt.as_deref(),
+                ta.as_deref(), wa.as_deref(), tp.as_deref(), wp.as_deref(),
+                ttb.as_deref(), wtb.as_deref(), trb.as_deref(), wrb.as_deref(),
+                tab.as_deref(), wab.as_deref(),
+                start_idx, end_idx, channel, calc_s, calc_p, hm.as_deref(), 0.0,
+            )
+        })
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let shape = [sol.n_points, sol.n_depths];
     let out = PyDict::new(py);
-
-    macro_rules! emit {
-        ($name:expr, $field:ident, $pi:expr) => {{
-            let name: String = $name;
-            let mut flat: Vec<f64> = Vec::with_capacity(total_points * nz);
-            for o in &outs {
-                match &o.$field[$pi] {
-                    Some(v) => flat.extend_from_slice(v),
-                    None => {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                            "internal error: missing output buffer",
-                        ))
-                    }
-                }
-            }
-            out.set_item(name.as_str(), PyArray::from_vec(py, flat).reshape(shape)?)?;
-        }};
+    for (k, b) in &sol.maps {
+        out.set_item(k, PyArray::from_vec(py, b.clone()).reshape(shape)?)?;
     }
-
-    let pol_suffix = |pi: usize| if pi == 0 { "s" } else { "p" };
-    if want_p {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("P_{}", pol_suffix(pi)), p, pi);
-            }
-        }
-    }
-    if want_pt {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("P_T_{}", pol_suffix(pi)), pt, pi);
-            }
-        }
-    }
-    if want_pa {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("P_A_{}", pol_suffix(pi)), pa, pi);
-            }
-        }
-    }
-    if want_pphi {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("P_PHI_{}", pol_suffix(pi)), pphi, pi);
-            }
-        }
-    }
-    if want_pmb {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("Pmb_{}", pol_suffix(pi)), pmb, pi);
-            }
-        }
-    }
-    if want_pmb_t {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("Pmb_T_{}", pol_suffix(pi)), pmb_t, pi);
-            }
-        }
-    }
-    if want_pmb_a {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("Pmb_A_{}", pol_suffix(pi)), pmb_a, pi);
-            }
-        }
-    }
-    if want_ptb {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("P_TB_{}", pol_suffix(pi)), ptb, pi);
-            }
-        }
-    }
-    if want_prb {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("P_RB_{}", pol_suffix(pi)), prb, pi);
-            }
-        }
-    }
-    if want_pab {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("P_AB_{}", pol_suffix(pi)), pab, pi);
-            }
-        }
-    }
-    if want_pmb_tb {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("Pmb_TB_{}", pol_suffix(pi)), pmb_tb, pi);
-            }
-        }
-    }
-    if want_pmb_rb {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("Pmb_RB_{}", pol_suffix(pi)), pmb_rb, pi);
-            }
-        }
-    }
-    if want_pmb_ab {
-        for pi in 0..2 {
-            if pol_on[pi] {
-                emit!(format!("Pmb_AB_{}", pol_suffix(pi)), pmb_ab, pi);
-            }
-        }
-    }
-    const DISP_KEYS: [&str; 5] = ["dphi", "dgd", "dgdd", "dtod", "dfod"];
-    if let Some(mo) = max_order {
-        for pi in 0..2 {
-            if !pol_on[pi] {
-                continue;
-            }
-            if let Some(chain) = &disp_chain[pi] {
-                for order in 0..=mo {
-                    let key = format!("{}_{}", DISP_KEYS[order], pol_suffix(pi));
-                    let mut flat: Vec<f64> = Vec::with_capacity(total_points * nz);
-                    for row in &chain[order] {
-                        flat.extend_from_slice(row);
-                    }
-                    out.set_item(key, PyArray::from_vec(py, flat).reshape(shape)?)?;
-                }
-            }
-        }
-    }
-
     Ok(out.into())
 }
 

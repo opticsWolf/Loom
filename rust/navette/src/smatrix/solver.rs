@@ -12,6 +12,8 @@ use num_complex::{Complex64, ComplexFloat};
 use rayon::prelude::*;
 
 use super::core_engine::*;
+use super::needle_engine::*;
+use super::needle_operator::*;
 use super::optics_core::C_NM_PER_FS;
 
 // ---------------------------------------------------------------------------
@@ -25,6 +27,7 @@ pub struct Solver {
   sin_theta: Vec<f64>,
   n_cache: Vec<Vec<Complex64>>,
   inv_n_cache: Vec<Vec<Complex64>>,
+  flat_cache: Vec<f64>,
   thicknesses: Vec<f64>,
   incoherent_flags: Vec<i32>,
   rough_types: Vec<i32>,
@@ -167,6 +170,14 @@ impl Solver {
       );
     }
     let n_wavs = wavelengths.len();
+    let mut flat_cache = Vec::with_capacity(n_layers * n_wavs * 2);
+    for w in 0..n_wavs {
+      for l in 0..n_layers {
+        let nv = indices_layer_major[l * n_wavs + w];
+        flat_cache.push(nv.re);
+        flat_cache.push(nv.im);
+      }
+    }
     let mut n_cache = Vec::with_capacity(n_wavs);
     let mut inv_n_cache = Vec::with_capacity(n_wavs);
     for w in 0..n_wavs {
@@ -185,6 +196,7 @@ impl Solver {
       sin_theta: sin_theta.to_vec(),
       n_cache,
       inv_n_cache,
+      flat_cache,
       thicknesses: thicknesses.to_vec(),
       incoherent_flags: incoherent_flags.to_vec(),
       rough_types: rough_types.to_vec(),
@@ -257,6 +269,74 @@ impl Solver {
 
   pub fn n_wavs(&self) -> usize {
     self.wavls.len()
+  }
+
+  /// Needle-operator gradients over the solver's own grid and stack.
+  /// Per-point target/weight inputs are scalars (broadcast) or full
+  /// angle-major vectors; `None` means target 0 / weight 1.
+  #[allow(clippy::too_many_arguments)]
+  pub fn needle_gradient(
+    &self,
+    needle_n_per_wav: &[Complex64],
+    z_grid: &[f64],
+    requested: u64,
+    incoherent_flags: Option<&[i32]>,
+    targets_r: Option<&[f64]>,
+    weights_r: Option<&[f64]>,
+    targets_t: Option<&[f64]>,
+    weights_t: Option<&[f64]>,
+    targets_a: Option<&[f64]>,
+    weights_a: Option<&[f64]>,
+    targets_phi: Option<&[f64]>,
+    weights_phi: Option<&[f64]>,
+    targets_tb: Option<&[f64]>,
+    weights_tb: Option<&[f64]>,
+    targets_rb: Option<&[f64]>,
+    weights_rb: Option<&[f64]>,
+    targets_ab: Option<&[f64]>,
+    weights_ab: Option<&[f64]>,
+    start_idx: usize,
+    end_idx: Option<usize>,
+    channel: usize,
+    calc_s: bool,
+    calc_p: bool,
+    host_mask: Option<&[bool]>,
+    gain_shift_phi: f64,
+  ) -> Result<NeedleSolution, String> {
+    needle_gradient(
+      &self.wavls,
+      &self.sin_theta,
+      self.n_layers,
+      &self.flat_cache,
+      &self.thicknesses,
+      &self.rough_types,
+      &self.rough_vals,
+      needle_n_per_wav,
+      z_grid,
+      requested,
+      incoherent_flags.or(Some(&self.incoherent_flags)),
+      targets_r,
+      weights_r,
+      targets_t,
+      weights_t,
+      targets_a,
+      weights_a,
+      targets_phi,
+      weights_phi,
+      targets_tb,
+      weights_tb,
+      targets_rb,
+      weights_rb,
+      targets_ab,
+      weights_ab,
+      start_idx,
+      end_idx,
+      channel,
+      calc_s,
+      calc_p,
+      host_mask,
+      gain_shift_phi,
+    )
   }
 
   /// Solve every (angle, wavelength) point for `requested` and derive the
@@ -555,6 +635,553 @@ pub const DISP_SUFFIXES: [(&str, usize); 4] =
   [("GD", 0), ("GDD", 1), ("TOD", 2), ("FOD", 3)];
 
 // ---------------------------------------------------------------------------
+// Needle gradients (moved verbatim from the PyO3 binding)
+// ---------------------------------------------------------------------------
+
+/// Needle-gradient output: flat `[n_points × n_depths]` buffers plus shape.
+pub struct NeedleSolution {
+  pub n_points: usize,
+  pub n_depths: usize,
+  pub maps: Vec<(String, Vec<f64>)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn needle_gradient(
+    wavls: &[f64],
+    sin_theta: &[f64],
+    n_layers: usize,
+    n_stack_cache: &[f64],
+    thicknesses: &[f64],
+    rough_types: &[i32],
+    rough_vals: &[f64],
+    needle_n_per_wav: &[Complex64],
+    z_grid: &[f64],
+    requested: u64,
+    incoherent_flags: Option<&[i32]>,
+    targets_r: Option<&[f64]>,
+    weights_r: Option<&[f64]>,
+    targets_t: Option<&[f64]>,
+    weights_t: Option<&[f64]>,
+    targets_a: Option<&[f64]>,
+    weights_a: Option<&[f64]>,
+    targets_phi: Option<&[f64]>,
+    weights_phi: Option<&[f64]>,
+    targets_tb: Option<&[f64]>,
+    weights_tb: Option<&[f64]>,
+    targets_rb: Option<&[f64]>,
+    weights_rb: Option<&[f64]>,
+    targets_ab: Option<&[f64]>,
+    weights_ab: Option<&[f64]>,
+    start_idx: usize,
+    end_idx: Option<usize>,
+    channel: usize,
+    calc_s: bool,
+    calc_p: bool,
+    host_mask: Option<&[bool]>,
+    gain_shift_phi: f64,
+) -> Result<NeedleSolution, String>
+{
+    if requested == 0 {
+        return Err(String::from("empty request mask"));
+    }
+
+    let num_wavs = wavls.len();
+    let num_angles = sin_theta.len();
+    let total_points = num_wavs * num_angles;
+    let nz = z_grid.len();
+
+    let nl = n_layers;
+    if !(0..nl).contains(&start_idx) {
+        return Err(String::from("start_idx out of range"));
+    }
+    let idx_end = end_idx.unwrap_or(nl - 1);
+    if idx_end < start_idx + 2 || idx_end >= nl {
+        return Err(String::from(
+            "end_idx must leave at least one host layer inside [start_idx, end_idx]",
+        ));
+    }
+    if num_wavs == 0 || num_angles == 0 || nz == 0 {
+        return Err(String::from("empty grid"));
+    }
+    if needle_n_per_wav.len() != num_wavs {
+        return Err(String::from(
+            "needle_n_per_wav must have one complex index per wavelength",
+        ));
+    }
+    if n_stack_cache.len() != num_wavs * nl * 2 {
+        return Err(String::from("n_stack_cache layout mismatch"));
+    }
+    let want_p = requested & NREQ_P != 0;
+    let want_pmb = requested & NREQ_P_MB != 0;
+    let want_pmb_t = requested & NREQ_P_MB_T != 0;
+    let want_pmb_a = requested & NREQ_P_MB_A != 0;
+    let want_ptb = requested & NREQ_P_TB != 0;
+    let want_prb = requested & NREQ_P_RB != 0;
+    let want_pab = requested & NREQ_P_AB != 0;
+    let want_pmb_tb = requested & NREQ_P_MB_TB != 0;
+    let want_pmb_rb = requested & NREQ_P_MB_RB != 0;
+    let want_pmb_ab = requested & NREQ_P_MB_AB != 0;
+    let want_pt = requested & NREQ_P_T != 0;
+    let want_pa = requested & NREQ_P_A != 0;
+    let want_pphi = requested & NREQ_P_PHI != 0;
+    let want_disp = max_disp_order(requested).is_some();
+    if !calc_s && !calc_p {
+        return Err(String::from("no polarization branch enabled"));
+    }
+    if channel > 3 {
+        return Err(String::from("channel must be 0..=3"));
+    }
+
+    // Optional per-point merit inputs (default: target 0, weight 1).
+    // Scalars broadcast; full vectors are angle-major.
+    let load_pair = |a: &Option<&[f64]>, name: &str| -> Result<Option<Vec<f64>>, String> {
+        match a {
+            Some(arr) => {
+                if arr.len() == 1 {
+                    Ok(Some(vec![arr[0]; total_points]))
+                } else if arr.len() == total_points {
+                    Ok(Some(arr.to_vec()))
+                } else {
+                    Err(String::from(format!(
+                        "{name} must be a scalar or have num_angles*num_wavs entries (angle-major)",
+                    )))
+                }
+            }
+            None => Ok(None),
+        }
+    };
+    let tgt = load_pair(&targets_r, "targets_r")?;
+    let wgt = load_pair(&weights_r, "weights_r")?;
+    let target_of = |k: usize| tgt.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_of = |k: usize| wgt.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let tgt_t = load_pair(&targets_t, "targets_t")?;
+    let wgt_t = load_pair(&weights_t, "weights_t")?;
+    let tgt_a = load_pair(&targets_a, "targets_a")?;
+    let wgt_a = load_pair(&weights_a, "weights_a")?;
+    let tgt_phi = load_pair(&targets_phi, "targets_phi")?;
+    let wgt_phi = load_pair(&weights_phi, "weights_phi")?;
+    let target_t_of = |k: usize| tgt_t.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_t_of = |k: usize| wgt_t.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_a_of = |k: usize| tgt_a.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_a_of = |k: usize| wgt_a.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_phi_of = |k: usize| tgt_phi.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_phi_of = |k: usize| wgt_phi.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let tgt_tb = load_pair(&targets_tb, "targets_tb")?;
+    let wgt_tb = load_pair(&weights_tb, "weights_tb")?;
+    let tgt_rb = load_pair(&targets_rb, "targets_rb")?;
+    let wgt_rb = load_pair(&weights_rb, "weights_rb")?;
+    let tgt_ab = load_pair(&targets_ab, "targets_ab")?;
+    let wgt_ab = load_pair(&weights_ab, "weights_ab")?;
+    let target_tb_of = |k: usize| tgt_tb.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_tb_of = |k: usize| wgt_tb.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_rb_of = |k: usize| tgt_rb.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_rb_of = |k: usize| wgt_rb.as_ref().map(|t| t[k]).unwrap_or(1.0);
+    let target_ab_of = |k: usize| tgt_ab.as_ref().map(|t| t[k]).unwrap_or(0.0);
+    let weight_ab_of = |k: usize| wgt_ab.as_ref().map(|t| t[k]).unwrap_or(1.0);
+
+    // Incoherent flags only needed for the multiblock path.
+    let want_any_pmb =
+        want_pmb || want_pmb_t || want_pmb_a || want_pmb_tb || want_pmb_rb || want_pmb_ab;
+    let inc = match (&incoherent_flags, want_any_pmb) {
+        (_, false) => None,
+        (None, true) => {
+            return Err(String::from(
+                "NREQ_P_MB requires incoherent_flags",
+            ))
+        }
+        (Some(a), true) => {
+            let v = a;
+            if v.len() != nl {
+                return Err(String::from(
+                    "incoherent_flags must have n_layers entries",
+                ));
+            }
+            Some(v.to_vec())
+        }
+    };
+    let mask = match &host_mask {
+        Some(a) => {
+            let v = a;
+            if v.len() != nl {
+                return Err(String::from(
+                    "host_mask must have n_layers entries",
+                ));
+            }
+            Some(v.to_vec())
+        }
+        None => None,
+    };
+
+    // Host maps are geometry-only: compute once, share across all points.
+    let mb_locs = match &inc {
+        Some(flags) => Some(locate_hosts_multiblock(thicknesses, flags, z_grid, mask.as_deref())
+            ?),
+        None => None,
+    };
+    let coh_locs: Vec<(usize, f64)> =
+        if want_p || want_pt || want_pa || want_pphi || want_ptb || want_prb || want_pab || want_disp {
+        z_grid
+            .iter()
+            .map(|&z| locate_depth_in(thicknesses, start_idx, idx_end, z))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    struct PointOut {
+        p: [Option<Vec<f64>>; 2],
+        pmb: [Option<Vec<f64>>; 2],
+        q: [Option<Vec<f64>>; 2], // Q rows (order 0), flattened nz
+        pt: [Option<Vec<f64>>; 2],
+        pa: [Option<Vec<f64>>; 2],
+        pphi: [Option<Vec<f64>>; 2],
+        pmb_t: [Option<Vec<f64>>; 2],
+        pmb_a: [Option<Vec<f64>>; 2],
+        ptb: [Option<Vec<f64>>; 2],
+        prb: [Option<Vec<f64>>; 2],
+        pab: [Option<Vec<f64>>; 2],
+        pmb_tb: [Option<Vec<f64>>; 2],
+        pmb_rb: [Option<Vec<f64>>; 2],
+        pmb_ab: [Option<Vec<f64>>; 2],
+    }
+    impl PointOut {
+        fn empty() -> Self {
+            PointOut {
+                p: [None, None], pmb: [None, None], q: [None, None],
+                pt: [None, None], pa: [None, None], pphi: [None, None],
+                pmb_t: [None, None], pmb_a: [None, None],
+                ptb: [None, None], prb: [None, None], pab: [None, None],
+                pmb_tb: [None, None], pmb_rb: [None, None], pmb_ab: [None, None],
+            }
+        }
+    }
+
+    let pol_on = [calc_s, calc_p];
+
+    // ── Phase A: everything expressible per point, in parallel ──
+    let outs: Vec<PointOut> =
+        (0..total_points)
+            .into_par_iter()
+            .map(|k| {
+                let a = k / num_wavs;
+                let w = k % num_wavs;
+                let lam = wavls[w];
+                let sin_t = sin_theta[a];
+                let base = w * nl * 2;
+                let ns: Vec<Complex64> = (0..nl)
+                    .map(|l| Complex64::new(n_stack_cache[base + l * 2], n_stack_cache[base + l * 2 + 1]))
+                    .collect();
+                let nsin_fi = ns[0] * Complex64::new(sin_t, 0.0);
+                let np_c = needle_n_per_wav[w];
+                let tgt_k = target_of(k);
+                let wgt_k = weight_of(k);
+
+                let mut o = PointOut::empty();
+
+                // Coherent observables share ONE fields build per polarization.
+                if want_p || want_pt || want_pa || want_pphi || want_ptb || want_prb || want_pab || want_disp {
+                    for (pi, &on) in pol_on.iter().enumerate() {
+                        if !on {
+                            continue;
+                        }
+                        let pol = pi as i32;
+                        let fields = build_stack_fields_range(
+                            start_idx, idx_end, &ns, thicknesses, rough_vals, rough_types,
+                            lam, nsin_fi, pol,
+                        );
+                        if want_p {
+                            o.p[pi] = Some(p_coherent_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c, tgt_k, wgt_k,
+                                thicknesses, start_idx, idx_end, z_grid,
+                            ));
+                        }
+                        if want_pt {
+                            o.pt[pi] = Some(p_coherent_t_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_t_of(k), weight_t_of(k),
+                                thicknesses, start_idx, idx_end, z_grid,
+                            ));
+                        }
+                        if want_pa {
+                            o.pa[pi] = Some(p_coherent_a_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_a_of(k), weight_a_of(k),
+                                thicknesses, start_idx, idx_end, z_grid,
+                            ));
+                        }
+                        if want_pphi {
+                            o.pphi[pi] = Some(p_coherent_phi_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c, channel,
+                                target_phi_of(k), weight_phi_of(k),
+                                thicknesses, start_idx, idx_end, z_grid,
+                            ));
+                        }
+                        if want_ptb {
+                            o.ptb[pi] = Some(p_coherent_tb_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_tb_of(k), weight_tb_of(k),
+                                thicknesses, start_idx, idx_end, z_grid,
+                            ));
+                        }
+                        if want_prb {
+                            o.prb[pi] = Some(p_coherent_rb_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_rb_of(k), weight_rb_of(k),
+                                thicknesses, start_idx, idx_end, z_grid,
+                            ));
+                        }
+                        if want_pab {
+                            o.pab[pi] = Some(p_coherent_ab_from_fields(
+                                &fields, nsin_fi, lam, pol, np_c,
+                                target_ab_of(k), weight_ab_of(k),
+                                thicknesses, start_idx, idx_end, z_grid,
+                            ));
+                        }
+                        if want_disp {
+                            let m = fields.s_left[idx_end];
+                            let amp = [m.0, m.1, m.2, m.3][channel];
+                            let r2 = amp.norm_sqr();
+                            let mut qv = vec![0.0_f64; nz];
+                            if r2 > 1e-20 {
+                                for (zi, &(j, xi)) in coh_locs.iter().enumerate() {
+                                    // Per-channel slope (channel-0 here would
+                                    // mix r-motion into t-phase).
+                                    let da = needle_slopes4_ddz(
+                                        &fields, nsin_fi, j, xi, np_c, pol, lam)[channel];
+                                    qv[zi] = (amp.conj() * da).im / r2;
+                                }
+                            }
+                            o.q[pi] = Some(qv);
+                        }
+                    }
+                }
+
+                if let (Some(flags), Some(locs)) = (&inc, &mb_locs) {
+                    for (pi, &on) in pol_on.iter().enumerate() {
+                        if !on {
+                            continue;
+                        }
+                        if want_pmb {
+                            o.pmb[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thicknesses, flags, rough_vals, rough_types,
+                                np_c, PmbQuantity::R, tgt_k, wgt_k, locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_t {
+                            o.pmb_t[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thicknesses, flags, rough_vals, rough_types,
+                                np_c, PmbQuantity::T,
+                                target_t_of(k), weight_t_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_a {
+                            o.pmb_a[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thicknesses, flags, rough_vals, rough_types,
+                                np_c, PmbQuantity::A,
+                                target_a_of(k), weight_a_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_tb {
+                            o.pmb_tb[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thicknesses, flags, rough_vals, rough_types,
+                                np_c, PmbQuantity::TB,
+                                target_tb_of(k), weight_tb_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_rb {
+                            o.pmb_rb[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thicknesses, flags, rough_vals, rough_types,
+                                np_c, PmbQuantity::RB,
+                                target_rb_of(k), weight_rb_of(k), locs, pi as i32,
+                            ));
+                        }
+                        if want_pmb_ab {
+                            o.pmb_ab[pi] = Some(p_multiblock_point(
+                                lam, sin_t, &ns, thicknesses, flags, rough_vals, rough_types,
+                                np_c, PmbQuantity::AB,
+                                target_ab_of(k), weight_ab_of(k), locs, pi as i32,
+                            ));
+                        }
+                    }
+                }
+
+                o
+            })
+            .collect::<Vec<_>>();
+
+    // ── Phase B: spectral differentiation chain (crosses wavelengths) ──
+    let max_order = max_disp_order(requested);
+    // chains[pol][order][k*nz+zi]
+    let disp_chain: Vec<Option<Vec<Vec<Vec<f64>>>>> = match max_order {
+        None => vec![None, None],
+        Some(mo) => {
+            let omega: Vec<f64> =
+                wavls.iter().map(|&l| 2.0 * std::f64::consts::PI * C_NM_PER_FS / l).collect();
+            pol_on
+                .iter()
+                .enumerate()
+                .map(|(pi, &on)| {
+                    if !on || !want_disp {
+                        return None;
+                    }
+                    if outs.iter().any(|o| o.q[pi].is_none()) {
+                        return None;
+                    }
+                    let q0: Vec<Vec<f64>> =
+                        outs.iter().map(|o| o.q[pi].clone().unwrap()).collect();
+                    let mut chain = vec![q0.clone()];
+                    for _ in 0..mo {
+                        let prev = chain.last().unwrap();
+                        chain.push(spectral_gradient_step(prev, &omega, num_wavs, num_angles, nz));
+                    }
+                    Some(chain)
+                })
+                .collect()
+        }
+    };
+    let _ = channel;
+
+    // ── Assemble dict ──
+    let mut maps: Vec<(String, Vec<f64>)> = Vec::new();
+
+    macro_rules! emit {
+        ($name:expr, $field:ident, $pi:expr) => {{
+            let name: String = $name;
+            let mut flat: Vec<f64> = Vec::with_capacity(total_points * nz);
+            for o in &outs {
+                match &o.$field[$pi] {
+                    Some(v) => flat.extend_from_slice(v),
+                    None => {
+                        return Err(String::from(
+                            "internal error: missing output buffer",
+                        ))
+                    }
+                }
+            }
+            if gain_shift_phi != 0.0 && name.starts_with("P_PHI") {
+                for v in flat.iter_mut() {
+                    *v -= gain_shift_phi;
+                }
+            }
+            maps.push((name, flat));
+        }};
+    }
+
+    let pol_suffix = |pi: usize| if pi == 0 { "s" } else { "p" };
+    if want_p {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_{}", pol_suffix(pi)), p, pi);
+            }
+        }
+    }
+    if want_pt {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_T_{}", pol_suffix(pi)), pt, pi);
+            }
+        }
+    }
+    if want_pa {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_A_{}", pol_suffix(pi)), pa, pi);
+            }
+        }
+    }
+    if want_pphi {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_PHI_{}", pol_suffix(pi)), pphi, pi);
+            }
+        }
+    }
+    if want_pmb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_{}", pol_suffix(pi)), pmb, pi);
+            }
+        }
+    }
+    if want_pmb_t {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_T_{}", pol_suffix(pi)), pmb_t, pi);
+            }
+        }
+    }
+    if want_pmb_a {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_A_{}", pol_suffix(pi)), pmb_a, pi);
+            }
+        }
+    }
+    if want_ptb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_TB_{}", pol_suffix(pi)), ptb, pi);
+            }
+        }
+    }
+    if want_prb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_RB_{}", pol_suffix(pi)), prb, pi);
+            }
+        }
+    }
+    if want_pab {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("P_AB_{}", pol_suffix(pi)), pab, pi);
+            }
+        }
+    }
+    if want_pmb_tb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_TB_{}", pol_suffix(pi)), pmb_tb, pi);
+            }
+        }
+    }
+    if want_pmb_rb {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_RB_{}", pol_suffix(pi)), pmb_rb, pi);
+            }
+        }
+    }
+    if want_pmb_ab {
+        for pi in 0..2 {
+            if pol_on[pi] {
+                emit!(format!("Pmb_AB_{}", pol_suffix(pi)), pmb_ab, pi);
+            }
+        }
+    }
+    const DISP_KEYS: [&str; 5] = ["dphi", "dgd", "dgdd", "dtod", "dfod"];
+    if let Some(mo) = max_order {
+        for pi in 0..2 {
+            if !pol_on[pi] {
+                continue;
+            }
+            if let Some(chain) = &disp_chain[pi] {
+                for order in 0..=mo {
+                    let key = format!("{}_{}", DISP_KEYS[order], pol_suffix(pi));
+                    let mut flat: Vec<f64> = Vec::with_capacity(total_points * nz);
+                    for row in &chain[order] {
+                        flat.extend_from_slice(row);
+                    }
+                    maps.push((key, flat));
+                }
+            }
+        }
+    }
+
+    Ok(NeedleSolution { n_points: total_points, n_depths: nz, maps })
+}
+
+// ---------------------------------------------------------------------------
 // Tests (standalone: no Python)
 // ---------------------------------------------------------------------------
 
@@ -606,7 +1233,7 @@ mod tests {
   fn view_masks_match_python() {
     use super::super::core_engine::{
       REQ_A_AVG, REQ_A_P, REQ_A_S, REQ_DELTA_R, REQ_DOP_R, REQ_PSI_R, REQ_RP, REQ_RS,
-      REQ_R_AVG, REQ_S0_R, REQ_S1_R, REQ_S2_R, REQ_S3_R, REQ_TS, REQ_T_AVG,
+      REQ_R_AVG, REQ_S0_R, REQ_S1_R, REQ_S2_R, REQ_S3_R, REQ_TS,
     };
     assert_eq!(super::rt_request("s").unwrap(), REQ_R_AVG | REQ_T_AVG | REQ_RS | REQ_TS);
     assert_eq!(
@@ -657,6 +1284,36 @@ mod tests {
     for (x, y) in fa.iter().zip(fb.iter()) {
       assert_eq!(x.to_bits(), y.to_bits());
     }
+  }
+
+  #[test]
+  fn needle_gradient_standalone() {
+    use super::super::needle_engine::NREQ_P;
+    let wl = vec![500.0, 600.0];
+    let idx = vec![
+      Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0),
+      Complex64::new(2.0, 0.0), Complex64::new(2.0, 0.0),
+      Complex64::new(1.5, 0.0), Complex64::new(1.5, 0.0),
+    ];
+    let s = super::Solver::new(
+      &wl, &[0.0], &idx, 3, &[0.0, 100.0, 0.0], &[0, 0, 0], &[0, 0, 0], &[0.0, 0.0, 0.0], 2,
+    )
+    .unwrap();
+    let sol = s
+      .needle_gradient(
+        &[Complex64::new(2.1, 0.0), Complex64::new(2.1, 0.0)],
+        &[10.0, 50.0, 90.0],
+        NREQ_P,
+        None, None, None, None, None, None, None, None, None, None, None, None,
+        None, None, None,
+        0, Some(2), 0, true, true, None, 0.0,
+      )
+      .unwrap();
+    assert_eq!(sol.n_depths, 3);
+    assert_eq!(sol.n_points, 2);
+    let ps = sol.maps.iter().find(|(k, _)| k == "P_s").expect("P_s").1.clone();
+    assert_eq!(ps.len(), 6);
+    assert!(ps.iter().all(|v| v.is_finite()));
   }
 
   #[test]
