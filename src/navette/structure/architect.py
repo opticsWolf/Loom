@@ -60,6 +60,18 @@ class Navette_Architect:
     if materials is not None:
       self.materials = materials
 
+  @classmethod
+  def _from_native(cls, native_arch: Any, materials: Any = None,
+                   shells: Optional[List[Any]] = None) -> "Navette_Architect":
+    """Adopt a natively assembled architect (program restore path)."""
+    obj = cls.__new__(cls)
+    obj._inner = native_arch
+    obj._shells = list(shells or [])
+    obj._view_cache = None
+    if materials is not None:
+      obj._inner.materials = materials
+    return obj
+
   # -- provider ----------------------------------------------------------
   @property
   def materials(self) -> Any:

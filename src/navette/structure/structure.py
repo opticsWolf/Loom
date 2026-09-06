@@ -85,6 +85,15 @@ class Navette_Structure:
     if materials is not None:
       self.materials = materials
 
+  @classmethod
+  def _from_native(cls, native_struct: Any, materials: Any = None) -> "Navette_Structure":
+    """Adopt a natively assembled structure (program restore path)."""
+    obj = cls.__new__(cls)
+    obj._inner = native_struct
+    if materials is not None:
+      obj._inner.materials = materials
+    return obj
+
   def __add__(self, other: "Navette_Structure") -> "Navette_Structure":
     if self._inner.materials is not None and other._inner.materials is not None \
             and self._inner.materials is not other._inner.materials:

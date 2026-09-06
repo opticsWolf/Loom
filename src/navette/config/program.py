@@ -206,6 +206,10 @@ def load_program(
     """
     kind, name, payload = load_document(path, fmt)
     context = context or {}
+    if not context:
+        # Whole-document native path: assemble in Rust, adopt here.
+        # (Context merges stay section-wise below — live-object dict ops.)
+        return _load_program_native(path, fmt, wavelength, prefix, kind, name, payload)
     prog = LoadedProgram(name=name)
 
     sections = payload if kind == "program" else {kind: payload}
@@ -246,4 +250,43 @@ def load_program(
                                         prog.materials, prefix)
     elif "architect" in context:
         prog.architect = context["architect"]
+    return prog
+
+
+def _load_program_native(path, fmt, wavelength, prefix, kind, name, payload):
+    """Whole-document path: single native assembly, adopted here."""
+    import json as _json
+    from navette._structure import load_program as _native_load
+    from navette.structure import Navette_Architect, Navette_Structure
+    from navette.structure.materials import MaterialObjectProvider
+    wl = np.ascontiguousarray(np.asarray(wavelength, dtype=np.float64))
+    if kind == "program":
+        doc = {"schema_version": 1, "kind": "program",
+               "name": name, "sections": payload}
+    elif kind in ("materials", "groups"):
+        doc = {"schema_version": 1, "kind": kind, kind: payload}
+    else:
+        doc = {"schema_version": 1, "kind": kind, **payload}
+    parts = _native_load(_json.dumps(doc), wl, prefix)
+    prog = LoadedProgram(name=parts["name"])
+    raw_sections = payload if kind == "program" else {kind: payload}
+    if parts["materials"] is not None:
+        items = {}
+        for m in raw_sections.get("materials", []):
+            d = dict(m)
+            d["name"] = _px(d["name"], prefix)
+            d["code"] = _px(d.get("code") or d["name"], prefix)
+            items[d["code"]] = d
+        mats = MaterialObjectProvider.__new__(MaterialObjectProvider)
+        mats._dict = dict(items)
+        mats._wavelength = wl
+        mats._native = parts["materials"]
+        mats._memo = {}
+        prog.materials = mats
+    prog.groups = dict(parts["groups"])
+    for label, st in parts["structures"].items():
+        prog.structures[label] = Navette_Structure._from_native(st, prog.materials)
+    if parts["architect"] is not None:
+        prog.architect = Navette_Architect._from_native(
+            parts["architect"], prog.materials, list(prog.structures.values()))
     return prog
