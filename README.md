@@ -1,4 +1,4 @@
-# Navette - Weaving the mathematics of light in thin film systems
+# Navette - Weaving thin-film systems that perform
 
 **Navette** is a high-performance, physically rigorous 1D optical engine designed for the simulation of light propagation in stratified media. Built on a modern **Scattering Matrix (S-matrix)** architecture, it offers a numerically stable and vectorized alternative to traditional Transfer Matrix Methods (TMM).
 
@@ -33,6 +33,16 @@ Navette goes beyond simple Fresnel equations to provide research-grade accuracy:
 - **Interface Roughness**: Implements the **Névot-Croce** model, providing superior accuracy for high-frequency or X-ray reflectometry compared to standard Gaussian approximations.
     
 - **Ellipsometric Rigor**: Outputs (Ψ,Δ) parameters that strictly follow the **Azzam & Bashara** convention, ensuring direct compatibility with commercial ellipsometers (e.g., Woollam, Horiba).
+
+### 5. Automated Coating Design
+
+Navette doesn't just simulate — it synthesizes, with the classic **needle method** running natively on the same engine:
+
+- **Needle Insertion**: Probes every candidate position with an infinitesimal test layer and inserts real material where the merit function improves most — the Tikhonravov needle algorithm, merit-driven and target-aware.
+
+- **Thickness Optimization**: Levenberg-Marquardt refinement over free layers with bounds and clamping, interleaved with insertion passes and impact-ranked cleanup (merge, thin-layer removal, re-optimization).
+
+- **Graded Media**: Gradient-index profiles expand natively for simulation and serve as pinned background (substrate diffusion gradients, rugate foundations) while the needle designs around them.
 ### Technical Specifications
 
 |**Feature**|**Implementation & Engineering Benefit**|
