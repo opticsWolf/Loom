@@ -281,6 +281,13 @@ usable), `load_program` (dependency order, file-wins, context fills
 absent, prefix namespaces with consistent ref rewrites), `BlockConfig`/
 `NamedStructureConfig` + `architect_from_config`, `example_program.yaml`.
 6 program tests; 103 validation green.
+2026-09-06: branch policy DECIDED — history untouched, keep merging:
+`main` promotions stay `--no-ff` (merge bubbles accepted); GitHub's
+perpetual 'dev behind main' counter is ancestry cosmetics (trees verified
+identical after every promotion), not divergence.
+SUPERSEDED 2026-09-06: one reverse sync-merge (dev←main, 239ecab) made
+`main` an ancestor of `dev` again with zero rewriting — promotions go
+`--ff-only` from here; no new bubbles, counter stays 0.
 2026-09-06: RELEASE 0.4.0 — version bumped everywhere (workspace +
 crates + pyproject + __about__ + smoke assert; breaking vs 0.3.0:
 Rust-first port), release wheel built + force-added (wheel verified:
