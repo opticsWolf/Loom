@@ -257,6 +257,16 @@ pub fn reference_rotation(
     Ok(PyArray::from_vec(py, rot).into())
 }
 
+/// Apply per-wavelength rotation factors to flat rows (thin over the
+/// core kernel): returns the rotated rows.
+#[pyfunction]
+pub(crate) fn rotate_rows(rows: Vec<Complex64>, rot: Vec<Complex64>) -> PyResult<Vec<Complex64>> {
+  use navette::smatrix::synthesis::merit::rotate_rows as core_rotate;
+  let mut out = rows;
+  core_rotate(&mut out, &rot).map_err(PyValueError::new_err)?;
+  Ok(out)
+}
+
 /// Fold a spec into per-quantity `(targets, weights)` pairs (angle-major).
 /// Returns a dict with `r/t/a/rb/tb/ab` pairs plus `phi0..phi3` (one pair
 /// per S-matrix channel — emit one `P_PHI` call per used channel).

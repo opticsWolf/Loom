@@ -58,15 +58,11 @@ SCHEMA_VERSION = 1
 
 
 def check_schema_version(state, what: str) -> None:
-    """Refuse states not written at the current schema version."""
-    if "schema_version" not in state:
-        raise ValueError(f"{what}: missing schema_version tag (malformed state).")
-    found = state["schema_version"]
-    if found != SCHEMA_VERSION:
-        raise ValueError(
-            f"{what}: schema_version {found} unsupported "
-            f"(this code reads {SCHEMA_VERSION}); refusing a stale state."
-        )
+    """Refuse states not written at the current schema version.
+
+    Thin over the native gate (single canonical home)."""
+    from navette._structure import check_schema_version as _check
+    _check(dict(state), what)
 
 
 WARNING_PREFIX = "warning: "

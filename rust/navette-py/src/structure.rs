@@ -947,20 +947,60 @@ impl PyWeaverProvider {
   }
 }
 
-/// Load a program document (JSON text) into native objects (thin over
-/// `config::load_program_json_prefixed`). Returns a dict: `name`,
-/// `materials` (SpecProvider), `groups` ({name: Group}), `structures`
-/// ({label: Structure} with materials attached), `architect?`.
+/// Bit-exact grid equality (length + raw f64 bits) for bridge checks.
 #[pyfunction]
-#[pyo3(signature = (text, wavelengths, prefix=None))]
-fn load_program(
+fn grids_equal(a: Vec<f64>, b: Vec<f64>) -> bool {
+  navette::structure::grids_equal(&a, &b)
+}
+
+/// Bridge assert: known provider grids must equal the solver grid.
+/// `grid` is None for unknown grids (passes); mismatches refuse.
+#[pyfunction]
+#[pyo3(signature = (grid, wavelengths, what))]
+fn assert_provider_grid(
+  grid: Option<Vec<f64>>,
+  wavelengths: Vec<f64>,
+  what: &str,
+) -> PyResult<()> {
+  struct G(Option<Vec<f64>>);
+  impl navette::structure::MaterialProvider for G {
+    fn nk(&self, _name: &str, _w: &[f64]) -> Result<Vec<num_complex::Complex64>, String> {
+      Err("probe-only".to_string())
+    }
+    fn contains(&self, _name: &str) -> bool {
+      false
+    }
+    fn grid(&self) -> Option<&[f64]> {
+      self.0.as_deref()
+    }
+  }
+  ver(navette::structure::assert_provider_grid(&G(grid), &wavelengths, what))
+}
+
+/// Refuse states not written at the current schema version (thin
+/// over `version::check_schema_version` — the single canonical gate).
+#[pyfunction]
+#[pyo3(signature = (state, what))]
+fn check_schema_version(
+  state: &Bound<'_, pyo3::types::PyDict>,
+  what: &str,
+) -> PyResult<()> {
+  let found = match state.get_item("schema_version")? {
+    None => None,
+    Some(v) if v.is_none() => None,
+    Some(v) => Some(v.extract::<u32>().map_err(|_| {
+      PyValueError::new_err(format!("{what}: schema_version must be an integer."))
+    })?),
+  };
+  ver(navette::structure::check_schema_version(found, what))
+}
+
+/// Shared program-parts assembly (used by `load_program` + file/section
+/// loaders): native objects with materials attached for solving.
+fn program_to_dict(
   py: Python<'_>,
-  text: &str,
-  wavelengths: PyReadonlyArray1<f64>,
-  prefix: Option<String>,
+  prog: navette::config::LoadedProgram,
 ) -> PyResult<Py<PyDict>> {
-  let wl = wavelengths.as_slice()?.to_vec();
-  let prog = ver(navette::config::load_program_json_prefixed(text, &wl, prefix.as_deref()))?;
   let out = PyDict::new(py);
   out.set_item("name", prog.name)?;
   let pymats = match prog.materials {
@@ -973,7 +1013,6 @@ fn load_program(
     groups.set_item(k, PyGroup::from_inner(g.clone()))?;
   }
   out.set_item("groups", groups)?;
-  // Attach materials to each structure for out-of-the-box solving.
   let mats: Py<PyAny> = out
     .get_item("materials")?
     .ok_or_else(|| PyValueError::new_err("load_program: missing materials"))?
@@ -994,6 +1033,152 @@ fn load_program(
     }
   }
   Ok(out.into())
+}
+
+fn json_value(v: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+  py_to_json(v)
+}
+
+/// Load a program from a JSON file (thin over `config::load_program_file`).
+#[pyfunction]
+#[pyo3(signature = (path, wavelengths, prefix=None))]
+fn load_program_file(
+  py: Python<'_>,
+  path: &str,
+  wavelengths: PyReadonlyArray1<f64>,
+  prefix: Option<String>,
+) -> PyResult<Py<PyDict>> {
+  let wl = wavelengths.as_slice()?.to_vec();
+  let prog =
+    ver(navette::config::load_program_file(path, &wl, prefix.as_deref()))?;
+  program_to_dict(py, prog)
+}
+
+/// Materials section → native SpecProvider (prefix-aware).
+#[pyfunction]
+#[pyo3(signature = (items, wavelengths, prefix=None))]
+fn load_materials_section(
+  py: Python<'_>,
+  items: &Bound<'_, PyAny>,
+  wavelengths: PyReadonlyArray1<f64>,
+  prefix: Option<String>,
+) -> PyResult<Py<PySpecProvider>> {
+  let v = json_value(items)?;
+  let inner =
+    ver(navette::config::load_materials(&v, wavelengths.as_slice()?, prefix.as_deref()))?;
+  Py::new(py, PySpecProvider { inner })
+}
+
+/// Groups section → `{name: Group}` (prefix-aware).
+#[pyfunction]
+#[pyo3(signature = (items, prefix=None))]
+fn load_groups_section(
+  py: Python<'_>,
+  items: &Bound<'_, PyAny>,
+  prefix: Option<String>,
+) -> PyResult<Py<PyDict>> {
+  let v = json_value(items)?;
+  let groups = ver(navette::config::load_groups(&v, prefix.as_deref()))?;
+  let out = PyDict::new(py);
+  for (k, g) in &groups {
+    out.set_item(k, PyGroup::from_inner(g.clone()))?;
+  }
+  Ok(out.into())
+}
+
+/// Structure section → native Structure (materials required, prefix-aware).
+/// `materials` is a native SpecProvider; library groups pass as natives.
+#[pyfunction]
+#[pyo3(signature = (payload, materials, library_groups, prefix=None))]
+fn load_structure_section(
+  py: Python<'_>,
+  payload: &Bound<'_, PyAny>,
+  materials: &PySpecProvider,
+  library_groups: HashMap<String, Py<PyGroup>>,
+  prefix: Option<String>,
+) -> PyResult<Py<PyStructure>> {
+  use navette::structure::MaterialProvider as _MPLoad;
+  let v = json_value(payload)?;
+  let groups: HashMap<String, navette::structure::Group> = library_groups
+    .iter()
+    .map(|(k, g)| (k.clone(), g.bind(py).borrow().inner_clone()))
+    .collect();
+  let st = ver(navette::config::load_structure(
+    &v,
+    Some(&materials.inner as &dyn _MPLoad),
+    &groups,
+    prefix.as_deref(),
+  ))?;
+  let shared: SharedStructure = std::rc::Rc::new(std::cell::RefCell::new(st));
+  Ok(Py::new(
+    py,
+    PyStructure { inner: shared, materials: None },
+  )?)
+}
+
+/// Named structures section -> `{label: Structure}` (prefix-aware).
+#[pyfunction]
+#[pyo3(signature = (items, materials, library_groups, prefix=None))]
+fn load_named_structures_section(
+  py: Python<'_>,
+  items: &Bound<'_, PyAny>,
+  materials: &PySpecProvider,
+  library_groups: HashMap<String, Py<PyGroup>>,
+  prefix: Option<String>,
+) -> PyResult<Py<PyDict>> {
+  use navette::structure::MaterialProvider as _MPNS;
+  let v = json_value(items)?;
+  let groups: HashMap<String, navette::structure::Group> = library_groups
+    .iter()
+    .map(|(k, g)| (k.clone(), g.bind(py).borrow().inner_clone()))
+    .collect();
+  let map = ver(navette::config::load_named_structures(
+    &v,
+    Some(&materials.inner as &dyn _MPNS),
+    &groups,
+    prefix.as_deref(),
+  ))?;
+  let out = PyDict::new(py);
+  for (label, st) in map {
+    let shared: SharedStructure = std::rc::Rc::new(std::cell::RefCell::new(st));
+    out.set_item(label, PyStructure { inner: shared, materials: None })?;
+  }
+  Ok(out.into())
+}
+
+/// Architect section → native Architect (blocks reference `structures`).
+#[pyfunction]
+#[pyo3(signature = (payload, structures, prefix=None))]
+fn load_architect_section(
+  py: Python<'_>,
+  payload: &Bound<'_, PyAny>,
+  structures: HashMap<String, Py<PyStructure>>,
+  prefix: Option<String>,
+) -> PyResult<Py<PyArchitect>> {
+  let v = json_value(payload)?;
+  let map: HashMap<String, navette::structure::Structure> = structures
+    .iter()
+    .map(|(k, s)| (k.clone(), s.bind(py).borrow().inner.borrow().clone()))
+    .collect();
+  let arch = ver(navette::config::load_architect(&v, &map, prefix.as_deref()))?;
+  Ok(Py::new(py, PyArchitect { inner: arch, materials: None })?)
+}
+
+/// Load a program document (JSON text) into native objects (thin over
+/// `config::load_program_json_prefixed`). Returns a dict: `name`,
+/// `materials` (SpecProvider), `groups` ({name: Group}), `structures`
+/// ({label: Structure} with materials attached), `architect?`.
+#[pyfunction]
+#[pyo3(signature = (text, wavelengths, prefix=None))]
+fn load_program(
+  py: Python<'_>,
+  text: &str,
+  wavelengths: PyReadonlyArray1<f64>,
+  prefix: Option<String>,
+) -> PyResult<Py<PyDict>> {
+  let wl = wavelengths.as_slice()?.to_vec();
+  let prog = ver(navette::config::load_program_json_prefixed(text, &wl, prefix.as_deref()))?;
+  program_to_dict(py, prog)
 }
 
 /// Python value → shelf entry: complex/float arrays, or spec dicts.
@@ -2016,6 +2201,15 @@ pub fn _structure(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<PyDictProvider>()?;
   m.add_class::<PySpecProvider>()?;
   m.add_function(wrap_pyfunction!(load_program, m)?)?;
+  m.add_function(wrap_pyfunction!(load_program_file, m)?)?;
+  m.add_function(wrap_pyfunction!(load_materials_section, m)?)?;
+  m.add_function(wrap_pyfunction!(load_groups_section, m)?)?;
+  m.add_function(wrap_pyfunction!(load_structure_section, m)?)?;
+  m.add_function(wrap_pyfunction!(load_architect_section, m)?)?;
+  m.add_function(wrap_pyfunction!(load_named_structures_section, m)?)?;
+  m.add_function(wrap_pyfunction!(check_schema_version, m)?)?;
+  m.add_function(wrap_pyfunction!(grids_equal, m)?)?;
+  m.add_function(wrap_pyfunction!(assert_provider_grid, m)?)?;
   m.add_class::<PyWeaverProvider>()?;
   m.add_class::<crate::config::PyMaterialDef>()?;
   m.add_class::<crate::config::PyLayerRow>()?;

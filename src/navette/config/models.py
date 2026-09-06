@@ -2,7 +2,7 @@
 """
 Config models: thin validated holders over the native schema.
 
-These replace the pydantic models. Each class validates its inputs
+Native-validated holders (the pydantic models are gone). Each class validates its inputs
 natively on construction (unknown fields refused, bounds enforced) and
 exposes ``model_validate`` / ``model_dump`` / ``model_copy`` for the
 loaders plus plain attribute access for the builders. No schema lives
@@ -67,7 +67,7 @@ class _TabData:
 
 
 class _NativeModel:
-    """Base: validated dict + attribute access + pydantic-compat surface."""
+    """Base: validated dict + attribute access + loader-compat surface."""
 
     _native_name: str = ""
 

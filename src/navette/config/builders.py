@@ -151,7 +151,8 @@ def pipeline_from_config(
     """Native ``(DesignStack, contrast_map)`` from typed configs.
 
     Thin wrapper over the native assembler
-    (``DesignStack.design_from_config``): validates here (pydantic),
+    (``DesignStack.design_from_config``): shapes plain dicts here (unvalidated),
+    validation runs natively on handover,
     assembles there (material evaluation, film/group construction, one
     ``from_design``). ``structure.layers`` carry ``layer_type``: 0 =
     ambient row, 2 = substrate row, 1 = film. At most one ambient / one
