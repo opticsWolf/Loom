@@ -20,3 +20,5 @@ pub mod smatrix;
 pub mod spectralweave;
 /// Stack model: layers, groups, providers, expansion, architect.
 pub mod structure;
+/// Program documents: versioned envelopes + section assembly.
+pub mod config;

@@ -210,6 +210,7 @@ fn d_mask7() -> Vec<i32> {
 pub struct StructureCfg {
   pub label: String,
   pub layers: Vec<LayerRow>,
+  #[serde(default)]
   pub groups: Vec<GroupRow>,
 }
 
@@ -251,7 +252,7 @@ fn as_i32(v: &Value, key: &str) -> Result<i32, String> {
 /// Apply a driver-key flag map onto an authoring film. Keys mirror the
 /// Python driver split (`rough_val` aliases `roughness`); unknown keys
 /// are errors, never ignored.
-fn apply_flag_map(layer: &mut Layer, map: &BTreeMap<String, Value>) -> Result<(), String> {
+pub(crate) fn apply_flag_map(layer: &mut Layer, map: &BTreeMap<String, Value>) -> Result<(), String> {
   for (k, v) in map {
     match k.as_str() {
       "coherent" => layer.coherent = as_bool(v, k)?,
@@ -270,7 +271,7 @@ fn apply_flag_map(layer: &mut Layer, map: &BTreeMap<String, Value>) -> Result<()
   Ok(())
 }
 
-fn apply_row(layer: &mut Layer, row: &LayerRow) -> Result<(), String> {
+pub(crate) fn apply_row(layer: &mut Layer, row: &LayerRow) -> Result<(), String> {
   layer.coherent = row.coherent;
   layer.roughness = row.roughness_nm;
   layer.rough_type =
@@ -284,7 +285,7 @@ fn apply_row(layer: &mut Layer, row: &LayerRow) -> Result<(), String> {
   Ok(())
 }
 
-fn build_group(row: &GroupRow) -> Result<Group, String> {
+pub(crate) fn build_group(row: &GroupRow) -> Result<Group, String> {
   let mut g = Group::new(&row.name);
   g.thick_factor = row.thick_factor;
   g.thick_summand = row.thick_summand;
@@ -330,7 +331,7 @@ fn build_group(row: &GroupRow) -> Result<Group, String> {
 }
 
 /// Evaluate one library entry on the grid.
-fn eval_material(def: &MaterialDef, wavelengths: &[f64]) -> Result<Vec<Complex64>, String> {
+pub(crate) fn eval_material(def: &MaterialDef, wavelengths: &[f64]) -> Result<Vec<Complex64>, String> {
   let model = if def.model == "TableMaterial" { "Table" } else { def.model.as_str() };
   let mut params = def.params.clone();
   if model == "Table" {
@@ -352,7 +353,33 @@ fn eval_material(def: &MaterialDef, wavelengths: &[f64]) -> Result<Vec<Complex64
       );
     }
   }
-  MaterialSpec::new(model, params).evaluate(wavelengths)
+  spec_from_def(def)?.evaluate(wavelengths)
+}
+
+/// Build the evaluatable spec without evaluating (lazy shelves).
+pub(crate) fn spec_from_def(def: &MaterialDef) -> Result<MaterialSpec, String> {
+  let model = if def.model == "TableMaterial" { "Table" } else { def.model.as_str() };
+  let mut params = def.params.clone();
+  if model == "Table" {
+    let n = def.n_data.as_ref().ok_or_else(|| "TableMaterial requires n_data".to_string())?;
+    params.insert(
+      "n_data".to_string(),
+      Value::Array(vec![
+        Value::Array(n.wavelengths.iter().map(|x| Value::from(*x)).collect()),
+        Value::Array(n.values.iter().map(|x| Value::from(*x)).collect()),
+      ]),
+    );
+    if let Some(k) = def.k_data.as_ref() {
+      params.insert(
+        "k_data".to_string(),
+        Value::Array(vec![
+          Value::Array(k.wavelengths.iter().map(|x| Value::from(*x)).collect()),
+          Value::Array(k.values.iter().map(|x| Value::from(*x)).collect()),
+        ]),
+      );
+    }
+  }
+  Ok(MaterialSpec::new(model, params))
 }
 
 fn fixed_spec(name: &str, nk: Vec<Complex64>) -> LayerSpec {

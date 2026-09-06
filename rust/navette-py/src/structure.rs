@@ -743,6 +743,7 @@ impl PyDictProvider {
     self.inner.contains(material_name)
   }
 
+  #[getter]
   fn grid<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
     self.inner.grid().map(|g| PyArray1::from_vec(py, g.to_vec()))
   }
@@ -827,6 +828,7 @@ impl PySpecProvider {
     self.inner.contains(material_name)
   }
 
+  #[getter]
   fn grid<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
     use navette::structure::MaterialProvider as _MP;
     PyArray1::from_vec(py, self.inner.grid().unwrap_or(&[]).to_vec())
@@ -913,6 +915,7 @@ impl PyWeaverProvider {
     self.inner.contains(material_name)
   }
 
+  #[getter]
   fn grid<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
     use navette::structure::MaterialProvider as _MP;
     PyArray1::from_vec(py, self.inner.grid().unwrap_or(&[]).to_vec())
@@ -942,6 +945,55 @@ impl PyWeaverProvider {
   fn set_strict(&mut self, value: bool) {
     self.inner.set_strict(value);
   }
+}
+
+/// Load a program document (JSON text) into native objects (thin over
+/// `config::load_program_json_prefixed`). Returns a dict: `name`,
+/// `materials` (SpecProvider), `groups` ({name: Group}), `structures`
+/// ({label: Structure} with materials attached), `architect?`.
+#[pyfunction]
+#[pyo3(signature = (text, wavelengths, prefix=None))]
+fn load_program(
+  py: Python<'_>,
+  text: &str,
+  wavelengths: PyReadonlyArray1<f64>,
+  prefix: Option<String>,
+) -> PyResult<Py<PyDict>> {
+  let wl = wavelengths.as_slice()?.to_vec();
+  let prog = ver(navette::config::load_program_json_prefixed(text, &wl, prefix.as_deref()))?;
+  let out = PyDict::new(py);
+  out.set_item("name", prog.name)?;
+  let pymats = match prog.materials {
+    None => py.None().into_any(),
+    Some(m) => Py::new(py, PySpecProvider { inner: m })?.into_any(),
+  };
+  out.set_item("materials", pymats)?;
+  let groups = PyDict::new(py);
+  for (k, g) in &prog.groups {
+    groups.set_item(k, PyGroup::from_inner(g.clone()))?;
+  }
+  out.set_item("groups", groups)?;
+  // Attach materials to each structure for out-of-the-box solving.
+  let mats: Py<PyAny> = out
+    .get_item("materials")?
+    .ok_or_else(|| PyValueError::new_err("load_program: missing materials"))?
+    .extract()?;
+  let structures = PyDict::new(py);
+  for (label, st) in prog.structures {
+    let shared: SharedStructure = std::rc::Rc::new(std::cell::RefCell::new(st));
+    structures.set_item(
+      label,
+      PyStructure { inner: shared, materials: Some(mats.clone_ref(py)) },
+    )?;
+  }
+  out.set_item("structures", structures)?;
+  match prog.architect {
+    None => out.set_item("architect", py.None())?,
+    Some(a) => {
+      out.set_item("architect", PyArchitect { inner: a, materials: None })?;
+    }
+  }
+  Ok(out.into())
 }
 
 /// Python value → shelf entry: complex/float arrays, or spec dicts.
@@ -1061,6 +1113,38 @@ fn snapshot_provider(
 ) -> PyResult<DictProvider> {
   if let Ok(p) = obj.cast::<PyDictProvider>() {
     return Ok(p.borrow().inner.clone());
+  }
+  // Native spec/weaver providers snapshot WITHOUT callbacks: evaluate
+  // needed materials on the provider grid (unknown names skip —
+  // validation reports them, mirroring the Python path).
+  use navette::structure::MaterialProvider as _MPSnap;
+  if let Ok(p) = obj.cast::<PySpecProvider>() {
+    let b = p.borrow();
+    let grid = b.inner.grid().unwrap_or(&[]).to_vec();
+    let mut entries = HashMap::new();
+    for name in needed {
+      if !b.inner.contains(name) {
+        continue;
+      }
+      entries.insert(name.clone(), Entry::Array(ver(b.inner.nk(name, &grid))?));
+    }
+    let mut inner = DictProvider::new();
+    inner.refresh(entries, Some(grid));
+    return finish_snapshot(inner);
+  }
+  if let Ok(p) = obj.cast::<PyWeaverProvider>() {
+    let b = p.borrow();
+    let grid = b.inner.grid().unwrap_or(&[]).to_vec();
+    let mut entries = HashMap::new();
+    for name in needed {
+      if !b.inner.contains(name) {
+        continue;
+      }
+      entries.insert(name.clone(), Entry::Array(ver(b.inner.nk(name, &grid))?));
+    }
+    let mut inner = DictProvider::new();
+    inner.refresh(entries, Some(grid));
+    return finish_snapshot(inner);
   }
   // Bare dicts coerce to a gridless shelf (mirrors the auto-wrap).
   if let Ok(d) = obj.cast::<PyDict>() {
@@ -1931,6 +2015,7 @@ pub fn _structure(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<PyGroup>()?;
   m.add_class::<PyDictProvider>()?;
   m.add_class::<PySpecProvider>()?;
+  m.add_function(wrap_pyfunction!(load_program, m)?)?;
   m.add_class::<PyWeaverProvider>()?;
   m.add_class::<PySolverArrays>()?;
   m.add_class::<PyStructure>()?;
