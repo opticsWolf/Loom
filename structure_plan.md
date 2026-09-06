@@ -346,6 +346,11 @@ forward-predecessor and must travel under reversal.
   of interpolating), `target_wavelength` setter (atomic grid swap + cache
   clear), `is_exact()` probe (fast-path eligibility without serving).
   82 green.
+- 2026-09-05: RUST FLIP — model lives in `navette-structure` + `_structure`
+  bindings; `navette.structure` holds re-exports, thin wrappers (provider
+  carriage, bake pour-back, shell tracking), provider vocabulary, bridge.
+  `expander.py` deleted. Python twin suite runs unchanged against bound
+  classes (58 regression incl. differentials). 86 validation green.
 - 2026-09-05: group factor baking — `bake_groups()` on structure +
   architect folds thickness/grading/roughness/interface adjustments into
   layers and resets factors (masks/policy untouched); refuses n/k-scaled

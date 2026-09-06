@@ -4,6 +4,7 @@ members = [
   "crates/navette-color",
   "crates/navette-interpolate",
   "crates/navette-smatrix",
+  "crates/navette-structure",
   "crates/navette-spectralweave",
   "crates/navette-materials",
   "crates/navette",
@@ -30,6 +31,7 @@ navette-color = { version = "0.3.0", path = "crates/navette-color" }
 navette-interpolate = { version = "0.3.0", path = "crates/navette-interpolate" }
 navette-materials = { version = "0.3.0", path = "crates/navette-materials" }
 navette-smatrix = { version = "0.3.0", path = "crates/navette-smatrix" }
+navette-structure = { version = "0.3.0", path = "crates/navette-structure" }
 navette-spectralweave = { version = "0.3.0", path = "crates/navette-spectralweave" }
 navette = { version = "0.3.0", path = "crates/navette" }
 

@@ -94,26 +94,25 @@ def group_from_config(cfg: GroupConfig) -> Group:
         roughness_summand=cfg.roughness_summand,
         interface_summand=cfg.interface_summand,
     )
-    # Set error masks and parameters
+    # Set error masks and parameters (bound setters; params replaced whole).
     group.error_mask = cfg.error_mask.copy()
     group.optimization_mask = cfg.optimization_mask.copy()
-    group.thickness_error_type = cfg.thickness_error_type
-    group.n_error_type = cfg.n_error_type
-    group.k_error_type = cfg.k_error_type
-    group.inh_delta_error_type = cfg.inh_delta_error_type
-    group.roughness_error_type = cfg.roughness_error_type
-    group.interface_error_type = cfg.interface_error_type
+    group.set_error_type("thickness", cfg.thickness_error_type)
+    group.set_error_type("n", cfg.n_error_type)
+    group.set_error_type("k", cfg.k_error_type)
+    group.set_error_type("inh_delta", cfg.inh_delta_error_type)
+    group.set_error_type("roughness", cfg.roughness_error_type)
+    group.set_error_type("interface", cfg.interface_error_type)
 
-    def copy_params(src, dst):
-        for key in src.model_dump().keys():
-            dst[key] = getattr(src, key)
+    def copy_params(src, channel):
+        group.set_error_params(channel, src.model_dump())
 
-    copy_params(cfg.thickness_error_params, group.thickness_error_params)
-    copy_params(cfg.inh_delta_error_params, group.inh_delta_error_params)
-    copy_params(cfg.roughness_error_params, group.roughness_error_params)
-    copy_params(cfg.interface_error_params, group.interface_error_params)
-    copy_params(cfg.n_error_params, group.n_error_params)
-    copy_params(cfg.k_error_params, group.k_error_params)
+    copy_params(cfg.thickness_error_params, "thickness")
+    copy_params(cfg.inh_delta_error_params, "inh_delta")
+    copy_params(cfg.roughness_error_params, "roughness")
+    copy_params(cfg.interface_error_params, "interface")
+    copy_params(cfg.n_error_params, "n")
+    copy_params(cfg.k_error_params, "k")
 
     return group
 

@@ -15,6 +15,7 @@ mod color;
 mod interpolate;
 mod materials;
 mod smatrix;
+mod structure;
 mod synthesis_merit;
 mod synthesis_pipeline;
 mod spectralweave;
@@ -42,6 +43,7 @@ fn _navette(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pymodule!(_color))?;
     m.add_wrapped(wrap_pymodule!(_interpolate))?;
     m.add_wrapped(wrap_pymodule!(_smatrix))?;
+    m.add_wrapped(wrap_pymodule!(structure::_structure))?;
     m.add_wrapped(wrap_pymodule!(_spectralweave))?;
     m.add_wrapped(wrap_pymodule!(_materials))?;
     Ok(())
