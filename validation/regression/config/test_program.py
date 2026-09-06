@@ -11,15 +11,21 @@ WL = np.array([400., 600., 800.])
 EXAMPLE = "src/navette/config/example_program.yaml"
 
 
-def test_version_gate():
-  import navette.config.program as P
+def test_version_gate(tmp_path):
+  import json
+  from navette._structure import gate_document
+  def gate(doc):
+    p = tmp_path / "d.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    return load_document(str(p))
   with pytest.raises(ValueError, match="unsupported"):
-    P._gate({"kind": "materials", "schema_version": 99,
-             "materials": []})
+    gate({"kind": "materials", "schema_version": 99, "materials": []})
   with pytest.raises(ValueError, match="unsupported"):
-    P._gate({"kind": "materials", "materials": []})  # missing
+    gate({"kind": "materials", "materials": []})  # missing
   with pytest.raises(ValueError, match="unknown"):
-    P._gate({"kind": "pipeline", "schema_version": 1})
+    gate({"kind": "pipeline", "schema_version": 1})
+  kind, name, payload = gate({"schema_version": 1, "kind": "groups", "groups": []})
+  assert (kind, name, payload) == ("groups", None, [])
 
 
 def test_full_restore():

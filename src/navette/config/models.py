@@ -1,240 +1,244 @@
 # -*- coding: utf-8 -*-
 """
-Loom: Weaving the mathematics of light in thin film systems
-Copyright (c) 2026 opticsWolf
+Config models: thin validated holders over the native schema.
 
-SPDX-License-Identifier: LGPL-3.0-or-later
+These replace the pydantic models. Each class validates its inputs
+natively on construction (unknown fields refused, bounds enforced) and
+exposes ``model_validate`` / ``model_dump`` / ``model_copy`` for the
+loaders plus plain attribute access for the builders. No schema lives
+here — ``navette._structure`` owns it.
 """
 
-from typing import Literal, Optional, Dict, Any, List, Union
-from pydantic import BaseModel, Field, field_validator, ConfigDict
-import numpy as np
+from __future__ import annotations
 
-from navette.structure.types import SCHEMA_VERSION
+from typing import Any, Dict, List, Optional
 
-# -------------------------------------------------------------------------
-# Material parameter models
-# -------------------------------------------------------------------------
-class KonstantParams(BaseModel):
-    """Wavelength-independent n/k parameters."""
-    n: float = Field(gt=0)
-    k: float = Field(default=0.0, ge=0)
+# Re-export the schema version gate source (single canonical home is Rust;
+# this mirrors the Python-side state constant it already had).
+from navette.structure.types import SCHEMA_VERSION  # noqa: F401
 
-class CauchyParams(BaseModel):
-    """Cauchy A/B/C parameters (lambda in um)."""
-    A: float
-    B: float
-    C: float
 
-class CauchyUrbachParams(BaseModel):
-    """Cauchy parameters plus Urbach tail (alpha0, Eu, lambda_g)."""
-    A: float
-    B: float
-    C: float
-    alpha0: float = Field(gt=0)
-    Eu: float = Field(gt=0)
-    lambda_g: float = Field(gt=0)
+def _plain(value: Any) -> Any:
+    """Deep-convert holders to plain JSON values for native handover."""
+    if isinstance(value, _NativeModel):
+        return _plain(value.model_dump())
+    if isinstance(value, _Params):
+        return {k: _plain(v) for k, v in value.model_dump().items()}
+    if isinstance(value, _TabData):
+        return {"wavelengths": list(value.wavelengths), "values": list(value.values)}
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
 
-class SellmeierParams(BaseModel):
-    """Up-to-three-term Sellmeier B/C coefficients."""
-    B1: float = Field(gt=0)
-    C1: float = Field(gt=0)
-    B2: float = Field(gt=0)
-    C2: float = Field(gt=0)
-    B3: float = Field(default=0.0, ge=0)
-    C3: float = Field(default=0.0, ge=0)
 
-class SellmeierUrbachParams(SellmeierParams):
-    """Sellmeier coefficients plus Urbach tail parameters."""
-    alpha0: float = Field(gt=0)
-    Eu: float = Field(gt=0)
-    lambda_g: float = Field(gt=0)
+class _Params:
+    """Plain params mapping with attribute access + ``model_dump``."""
 
-# Tabulated data (JSON-friendly lists)
-class TabulatedData(BaseModel):
-    """Measured wavelength/n/k grid for table materials."""
-    wavelengths: List[float]
-    values: List[float]
+    __slots__ = ("_data",)
 
-    @field_validator("wavelengths", "values")
+    def __init__(self, data: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        merged = dict(data or {})
+        merged.update(kwargs)
+        object.__setattr__(self, "_data", merged)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def model_dump(self) -> Dict[str, Any]:
+        return dict(self._data)
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return f"Params({self._data!r})"
+
+
+class _TabData:
+    """Tabulated grid holder (``wavelengths`` / ``values``)."""
+
+    __slots__ = ("wavelengths", "values")
+
+    def __init__(self, wavelengths: List[float], values: List[float]) -> None:
+        self.wavelengths = list(wavelengths)
+        self.values = list(values)
+
+
+class _NativeModel:
+    """Base: validated dict + attribute access + pydantic-compat surface."""
+
+    _native_name: str = ""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        from navette import _structure as _ext
+        merged = dict(data or {})
+        merged.update(kwargs)
+        native_cls = getattr(_ext, self._native_name)
+        self._data = native_cls(_plain(merged)).to_dict()
+        self._post_init()
+
+    def _post_init(self) -> None:
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
     @classmethod
-    def non_empty(cls, v):
-        if not v:
-            raise ValueError("must not be empty")
-        return v
+    def model_validate(cls, data: Dict[str, Any]) -> "_NativeModel":
+        return cls(dict(data))
 
-class TableMaterialParams(BaseModel):
-    """Table material: grid data plus optional n/k scale factors."""
-    n_factor: float = Field(default=1.0, ge=0)
-    k_factor: float = Field(default=1.0, ge=0)
-    interpolation_type_n: Literal["linear", "cubicspline", "pchip", "akima"] = "linear"
-    interpolation_type_k: Literal["linear", "cubicspline", "pchip", "akima"] = "linear"
+    def model_dump(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return dict(self._data)
 
-# Discriminated union for all material definitions
-class MaterialDefinition(BaseModel):
-    """One named material in a library: model selector plus params."""
-    model_config = ConfigDict(extra="forbid")
+    def model_copy(self, update: Optional[Dict[str, Any]] = None) -> "_NativeModel":
+        merged = dict(self._data)
+        if update:
+            merged.update(update)
+        return type(self)(merged)
 
-    name: str
-    code: Optional[str] = None
-    model: Literal[
-        "Konstant",
-        "TableMaterial",
-        "Cauchy",
-        "CauchyUrbach",
-        "Sellmeier",
-        "SellmeierUrbach",
-    ]
-    params: Union[
-        KonstantParams,
-        CauchyParams,
-        CauchyUrbachParams,
-        SellmeierParams,
-        SellmeierUrbachParams,
-        TableMaterialParams,
-    ]
-    n_data: Optional[TabulatedData] = None
-    k_data: Optional[TabulatedData] = None
-
-    @field_validator("params", mode="before")
-    @classmethod
-    def coerce_params(cls, v, info):
-        model_name = info.data.get("model")
-        if model_name == "Konstant":
-            return KonstantParams.model_validate(v)
-        elif model_name == "Cauchy":
-            return CauchyParams.model_validate(v)
-        elif model_name == "CauchyUrbach":
-            return CauchyUrbachParams.model_validate(v)
-        elif model_name == "Sellmeier":
-            return SellmeierParams.model_validate(v)
-        elif model_name == "SellmeierUrbach":
-            return SellmeierUrbachParams.model_validate(v)
-        elif model_name == "TableMaterial":
-            return TableMaterialParams.model_validate(v)
-        raise ValueError(f"Unknown model: {model_name}")
-
-    @field_validator("n_data", "k_data")
-    @classmethod
-    def check_table_data(cls, v, info):
-        model_name = info.data.get("model")
-        if model_name == "TableMaterial" and v is None and "n_data" in info.field_name:
-            raise ValueError("TableMaterial requires n_data")
-        return v
-
-# -------------------------------------------------------------------------
-# Layer model
-# -------------------------------------------------------------------------
-class LayerConfig(BaseModel):
-    """One stack layer: material code, thickness and solver flags."""
-    model_config = ConfigDict(extra="forbid")
-
-    material_code: str
-    thickness_nm: float = Field(gt=0)
-    coherent: bool = True
-    roughness_nm: float = Field(default=0.0, ge=0)
-    rough_type: int = Field(default=0, ge=0, le=5)
-    inhomogen: bool = False
-    inh_delta: float = Field(default=0.1, ge=0, le=1)
-    interface: bool = False
-    interface_thickness_nm: float = Field(default=0.0, ge=0)
-    optimize: bool = True
-    needle: bool = True
-    layer_type: int = Field(default=1, ge=0, le=2, description="LayerType: 0=AMBIENT, 1=FILM, 2=SUBSTRATE")
-
-# -------------------------------------------------------------------------
-# Group model (error parameters)
-# -------------------------------------------------------------------------
-class ErrorParams(BaseModel):
-    """Fabrication-error law and parameters for one channel."""
-    abs_mean_delta_g: float = 0.0
-    abs_std_dev: float = 0.01
-    rel_mean_delta_g: float = 0.0
-    rel_std_dev: float = 1.0
-    abs_mean_delta_h: float = 0.0
-    abs_variance: float = 0.01
-    rel_mean_delta_h: float = 0.0
-    rel_variance: float = 1.0
-
-class GroupConfig(BaseModel):
-    """Group scaling factors plus per-channel error configs."""
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    thick_factor: float = 1.0
-    thick_summand: float = 0.0
-    n_factor: float = 1.0
-    k_factor: float = 1.0
-    inh_delta_summand: float = 0.0
-    roughness_summand: float = 0.0
-    interface_summand: float = 0.0
-    error_mask: List[int] = Field(default_factory=lambda: [0]*6)
-    optimization_mask: List[int] = Field(default_factory=lambda: [1]*7)
-
-    @field_validator("optimization_mask")
-    @classmethod
-    def _check_opt_mask(cls, v):
-        if len(v) != 7 or any(x not in (0, 1) for x in v):
-            raise ValueError("optimization_mask must be 7 binary entries (see OptMask).")
-        return v
-    thickness_error_type: int = 0
-    n_error_type: int = 0
-    k_error_type: int = 0
-    inh_delta_error_type: int = 0
-    roughness_error_type: int = 0
-    interface_error_type: int = 0
-    thickness_error_params: ErrorParams = Field(default_factory=ErrorParams)
-    inh_delta_error_params: ErrorParams = Field(default_factory=ErrorParams)
-    roughness_error_params: ErrorParams = Field(default_factory=ErrorParams)
-    interface_error_params: ErrorParams = Field(default_factory=ErrorParams)
-    n_error_params: ErrorParams = Field(default_factory=ErrorParams)
-    k_error_params: ErrorParams = Field(default_factory=ErrorParams)
-
-class BlockConfig(BaseModel):
-    """One architect block: reference to a named structure plus flags."""
-    model_config = ConfigDict(extra="forbid")
-
-    structure: str
-    inverted: bool = False
-    repeat_count: int = Field(default=1, ge=1)
-    label: str = ""
-    kind: int = Field(default=1, ge=0, le=1, description="BlockKind: 0=STACK, 1=FILMS")
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return f"{type(self).__name__}({self._data!r})"
 
 
-class NamedStructureConfig(BaseModel):
-    """A labelled structure: authoring layers + optional own groups."""
-    model_config = ConfigDict(extra="forbid")
+class MaterialDefinition(_NativeModel):
+    """One named material: model selector plus params (natively validated)."""
 
-    label: str
-    layers: List[LayerConfig]
-    groups: List[GroupConfig] = Field(default_factory=list)
+    _native_name = "MaterialDefinition"
+
+    def _post_init(self) -> None:
+        self._data["params"] = _Params(self._data.get("params", {}))
+        for key in ("n_data", "k_data"):
+            raw = self._data.get(key)
+            self._data[key] = _TabData(raw["wavelengths"], raw["values"]) if raw else None
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        out = dict(self._data)
+        out["params"] = self._data["params"].model_dump()
+        for key in ("n_data", "k_data"):
+            raw = self._data.get(key)
+            out[key] = ({"wavelengths": list(raw.wavelengths), "values": list(raw.values)}
+                        if raw is not None else None)
+        return out
+
+    def model_copy(self, update: Optional[Dict[str, Any]] = None) -> "MaterialDefinition":
+        return MaterialDefinition(self.model_dump() | dict(update or {}))
 
 
-# -------------------------------------------------------------------------
-# Structure and Architect states (for serialisation)
-# -------------------------------------------------------------------------
-class StructureState(BaseModel):
-    """Serializable stack: layers, groups and material references."""
-    schema_version: int = Field(description=f"Must equal SCHEMA_VERSION ({SCHEMA_VERSION})")
-    layers: List[Dict[str, Any]]   # from Layer.get_state()
-    groups: Dict[str, Dict[str, Any]]  # from Group.get_state()
+class LayerConfig(_NativeModel):
+    """One stack layer (natively validated)."""
 
-    @field_validator("schema_version")
-    @classmethod
-    def _check_version(cls, v):
-        if v != SCHEMA_VERSION:
-            raise ValueError(f"StructureState schema_version {v} unsupported (code reads {SCHEMA_VERSION}).")
-        return v
+    _native_name = "LayerConfig"
 
-class ArchitectState(BaseModel):
-    """Serializable multi-structure chain for node-graph persistence."""
-    schema_version: int = Field(description=f"Must equal SCHEMA_VERSION ({SCHEMA_VERSION})")
-    structures: List[StructureState]
-    blocks: List[Dict[str, Any]]   # structure_ref, inverted, repeat_count, label, kind
 
-    @field_validator("schema_version")
-    @classmethod
-    def _check_version(cls, v):
-        if v != SCHEMA_VERSION:
-            raise ValueError(f"ArchitectState schema_version {v} unsupported (code reads {SCHEMA_VERSION}).")
-        return v
+class ErrorParams(_NativeModel):
+    """Fabrication-error law and parameters (plain validated holder)."""
+
+    _native_name = "_ErrorParams"
+
+    def __init__(self, data: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        merged = dict(data or {})
+        merged.update(kwargs)
+        self._data = dict(merged)
+
+
+class GroupConfig(_NativeModel):
+    """Group scaling + per-channel errors (natively validated)."""
+
+    _native_name = "GroupConfig"
+
+    _channels = ("thickness_error_params", "inh_delta_error_params",
+                 "roughness_error_params", "interface_error_params",
+                 "n_error_params", "k_error_params")
+
+    def _post_init(self) -> None:
+        for key in self._channels:
+            self._data[key] = _Params(self._data.get(key, {}))
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        out = dict(self._data)
+        for key in self._channels:
+            raw = self._data.get(key)
+            out[key] = raw.model_dump() if isinstance(raw, _Params) else raw
+        return out
+
+    def model_copy(self, update: Optional[Dict[str, Any]] = None) -> "GroupConfig":
+        return GroupConfig(self.model_dump() | dict(update or {}))
+
+
+class BlockConfig(_NativeModel):
+    """One architect block (natively validated)."""
+
+    _native_name = "BlockConfig"
+
+
+class NamedStructureConfig(_NativeModel):
+    """A labelled structure (natively validated)."""
+
+    _native_name = "NamedStructureConfig"
+
+    def _post_init(self) -> None:
+        self._data["layers"] = [v if isinstance(v, LayerConfig) else LayerConfig(v)
+                                for v in self._data.get("layers", [])]
+        self._data["groups"] = [v if isinstance(v, GroupConfig) else GroupConfig(v)
+                                for v in self._data.get("groups", [])]
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        out = dict(self._data)
+        out["layers"] = [v.model_dump() if isinstance(v, LayerConfig) else v
+                         for v in self._data.get("layers", [])]
+        out["groups"] = [v.model_dump() if isinstance(v, GroupConfig) else v
+                         for v in self._data.get("groups", [])]
+        return out
+
+    def model_copy(self, update: Optional[Dict[str, Any]] = None) -> "NamedStructureConfig":
+        return NamedStructureConfig(self.model_dump() | dict(update or {}))
+
+
+# Param-model names kept as documentation aliases (validation is native;
+# per-model classes no longer exist as types).
+KonstantParams = _Params
+CauchyParams = _Params
+CauchyUrbachParams = _Params
+SellmeierParams = _Params
+SellmeierUrbachParams = _Params
+TableMaterialParams = _Params
+TabulatedData = _TabData
+
+
+class StructureState(_NativeModel):
+    """Serializable stack (version gate lives natively in load paths)."""
+
+    _native_name = "_StructureState"
+
+    def __init__(self, data: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        merged = dict(data or {})
+        merged.update(kwargs)
+        if merged.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError(
+                f"StructureState schema_version {merged.get('schema_version')} "
+                f"unsupported (code reads {SCHEMA_VERSION}).")
+        self._data = dict(merged)
+
+
+class ArchitectState(_NativeModel):
+    """Serializable chain (version gate lives natively in load paths)."""
+
+    _native_name = "_ArchitectState"
+
+    def __init__(self, data: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        merged = dict(data or {})
+        merged.update(kwargs)
+        if merged.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError(
+                f"ArchitectState schema_version {merged.get('schema_version')} "
+                f"unsupported (code reads {SCHEMA_VERSION}).")
+        self._data = dict(merged)

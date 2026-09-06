@@ -118,48 +118,9 @@ def build_merit_spec(collection: TargetCollection,
     # document, compile in Rust. Validation lives there now.
     import json as _json
     from navette._smatrix import compile_merit_spec as _compile
-    def _band(b):
-        if b is None:
-            return None
-        if isinstance(b, (int, float)):
-            return float(b)
-        return np.ascontiguousarray(np.asarray(b, dtype=np.float64)).ravel().tolist()
-    def _spec(t):
-        return {
-            "wavelengths": np.ascontiguousarray(np.asarray(t.wavelengths, dtype=np.float64)).ravel().tolist(),
-            "values": np.ascontiguousarray(np.asarray(t.values, dtype=np.float64)).ravel().tolist(),
-            "tolerances": np.ascontiguousarray(np.asarray(t.tolerances, dtype=np.float64)).ravel().tolist(),
-            "angle": float(t.angle), "polarization": str(t.polarization),
-            "spectral": str(t.spectral), "kind": str(t.kind),
-            "normalization_mode": str(t.normalization_mode),
-            "band": _band(t.band), "phase": bool(t.phase),
-            "weight": float(t.weight), "normalize_count": bool(t.normalize_count),
-            "integral": bool(t.integral),
-        }
-    def _base(t):
-        return {
-            "values": np.ascontiguousarray(np.asarray(t.values, dtype=np.float64)).ravel().tolist(),
-            "tolerances": np.ascontiguousarray(np.asarray(t.tolerances, dtype=np.float64)).ravel().tolist(),
-            "polarization": str(t.polarization),
-            "spectral": str(t.spectral), "kind": str(t.kind),
-            "normalization_mode": str(t.normalization_mode),
-            "band": _band(t.band), "phase": bool(t.phase),
-            "weight": float(t.weight), "normalize_count": bool(t.normalize_count),
-            "integral": bool(t.integral),
-        }
-    def _spec(t):
-        d = _base(t)
-        d["wavelengths"] = np.ascontiguousarray(np.asarray(t.wavelengths, dtype=np.float64)).ravel().tolist()
-        d["angle"] = float(t.angle)
-        return d
-    def _ang(t):
-        d = _base(t)
-        d["wavelength"] = float(t.wavelength)
-        d["angles"] = np.ascontiguousarray(np.asarray(t.angles, dtype=np.float64)).ravel().tolist()
-        return d
     doc = {
-        "spectral": [_spec(t) for t in collection.spectral_targets],
-        "angular": [_ang(t) for t in collection.angular_targets],
+        "spectral": [t._dump() for t in collection.spectral_targets],
+        "angular": [t._dump() for t in collection.angular_targets],
         "cache_size": int(cache_size), "tolerance_floor": float(tolerance_floor),
     }
     return _compile(_json.dumps(doc))

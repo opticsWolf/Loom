@@ -24,7 +24,8 @@ fn d_weight() -> f64 {
 }
 
 /// One spectral constraint curve (value vs wavelength at fixed angle).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpectralTarget {
   pub wavelengths: Vec<f64>,
   pub values: Vec<f64>,
@@ -49,7 +50,8 @@ pub struct SpectralTarget {
 }
 
 /// One angular constraint curve (value vs angle at fixed wavelength).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AngularTarget {
   pub wavelength: f64,
   pub angles: Vec<f64>,
@@ -74,7 +76,7 @@ pub struct AngularTarget {
 }
 
 /// Scalar (broadcast) or per-point band half-widths.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(untagged)]
 pub enum Band {
   Scalar(f64),
@@ -90,7 +92,8 @@ fn d_norm() -> String {
 }
 
 /// Full target set: spectral + angular curves and weaver tuning.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TargetSet {
   #[serde(default)]
   pub spectral: Vec<SpectralTarget>,

@@ -51,7 +51,7 @@ pub(crate) fn emit_warnings(py: Python<'_>, what: &str, warnings: &[String]) -> 
 
 /// Recursively convert Python values to JSON (dict/list/tuple/str/int/
 /// float/bool/None/numpy arrays; nested spec dicts pass through as maps).
-fn py_to_json(value: &Bound<'_, PyAny>) -> PyResult<Value> {
+pub(crate) fn py_to_json(value: &Bound<'_, PyAny>) -> PyResult<Value> {
   if value.is_none() {
     return Ok(Value::Null);
   }
@@ -87,7 +87,7 @@ fn py_to_json(value: &Bound<'_, PyAny>) -> PyResult<Value> {
   Err(PyValueError::new_err(format!("cannot convert {value:?} to a material param")))
 }
 
-fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
+pub(crate) fn json_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
   match value {
     Value::Null => Ok(py.None()),
     Value::Bool(b) => Ok(b.into_pyobject(py)?.as_any().clone().unbind()),
@@ -2017,6 +2017,13 @@ pub fn _structure(m: &Bound<'_, PyModule>) -> PyResult<()> {
   m.add_class::<PySpecProvider>()?;
   m.add_function(wrap_pyfunction!(load_program, m)?)?;
   m.add_class::<PyWeaverProvider>()?;
+  m.add_class::<crate::config::PyMaterialDef>()?;
+  m.add_class::<crate::config::PyLayerRow>()?;
+  m.add_class::<crate::config::PyGroupRow>()?;
+  m.add_class::<crate::config::PyBlockCfg>()?;
+  m.add_class::<crate::config::PyStructureCfg>()?;
+  m.add_function(wrap_pyfunction!(crate::config::validate_targets, m)?)?;
+  m.add_function(wrap_pyfunction!(crate::config::gate_document, m)?)?;
   m.add_class::<PySolverArrays>()?;
   m.add_class::<PyStructure>()?;
   m.add_class::<PyArchitect>()?;

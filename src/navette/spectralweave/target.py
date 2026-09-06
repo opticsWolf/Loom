@@ -71,17 +71,42 @@ class SpectralTarget:
     normalize_count: bool = False
     integral:     bool = False
 
+    def _dump(self) -> dict:
+        band = self.band
+        if isinstance(band, (int, float)):
+            band = float(band)
+        elif band is not None:
+            band = np.ascontiguousarray(np.asarray(band, dtype=np.float64)).ravel().tolist()
+        return {
+            "wavelengths": np.ascontiguousarray(np.asarray(self.wavelengths, dtype=np.float64)).ravel().tolist(),
+            "values": np.ascontiguousarray(np.asarray(self.values, dtype=np.float64)).ravel().tolist(),
+            "tolerances": np.ascontiguousarray(np.asarray(self.tolerances, dtype=np.float64)).ravel().tolist(),
+            "angle": float(self.angle), "polarization": str(self.polarization),
+            "spectral": str(self.spectral), "kind": str(self.kind),
+            "normalization_mode": str(self.normalization_mode),
+            "band": band, "phase": bool(self.phase),
+            "weight": float(self.weight) if isinstance(self.weight, (int, float)) else self.weight,
+            "normalize_count": bool(self.normalize_count),
+            "integral": bool(self.integral),
+        }
+
     def __post_init__(self) -> None:
-        _validate_shapes(self.wavelengths, self.values, self.tolerances, label="SpectralTarget")
-        _validate_weight(self.weight, label="SpectralTarget")
-        _validate_integral(self.integral, self.normalize_count, label="SpectralTarget")
-        band = _normalize_band(self.band, self.values.shape, label="SpectralTarget")
+        # Shaping (broadcast/contiguity) stays; all CHECKS run natively,
+        # once, via validate_targets (single validator, no duplication).
+        from navette._structure import validate_targets as _validate
+        import json as _json
+        band = self.band
+        if isinstance(band, (int, float)):
+            band = np.ascontiguousarray(np.full(np.shape(self.values), float(band), dtype=np.float64))
+        elif band is not None:
+            band = np.ascontiguousarray(np.asarray(band, dtype=np.float64))
         # FFI Guard: Ensure contiguous float64 memory to prevent Rust segfaults.
         # This is an O(1) no-op if the array is already correctly formatted.
         object.__setattr__(self, 'wavelengths', np.ascontiguousarray(self.wavelengths, dtype=np.float64))
         object.__setattr__(self, 'values', np.ascontiguousarray(self.values, dtype=np.float64))
         object.__setattr__(self, 'tolerances', np.ascontiguousarray(self.tolerances, dtype=np.float64))
         object.__setattr__(self, 'band', band)
+        _validate(_json.dumps({"spectral": [self._dump()], "angular": []}))
 
 
 @dataclass(slots=True, frozen=True)
@@ -104,52 +129,42 @@ class AngularTarget:
     normalize_count: bool = False
     integral:     bool = False
 
+    def _dump(self) -> dict:
+        band = self.band
+        if isinstance(band, (int, float)):
+            band = float(band)
+        elif band is not None:
+            band = np.ascontiguousarray(np.asarray(band, dtype=np.float64)).ravel().tolist()
+        return {
+            "wavelength": float(self.wavelength),
+            "angles": np.ascontiguousarray(np.asarray(self.angles, dtype=np.float64)).ravel().tolist(),
+            "values": np.ascontiguousarray(np.asarray(self.values, dtype=np.float64)).ravel().tolist(),
+            "tolerances": np.ascontiguousarray(np.asarray(self.tolerances, dtype=np.float64)).ravel().tolist(),
+            "polarization": str(self.polarization),
+            "spectral": str(self.spectral), "kind": str(self.kind),
+            "normalization_mode": str(self.normalization_mode),
+            "band": band, "phase": bool(self.phase),
+            "weight": float(self.weight) if isinstance(self.weight, (int, float)) else self.weight,
+            "normalize_count": bool(self.normalize_count),
+            "integral": bool(self.integral),
+        }
+
     def __post_init__(self) -> None:
-        _validate_shapes(self.angles, self.values, self.tolerances, label="AngularTarget")
-        _validate_weight(self.weight, label="AngularTarget")
-        _validate_integral(self.integral, self.normalize_count, label="AngularTarget")
-        band = _normalize_band(self.band, self.values.shape, label="AngularTarget")
+        from navette._structure import validate_targets as _validate
+        import json as _json
+        band = self.band
+        if isinstance(band, (int, float)):
+            band = np.ascontiguousarray(np.full(np.shape(self.values), float(band), dtype=np.float64))
+        elif band is not None:
+            band = np.ascontiguousarray(np.asarray(band, dtype=np.float64))
         # FFI Guard
         object.__setattr__(self, 'angles', np.ascontiguousarray(self.angles, dtype=np.float64))
         object.__setattr__(self, 'values', np.ascontiguousarray(self.values, dtype=np.float64))
         object.__setattr__(self, 'tolerances', np.ascontiguousarray(self.tolerances, dtype=np.float64))
         object.__setattr__(self, 'band', band)
+        _validate(_json.dumps({"spectral": [], "angular": [self._dump()]}))
 
 BaseTarget = Union[SpectralTarget, AngularTarget]
-
-def _validate_weight(weight: float, label: str = "") -> None:
-    """Trust boundary: weights scale merit sums — NaN/negative is rejected."""
-    if not isinstance(weight, (int, float)) or not np.isfinite(weight) or weight < 0:
-        raise ValueError(f"{label}: weight must be finite and >= 0 (got {weight!r}).")
-
-
-def _validate_integral(integral: bool, normalize_count: bool, label: str = "") -> None:
-    """Integral targets already are means — a count divisor would double-dilute."""
-    if integral and normalize_count:
-        raise ValueError(
-            f"{label}: integral targets reject normalize_count (the mean already is one)."
-        )
-
-
-def _validate_shapes(*arrays: np.ndarray, label: str = "") -> None:
-    shapes = [a.shape for a in arrays]
-    if len(set(shapes)) != 1:
-        raise ValueError(f"{label} shape mismatch: " + ", ".join(str(s) for s in shapes))
-
-def _normalize_band(band: Union[np.ndarray, float, None], shape: tuple, label: str = "") -> Union[np.ndarray, None]:
-    """Broadcast a scalar band to `shape`, validate arrays, pass None through."""
-    if band is None:
-        return None
-    if isinstance(band, (int, float)):
-        if band < 0:
-            raise ValueError(f"{label}: band must be >= 0.")
-        return np.ascontiguousarray(np.full(shape, float(band), dtype=np.float64))
-    arr = np.ascontiguousarray(np.asarray(band, dtype=np.float64))
-    if arr.shape != shape:
-        raise ValueError(f"{label} band shape mismatch: {arr.shape} != {shape}.")
-    if bool((arr < 0).any()):
-        raise ValueError(f"{label}: band must be >= 0.")
-    return arr
 
 # ---------------------------------------------------------------------------
 # 2. TargetCollection (lightweight, standalone)

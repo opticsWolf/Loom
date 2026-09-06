@@ -12,6 +12,7 @@
 //! rayon-parallel kernels run, and return NumPy.
 
 mod color;
+mod config;
 mod interpolate;
 mod materials;
 mod smatrix;

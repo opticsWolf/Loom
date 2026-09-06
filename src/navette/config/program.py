@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from .builders import (
@@ -48,55 +47,8 @@ Kind = Literal["materials", "groups", "structure", "architect", "program"]
 KINDS: Tuple[str, ...] = ("materials", "groups", "structure", "architect", "program")
 
 
-class ProgramDocument(BaseModel):
-    """Versioned envelope: standalone section or full program."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(description="Must equal PROGRAM_SCHEMA_VERSION (1)")
-    kind: Kind
-    name: Optional[str] = None
-    sections: Optional[Dict[str, Any]] = None  # kind == "program" only
-
-    @classmethod
-    def check_version(cls, v: Any) -> int:
-        if v != PROGRAM_SCHEMA_VERSION:
-            raise ValueError(
-                f"program schema_version {v!r} unsupported "
-                f"(code reads {PROGRAM_SCHEMA_VERSION})."
-            )
-        return v
-
-
 def _gate(raw: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Legacy-flat detection + version gate. Returns the raw mapping."""
-    if "kind" not in raw:
-        return raw  # legacy flat form (no envelope to gate)
-    ProgramDocument.check_version(raw.get("schema_version"))
-    kind = raw.get("kind")
-    if kind not in KINDS:
-        raise ValueError(
-            f"program kind {kind!r} unknown (expected one of {', '.join(KINDS)})."
-        )
-    # Envelope carries its section payload at top level (standalone docs);
-    # strip known payload keys before strict validation so typos still fail.
-    payload_keys = {
-        "materials": {"materials"},
-        "groups": {"groups"},
-        "structure": {"label", "layers", "groups"},
-        "architect": {"structures", "blocks"},
-        "program": {"sections"},
-    }[kind]
-    unknown = set(raw) - {"schema_version", "kind", "name"} - payload_keys
-    if unknown:
-        raise ValueError(f"unknown top-level keys: {sorted(unknown)}.")
-    doc = ProgramDocument.model_validate(
-        {k: v for k, v in raw.items() if k in ("schema_version", "kind", "name", "sections")}
-    )
-    if doc.kind == "program" and not doc.sections:
-        raise ValueError("program document needs a 'sections' mapping.")
-    if doc.kind != "program" and doc.sections:
-        raise ValueError(f"standalone {doc.kind!r} document must not carry 'sections'.")
+    """Legacy shim: gating lives natively (see ``load_document``)."""
     return raw
 
 
@@ -110,36 +62,21 @@ def load_document(
     document minus envelope keys. Legacy flat files map to
     ``("materials" | "structure", None, raw)``.
     """
+    # Thin over the native gate: parse the file to a document, gate +
+    # classify in Rust (version, kind, unknown keys, legacy-flat).
+    import json as _json
+    from navette._structure import gate_document as _gate_doc
     path = Path(path)
     if fmt is None:
         fmt = "json" if path.suffix.lower() == ".json" else "yaml"
-    raw = load_json(path) if fmt == "json" else load_yaml(path)
-    if not isinstance(raw, Mapping):
-        raise ValueError(f"{path}: top level must be a mapping.")
-    gated = _gate(raw)
-    if "kind" not in gated:  # legacy flat (raw section content, like nested)
-        if "materials" in gated:
-            return "materials", None, list(gated["materials"])
-        if "layers" in gated:
-            return "structure", None, {
-                "label": "stack",
-                "layers": list(gated["layers"]),
-                "groups": list(gated.get("groups", [])),
-            }
-        raise ValueError(
-            f"{path}: legacy document needs 'materials' or 'layers' at top level."
-        )
-    kind = gated["kind"]
+    text = path.read_text(encoding="utf-8") if fmt == "json" else _json.dumps(load_yaml(path))
+    kind, name, payload_text = _gate_doc(text)
+    payload = _json.loads(payload_text)
+    if kind in ("materials", "groups"):
+        return kind, name, list(payload)
     if kind == "program":
-        return kind, gated.get("name"), dict(gated["sections"])
-    # Standalone payload is the section content itself (identical to the
-    # nested form): a list for materials/groups, a mapping otherwise.
-    content_key = {"materials": "materials", "groups": "groups"}.get(kind)
-    if content_key is not None:
-        return kind, gated.get("name"), list(gated[content_key])
-    payload = {k: v for k, v in gated.items()
-               if k not in ("schema_version", "kind", "name")}
-    return kind, gated.get("name"), payload
+        return kind, name, dict(payload)
+    return kind, name, dict(payload)
 
 
 def _px(value: str, prefix: Optional[str]) -> str:

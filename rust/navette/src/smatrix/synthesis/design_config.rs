@@ -44,7 +44,8 @@ fn d_sub() -> String {
 }
 
 /// `{wavelengths: [...], values: [...]}` table grid.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TabData {
   #[serde(default)]
   pub wavelengths: Vec<f64>,
@@ -53,7 +54,8 @@ pub struct TabData {
 }
 
 /// One material library entry.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterialDef {
   pub name: String,
   pub code: Option<String>,
@@ -67,7 +69,8 @@ pub struct MaterialDef {
 }
 
 /// One stack row: film (`layer_type` 1), ambient (0), substrate (2).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayerRow {
   pub material_code: String,
   pub thickness_nm: f64,
@@ -94,7 +97,8 @@ pub struct LayerRow {
 }
 
 /// One fabrication-error channel (mirrors the Python `ErrorParams` model).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ErrorParamsCfg {
 
   #[serde(default)]
@@ -151,7 +155,8 @@ impl ErrorParamsCfg {
 }
 
 /// One group entry (mirrors the Python `GroupConfig` model).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroupRow {
   pub name: String,
   #[serde(default = "d_one")]
@@ -206,7 +211,8 @@ fn d_mask7() -> Vec<i32> {
 }
 
 /// Named authoring structure: layers + own groups.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StructureCfg {
   pub label: String,
   pub layers: Vec<LayerRow>,
@@ -215,7 +221,8 @@ pub struct StructureCfg {
 }
 
 /// Full design request: structure + material library + options.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesignRequest {
   pub structure: StructureCfg,
   pub library: Vec<MaterialDef>,
