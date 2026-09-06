@@ -13,6 +13,8 @@ use rayon::prelude::*;
 
 use super::core_engine::*;
 use super::needle_engine::*;
+use super::optimizer::{char_func, char_func_xy};
+use super::optics_core::{redheffer_product_complex_field_inner, w_function_inner};
 use super::needle_operator::*;
 use super::optics_core::C_NM_PER_FS;
 
@@ -1182,6 +1184,579 @@ pub fn needle_gradient(
 }
 
 // ---------------------------------------------------------------------------
+// Eigenmode tools (moved verbatim from the PyO3 binding)
+// ---------------------------------------------------------------------------
+
+impl Solver {
+  /// `(lam, per-layer complex indices)` for one wavelength: explicit
+  /// index wins, else nearest grid point, else the single grid point.
+  pub fn index_column(
+    &self,
+    wavelength: Option<f64>,
+    wav_index: Option<usize>,
+  ) -> Result<(f64, Vec<Complex64>), String> {
+    let w = match wav_index {
+      Some(i) => {
+        if i >= self.wavls.len() {
+          return Err(format!("wav_index {i} out of range."));
+        }
+        i
+      }
+      None => match wavelength {
+        Some(lam) => {
+          let mut best = 0;
+          for (i, w) in self.wavls.iter().enumerate() {
+            if (w - lam).abs() < (self.wavls[best] - lam).abs() {
+              best = i;
+            }
+          }
+          best
+        }
+        None => {
+          if self.wavls.len() != 1 {
+            return Err(format!(
+              "specify wavelength or wav_index (grid has {} wavelengths).",
+              self.wavls.len()
+            ));
+          }
+          0
+        }
+      },
+    };
+    Ok((self.wavls[w], self.n_cache[w].clone()))
+  }
+
+  /// Scan `|1/r(n_eff)|^2` over a complex effective-index box.
+  /// Returns `(real_vals, imag_vals, flat imag-major values)`.
+  pub fn landscape(
+    &self,
+    real_range: (f64, f64),
+    imag_range: (f64, f64),
+    points_real: usize,
+    points_imag: usize,
+    pol: i32,
+    wavelength: Option<f64>,
+    wav_index: Option<usize>,
+  ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), String> {
+    let (lam, col) = self.index_column(wavelength, wav_index)?;
+    Ok(scan_box(
+      &col,
+      &self.thicknesses,
+      &self.rough_types,
+      &self.rough_vals,
+      lam,
+      pol,
+      real_range.0,
+      real_range.1,
+      imag_range.0,
+      imag_range.1,
+      points_real,
+      points_imag,
+    ))
+  }
+
+  /// Coarse minima of a landscape flat (imag-major `n_imag × n_real`).
+  pub fn local_minima(
+    flat: &[f64],
+    n_real: usize,
+    n_imag: usize,
+    real_vals: &[f64],
+    imag_vals: &[f64],
+    median_factor: f64,
+  ) -> Vec<(f64, f64)> {
+    find_minima(flat, n_real, n_imag, real_vals, imag_vals, median_factor)
+  }
+
+  /// Nelder-Mead refine of one complex eigenmode guess.
+  /// Returns `(n_eff, characteristic_value)`.
+  pub fn refine_mode(
+    &self,
+    guess: Complex64,
+    pol: i32,
+    wavelength: Option<f64>,
+    wav_index: Option<usize>,
+    step: f64,
+    tol: f64,
+    max_iter: usize,
+  ) -> Result<(Complex64, f64), String> {
+    let (lam, col) = self.index_column(wavelength, wav_index)?;
+    let (re, im, val) = nelder_refine(
+      &col,
+      &self.thicknesses,
+      &self.rough_types,
+      &self.rough_vals,
+      lam,
+      pol,
+      (guess.re, guess.im),
+      step,
+      tol,
+      max_iter,
+    );
+    Ok((Complex64::new(re, im), val))
+  }
+
+  /// Scan, locate coarse minima, optionally refine each.
+  pub fn find_eigenmodes(
+    &self,
+    real_range: (f64, f64),
+    imag_range: (f64, f64),
+    points_real: usize,
+    points_imag: usize,
+    median_factor: f64,
+    refine: bool,
+    pol: i32,
+    wavelength: Option<f64>,
+    wav_index: Option<usize>,
+  ) -> Result<Vec<Complex64>, String> {
+    let (real_vals, imag_vals, flat) =
+      self.landscape(real_range, imag_range, points_real, points_imag, pol, wavelength, wav_index)?;
+    let seeds = Self::local_minima(&flat, points_real, points_imag, &real_vals, &imag_vals, median_factor);
+    if !refine {
+      return Ok(seeds.into_iter().map(|(re, im)| Complex64::new(re, im)).collect());
+    }
+    let mut out = Vec::with_capacity(seeds.len());
+    for (re, im) in seeds {
+      let (n_eff, _) =
+        self.refine_mode(Complex64::new(re, im), pol, wavelength, wav_index, 1e-3, 1e-9, 200)?;
+      out.push(n_eff);
+    }
+    Ok(out)
+  }
+
+  /// `|E(z)|` profile for one eigenmode: `(z, E, start, end, layer_n)`.
+  pub fn field_profile(
+    &self,
+    n_eff: Complex64,
+    pol: i32,
+    wavelength: Option<f64>,
+    wav_index: Option<usize>,
+    points_per_layer: usize,
+  ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<Complex64>), String> {
+    let (lam, col) = self.index_column(wavelength, wav_index)?;
+    field_prof(
+      &col,
+      &self.thicknesses,
+      &self.rough_types,
+      &self.rough_vals,
+      lam,
+      n_eff,
+      pol,
+      points_per_layer,
+    )
+  }
+
+} // impl Solver (eigen drivers)
+
+/// Landscape scan over the complex effective-index box.
+/// Returns `(real_vals, imag_vals, flat imag-major values)`.
+pub fn scan_box(
+    n_stack: &[Complex64],
+    thicknesses: &[f64],
+    rough_types: &[i32],
+    rough_vals: &[f64],
+    lam: f64,
+    pol: i32,
+    real_min: f64,
+    real_max: f64,
+    imag_min: f64,
+    imag_max: f64,
+    points_real: usize,
+    points_imag: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let (n_slice, d_slice, rt_slice, rv_slice) = (n_stack, thicknesses, rough_types, rough_vals);
+
+    // Reciprocals computed ONCE per wavelength and shared read-only across all
+    // grid points (and all rayon threads). Previously this Vec was allocated
+    // inside every char_func call — thousands of heap allocations per scan.
+    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
+
+    let real_vals: Vec<f64> = (0..points_real)
+        .map(|i| real_min + (i as f64) * (real_max - real_min) / ((points_real - 1) as f64))
+        .collect();
+    let imag_vals: Vec<f64> = (0..points_imag)
+        .map(|i| imag_min + (i as f64) * (imag_max - imag_min) / ((points_imag - 1) as f64))
+        .collect();
+
+    let landscape: Vec<f64> = (0..points_imag * points_real)
+            .into_par_iter()
+            .map(|idx| {
+                let i = idx / points_real;
+                let j = idx % points_real;
+                let nr = real_vals[j];
+                let ni = imag_vals[i];
+                let n_eff = Complex64::new(nr, ni);
+                char_func(n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, n_eff, pol)
+            })
+            .collect();
+    (real_vals, imag_vals, landscape)
+}
+
+/// Coarse local minima below `median_factor * median(values)`.
+/// `flat` is imag-major with shape `(n_imag, n_real)`; the first/last
+/// real columns are skipped (matches the reference sweep).
+pub fn find_minima(
+    flat: &[f64],
+    n_real: usize,
+    n_imag: usize,
+    real_vals: &[f64],
+    imag_vals: &[f64],
+    median_factor: f64,
+) -> Vec<(f64, f64)> {
+    let at = |i: usize, j: usize| flat[i * n_real + j];
+    let mut land_vec: Vec<f64> = flat.to_vec();
+    let land = land_vec.as_slice();
+
+    // True median of the landscape (the previous code averaged, which the
+    // `median_factor` name and the Python reference (`np.median`) do not).
+    // Sentinel 1e30 cells sort to the top and so don't perturb the median,
+    // whereas they badly skewed the mean.
+    let mut sorted: Vec<f64> = land_vec.iter().copied().collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let len = sorted.len();
+    let median = if len == 0 {
+        0.0
+    } else if len % 2 == 1 {
+        sorted[len / 2]
+    } else {
+        0.5 * (sorted[len / 2 - 1] + sorted[len / 2])
+    };
+    let threshold = median * median_factor;
+
+    let mut candidates = Vec::new();
+    if n_real < 2 {
+        return candidates;
+    }
+    for i in 0..n_imag {
+        // Skip the first/last real columns, matching the reference
+        // (`for j in range(1, len(Nr) - 1)`); all imag rows are scanned so
+        // lossless modes on the Im=0 edge are still detected.
+        for j in 1..n_real - 1 {
+            let val = at(i, j);
+            if val >= threshold {
+                continue;
+            }
+            let i0 = i.saturating_sub(1);
+            let i1 = (i + 1).min(n_imag - 1);
+            let j0 = j.saturating_sub(1);
+            let j1 = (j + 1).min(n_real - 1);
+            let mut is_min = true;
+            'neighbors: for ii in i0..=i1 {
+                for jj in j0..=j1 {
+                    if ii == i && jj == j {
+                        continue;
+                    }
+                    if at(ii, jj) <= val {
+                        is_min = false;
+                        break 'neighbors;
+                    }
+                }
+            }
+            if is_min {
+                candidates.push((real_vals[j], imag_vals[i]));
+            }
+        }
+    }
+    candidates
+}
+
+/// Nelder-Mead refine of one complex eigenmode guess.
+/// Returns `(re, im, characteristic_value)`.
+pub fn nelder_refine(
+    n_stack: &[Complex64],
+    thicknesses: &[f64],
+    rough_types: &[i32],
+    rough_vals: &[f64],
+    lam: f64,
+    pol: i32,
+    x0: (f64, f64),
+    step: f64,
+    tol: f64,
+    max_iter: usize,
+) -> (f64, f64, f64) {
+    let (n_slice, d_slice, rt_slice, rv_slice) = (n_stack, thicknesses, rough_types, rough_vals);
+
+    // Reciprocals computed once and reused across every simplex evaluation.
+    let inv_n: Vec<Complex64> = n_slice.iter().map(|n| n.recip()).collect();
+
+    let mut simplex = vec![
+        [x0.0, x0.1],
+        [x0.0 + step, x0.1],
+        [x0.0, x0.1 + step * 0.1],
+    ];
+    let mut values: Vec<f64> = simplex
+        .iter()
+        .map(|x| char_func_xy(x, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol))
+        .collect();
+
+    let alpha = 1.0;
+    let gamma = 2.0;
+    let rho = 0.5;
+    let sigma = 0.5;
+    let mut iter = 0;
+
+    loop {
+        let mut indices: Vec<usize> = (0..3).collect();
+        indices.sort_by(|&i, &j| values[i].partial_cmp(&values[j]).unwrap());
+        let (best, good, worst) = (indices[0], indices[1], indices[2]);
+
+        let centroid = [
+            (simplex[best][0] + simplex[good][0]) / 2.0,
+            (simplex[best][1] + simplex[good][1]) / 2.0,
+        ];
+        let reflected = [
+            centroid[0] + alpha * (centroid[0] - simplex[worst][0]),
+            centroid[1] + alpha * (centroid[1] - simplex[worst][1]),
+        ];
+        let f_ref = char_func_xy(&reflected, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+
+        if f_ref < values[best] {
+            let expanded = [
+                centroid[0] + gamma * (reflected[0] - centroid[0]),
+                centroid[1] + gamma * (reflected[1] - centroid[1]),
+            ];
+            let f_exp = char_func_xy(&expanded, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+            if f_exp < f_ref {
+                simplex[worst] = expanded;
+                values[worst] = f_exp;
+            } else {
+                simplex[worst] = reflected;
+                values[worst] = f_ref;
+            }
+        } else if f_ref < values[good] {
+            simplex[worst] = reflected;
+            values[worst] = f_ref;
+        } else {
+            let contracted = [
+                centroid[0] + rho * (simplex[worst][0] - centroid[0]),
+                centroid[1] + rho * (simplex[worst][1] - centroid[1]),
+            ];
+            let f_con = char_func_xy(&contracted, n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+            if f_con < values[worst] {
+                simplex[worst] = contracted;
+                values[worst] = f_con;
+            } else {
+                for i in 0..3 {
+                    if i != best {
+                        simplex[i][0] = simplex[best][0] + sigma * (simplex[i][0] - simplex[best][0]);
+                        simplex[i][1] = simplex[best][1] + sigma * (simplex[i][1] - simplex[best][1]);
+                        values[i] = char_func_xy(&simplex[i], n_slice, &inv_n, d_slice, rt_slice, rv_slice, lam, pol);
+                    }
+                }
+            }
+        }
+
+        iter += 1;
+        let size = ((simplex[0][0] - simplex[1][0]).powi(2) + (simplex[0][1] - simplex[1][1]).powi(2)).sqrt()
+                + ((simplex[1][0] - simplex[2][0]).powi(2) + (simplex[1][1] - simplex[2][1]).powi(2)).sqrt()
+                + ((simplex[2][0] - simplex[0][0]).powi(2) + (simplex[2][1] - simplex[0][1]).powi(2)).sqrt();
+        if size < tol || iter >= max_iter {
+            break;
+        }
+    }
+
+    let best_idx = (0..3).min_by(|&i, &j| values[i].partial_cmp(&values[j]).unwrap()).unwrap();
+    (simplex[best_idx][0], simplex[best_idx][1], values[best_idx])
+}
+
+/// Per-layer data for the field-profile sweep.
+struct LayerData {
+  n: Complex64,
+  cos: Complex64,
+  thickness: f64,
+}
+
+/// `|E(z)|` profile through the stack for one eigenmode.
+/// Returns `(z, E, layer_start, layer_end, layer_index)`.
+pub fn field_prof(
+    n_stack: &[Complex64],
+    thicknesses: &[f64],
+    rough_types: &[i32],
+    rough_vals: &[f64],
+    lam: f64,
+    n_eff: Complex64,
+    pol: i32,
+    points_per_layer: usize,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<Complex64>), String>
+{
+    let (n_slice, d_slice, rt_slice, rv_slice) = (n_stack, thicknesses, rough_types, rough_vals);
+
+    let n_layers = n_slice.len();
+    if n_layers < 2 {
+        return Err("field profile needs at least 2 layers".to_string());
+    }
+
+    let two_pi_lam = 2.0 * PI / lam;
+
+    // Precompute layer data: n, cosθ, thickness
+    let mut layers: Vec<LayerData> = Vec::with_capacity(n_layers);
+    for i in 0..n_layers {
+        let n = n_slice[i];
+        let r0 = n_eff * n.recip();
+        let v = Complex64::new(1.0, 0.0) - r0 * r0;
+        let mut cos = v.sqrt();
+        if cos.im < 0.0 {
+            cos = -cos;
+        }
+        layers.push(LayerData {
+            n,
+            cos,
+            thickness: d_slice[i],
+        });
+    }
+
+    // Helper for Fresnel + roughness at an interface (i -> i+1)
+    let interface_props = |i: usize| -> (Complex64, Complex64, Complex64, Complex64) {
+        let n_curr = layers[i].n;
+        let cos_curr = layers[i].cos;
+        let y_curr = if pol == 0 {
+            n_curr * cos_curr
+        } else {
+            let c = if cos_curr.norm() < 1e-12 { Complex64::new(1e-12, 0.0) } else { cos_curr };
+            n_curr / c
+        };
+        let n_next = layers[i+1].n;
+        let cos_next = layers[i+1].cos;
+        let y_next = if pol == 0 {
+            n_next * cos_next
+        } else {
+            let c = if cos_next.norm() < 1e-12 { Complex64::new(1e-12, 0.0) } else { cos_next };
+            n_next / c
+        };
+
+        let den = y_curr + y_next;
+        let den_safe = if den.norm() < 1e-100 { Complex64::new(1e-100, 1e-100) } else { den };
+        let inv_den = den_safe.recip();
+        let r12 = (y_curr - y_next) * inv_den;
+        let t12 = y_curr * 2.0 * inv_den;
+        let t21 = y_next * 2.0 * inv_den;
+        let r21 = -r12;
+
+        let sigma = rv_slice[i+1];
+        let rtype = rt_slice[i+1];
+        if rtype != 0 && sigma > 0.0 {
+            let kz1 = two_pi_lam * n_curr * cos_curr;
+            let kz2 = two_pi_lam * n_next * cos_next;
+            if rtype == 5 {
+                let f = (-2.0 * kz1 * kz2 * sigma * sigma).exp();
+                (r12 * f, r21 * f, t12 * f, t21 * f)
+            } else {
+                let al = w_function_inner(2.0 * kz1 * sigma, rtype);
+                let be = w_function_inner(2.0 * kz2 * sigma, rtype);
+                let ga = w_function_inner((kz1 - kz2) * sigma, rtype);
+                (r12 * al, r21 * be, t12 * ga, t21 * ga)
+            }
+        } else {
+            (r12, r21, t12, t21)
+        }
+    };
+
+    // Propagation phase through a layer (i)
+    let prop_phase = |i: usize| -> Complex64 {
+        let d = layers[i].thickness;
+        if d <= 1e-12 {
+            return Complex64::new(1.0, 0.0);
+        }
+        let mut beta = two_pi_lam * d * layers[i].n * layers[i].cos;
+        if beta.im < 0.0 {
+            beta = Complex64::new(beta.re, -beta.im);
+        }
+        (Complex64::new(0.0, 1.0) * beta).exp()
+    };
+
+    // ---------- Build left and right S‑matrices ----------
+    // S_left[i] = S‑matrix from ambient up to the left side of layer i (i from 1 to n_layers-1)
+    let mut s_left: Vec<(Complex64, Complex64, Complex64, Complex64)> = Vec::with_capacity(n_layers);
+    s_left.push((Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0))); // identity before ambient
+
+    for i in 0..n_layers-1 {
+        let mut sg = s_left.last().unwrap().clone();
+        if i > 0 && layers[i].thickness > 1e-12 {
+            let phi = prop_phase(i);
+            sg = redheffer_product_complex_field_inner(
+                sg.0, sg.1, sg.2, sg.3,
+                Complex64::new(0.0, 0.0), phi, phi, Complex64::new(0.0, 0.0),
+            );
+        }
+        let iface = interface_props(i);
+        sg = redheffer_product_complex_field_inner(sg.0, sg.1, sg.2, sg.3, iface.0, iface.1, iface.2, iface.3);
+        s_left.push(sg);
+    }
+
+    // S_right[i] = S‑matrix from substrate up to the right side of layer i (i from n_layers-2 down to 0)
+    let mut s_right: Vec<Option<(Complex64, Complex64, Complex64, Complex64)>> = vec![None; n_layers];
+    s_right[n_layers-1] = Some((Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)));
+
+    for i in (0..n_layers-1).rev() {
+        let mut sg = s_right[i+1].unwrap();
+        if i+1 < n_layers-1 && layers[i+1].thickness > 1e-12 {
+            let phi = prop_phase(i+1);
+            sg = redheffer_product_complex_field_inner(
+                Complex64::new(0.0, 0.0), phi, phi, Complex64::new(0.0, 0.0),
+                sg.0, sg.1, sg.2, sg.3,
+            );
+        }
+        let iface = interface_props(i);
+        sg = redheffer_product_complex_field_inner(iface.0, iface.1, iface.2, iface.3, sg.0, sg.1, sg.2, sg.3);
+        s_right[i] = Some(sg);
+    }
+
+    // ---------- Compute field inside each layer ----------
+    let mut z_pos = Vec::new();
+    let mut e_mag = Vec::new();
+    let mut layer_start = Vec::new();
+    let mut layer_end = Vec::new();
+    let mut layer_n = Vec::new();
+
+    let mut z_cursor = 0.0;
+
+    for i in 1..n_layers-1 {
+        let d = layers[i].thickness;
+        if d <= 1e-12 {
+            continue;
+        }
+        let sl = &s_left[i];
+        let sr = s_right[i].as_ref().unwrap();
+        let denom = Complex64::new(1.0, 0.0) - sl.3 * sr.0;
+        let denom_safe = if denom.norm() < 1e-100 {
+            Complex64::new(1e-100, 1e-100)
+        } else {
+            denom
+        };
+        let inv_denom = denom_safe.recip();
+        let e_plus = sl.2 * inv_denom;
+        let e_minus = sr.0 * e_plus;
+        let mut beta = two_pi_lam * d * layers[i].n * layers[i].cos;
+        if beta.im < 0.0 {
+            beta = Complex64::new(beta.re, -beta.im);
+        }
+
+        let step = d / (points_per_layer as f64);
+        for k in 0..=points_per_layer {
+            let zz = k as f64 * step;
+            let xi = zz / d;
+            let e_z = e_plus * (Complex64::new(0.0, 1.0) * beta * xi).exp()
+                    + e_minus * (-Complex64::new(0.0, 1.0) * beta * xi).exp();
+            z_pos.push(z_cursor + zz);
+            e_mag.push(e_z.norm());
+        }
+        layer_start.push(z_cursor);
+        layer_end.push(z_cursor + d);
+        layer_n.push(layers[i].n);
+        z_cursor += d;
+    }
+
+    // Normalise E‑field to max = 1
+    let max_e = e_mag.iter().copied().fold(0.0, f64::max);
+    if max_e > 0.0 {
+        for val in &mut e_mag {
+            *val /= max_e;
+        }
+    }
+
+    Ok((z_pos, e_mag, layer_start, layer_end, layer_n))
+}
+
+// ---------------------------------------------------------------------------
 // Tests (standalone: no Python)
 // ---------------------------------------------------------------------------
 
@@ -1314,6 +1889,37 @@ mod tests {
     let ps = sol.maps.iter().find(|(k, _)| k == "P_s").expect("P_s").1.clone();
     assert_eq!(ps.len(), 6);
     assert!(ps.iter().all(|v| v.is_finite()));
+  }
+
+  #[test]
+  fn eigen_tools_standalone() {
+    // 3-layer waveguide-ish stack at one wavelength.
+    let col = vec![
+      Complex64::new(1.0, 0.0),
+      Complex64::new(2.0, 0.0),
+      Complex64::new(1.5, 0.0),
+    ];
+    let th = vec![0.0, 500.0, 0.0];
+    let rt = vec![0, 0, 0];
+    let rv = vec![0.0, 0.0, 0.0];
+    let (re, im, flat) = super::scan_box(&col, &th, &rt, &rv, 600.0, 0, 1.5, 2.0, 0.0, 0.05, 4, 3);
+    assert_eq!(re.len(), 4);
+    assert_eq!(im.len(), 3);
+    assert_eq!(flat.len(), 12);
+    assert!(flat.iter().all(|v| v.is_finite()));
+    // Synthetic valley: minimum at (re[1], im[1]).
+    let synth = vec![5.0, 5.0, 5.0, 5.0, 1.0, 5.0, 5.0, 5.0, 5.0];
+    let rr = vec![1.0, 2.0, 3.0];
+    let ii = vec![0.0, 0.1, 0.2];
+    let mins = super::find_minima(&synth, 3, 3, &rr, &ii, 0.5);
+    assert_eq!(mins, vec![(2.0, 0.1)]);
+    let (r, i, v) = super::nelder_refine(&col, &th, &rt, &rv, 600.0, 0, (1.7, 0.01), 1e-3, 1e-9, 50);
+    assert!(r.is_finite() && i.is_finite() && v.is_finite());
+    let prof = super::field_prof(&col, &th, &rt, &rv, 600.0, Complex64::new(1.7, 0.01), 0, 4);
+    assert!(prof.is_ok());
+    let (z, e, _, _, _) = prof.unwrap();
+    assert_eq!(z.len(), e.len());
+    assert!(!z.is_empty());
   }
 
   #[test]

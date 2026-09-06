@@ -52,10 +52,7 @@ try:
         redheffer_product_cross,
         redheffer_product_complex_field,
         solve_coherent_block_fields,
-        scan_landscape as _rs_scan_landscape,
         find_local_minima as _rs_find_local_minima,
-        nelder_mead as _rs_nelder_mead,
-        field_profile as _rs_field_profile,
     )
 except ImportError as exc:  # pragma: no cover - environment dependent
     raise ImportError(
@@ -403,25 +400,7 @@ class ScatterMatrix:
         cons = _energy_conservation(out["Rs"], out["Rp"], out["Ts"], out["Tp"])
         return self._squeeze(cons)
 
-    # ---- eigenmode tools ----------------------------------------------------
-    def _index_column(
-        self, wavelength: Optional[float] = None, wav_index: Optional[int] = None
-    ) -> Tuple[float, np.ndarray]:
-        """Return ``(lam, per_layer_complex_indices)`` for one wavelength."""
-        if wav_index is None:
-            if wavelength is None:
-                if self.n_wavs != 1:
-                    raise ValueError(
-                        "Specify `wavelength` or `wav_index` (grid has "
-                        f"{self.n_wavs} wavelengths)."
-                    )
-                wav_index = 0
-            else:
-                wav_index = int(np.argmin(np.abs(self.wavls - float(wavelength))))
-        lam = float(self.wavls[wav_index])
-        col = np.ascontiguousarray(self._indices[:, wav_index], dtype=np.complex128)
-        return lam, col
-
+    # ---- eigenmode tools (thin over the native Solver) ----------------------
     def eigenmode_landscape(
         self,
         n_real_range: Tuple[float, float],
@@ -436,19 +415,16 @@ class ScatterMatrix:
 
         ``resolution`` is ``(points_real, points_imag)``.
         """
-        lam, col = self._index_column(wavelength, wav_index)
-        points_real, points_imag = int(resolution[0]), int(resolution[1])
-        real_vals, imag_vals, land = _rs_scan_landscape(
-            col,
-            self.thicknesses,
-            self.roughness_types,
-            self.roughness_values,
-            lam,
+        real_vals, imag_vals, flat = self._native.landscape(
+            (float(n_real_range[0]), float(n_real_range[1])),
+            (float(n_imag_range[0]), float(n_imag_range[1])),
+            int(resolution[0]), int(resolution[1]),
             int(pol),
-            float(n_real_range[0]), float(n_real_range[1]),
-            float(n_imag_range[0]), float(n_imag_range[1]),
-            points_real, points_imag,
+            None if wavelength is None else float(wavelength),
+            wav_index,
         )
+        import numpy as _np
+        land = _np.asarray(flat, dtype=_np.float64).reshape(len(imag_vals), len(real_vals))
         return EigenLandscape(real_vals, imag_vals, np.asarray(land))
 
     def refine_mode(
@@ -466,18 +442,14 @@ class ScatterMatrix:
 
         Returns ``(n_eff, characteristic_value)``.
         """
-        lam, col = self._index_column(wavelength, wav_index)
-        re, im, val = _rs_nelder_mead(
-            col,
-            self.thicknesses,
-            self.roughness_types,
-            self.roughness_values,
-            lam,
+        n_eff, val = self._native.refine_mode(
+            complex(guess),
             int(pol),
-            (float(guess.real), float(guess.imag)),
+            None if wavelength is None else float(wavelength),
+            wav_index,
             float(step), float(tol), int(max_iter),
         )
-        return complex(re, im), float(val)
+        return complex(n_eff), float(val)
 
     def find_eigenmodes(
         self,
@@ -492,20 +464,15 @@ class ScatterMatrix:
         wav_index: Optional[int] = None,
     ) -> List[complex]:
         """Scan, locate coarse minima, and (optionally) Nelder-Mead refine each."""
-        land = self.eigenmode_landscape(
-            n_real_range, n_imag_range, resolution=resolution,
-            pol=pol, wavelength=wavelength, wav_index=wav_index,
+        modes = self._native.find_eigenmodes(
+            (float(n_real_range[0]), float(n_real_range[1])),
+            (float(n_imag_range[0]), float(n_imag_range[1])),
+            (int(resolution[0]), int(resolution[1])),
+            float(median_factor), bool(refine), int(pol),
+            None if wavelength is None else float(wavelength),
+            wav_index,
         )
-        seeds = land.local_minima(median_factor=median_factor)
-        if not refine:
-            return seeds
-        refined: List[complex] = []
-        for s in seeds:
-            n_eff, _ = self.refine_mode(
-                s, pol=pol, wavelength=wavelength, wav_index=wav_index
-            )
-            refined.append(n_eff)
-        return refined
+        return [complex(m) for m in modes]
 
     def field_profile(
         self,
@@ -522,15 +489,11 @@ class ScatterMatrix:
         ``layer_start`` / ``layer_end`` (per finite layer), and ``layer_index``
         (complex n of each finite layer).
         """
-        lam, col = self._index_column(wavelength, wav_index)
-        z, e, lstart, lend, lidx = _rs_field_profile(
-            col,
-            self.thicknesses,
-            self.roughness_types,
-            self.roughness_values,
-            lam,
+        z, e, lstart, lend, lidx = self._native.field_profile(
             complex(n_eff),
             int(pol),
+            None if wavelength is None else float(wavelength),
+            wav_index,
             int(points_per_layer),
         )
         return {
