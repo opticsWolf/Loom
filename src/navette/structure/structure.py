@@ -91,7 +91,11 @@ class Navette_Structure:
     obj = cls.__new__(cls)
     obj._inner = native_struct
     if materials is not None:
-      obj._inner.materials = materials
+      # The native assembly already attached our wrapper's own native
+      # core: skip the set (adoption, not an overwrite — stays silent).
+      adopted = getattr(materials, "_native", None)
+      if adopted is None or native_struct.materials is not adopted:
+        obj._inner.materials = materials
     return obj
 
   def __add__(self, other: "Navette_Structure") -> "Navette_Structure":

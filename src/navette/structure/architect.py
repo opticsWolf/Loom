@@ -69,7 +69,10 @@ class Navette_Architect:
     obj._shells = list(shells or [])
     obj._view_cache = None
     if materials is not None:
-      obj._inner.materials = materials
+      # Same adoption guard as Navette_Structure._from_native.
+      adopted = getattr(materials, "_native", None)
+      if adopted is None or native_arch.materials is not adopted:
+        obj._inner.materials = materials
     return obj
 
   # -- provider ----------------------------------------------------------

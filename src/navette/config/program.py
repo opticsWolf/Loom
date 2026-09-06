@@ -209,7 +209,7 @@ def load_program(
     if not context:
         # Whole-document native path: assemble in Rust, adopt here.
         # (Context merges stay section-wise below — live-object dict ops.)
-        return _load_program_native(path, fmt, wavelength, prefix, kind, name, payload)
+        return _load_program_native(wavelength, prefix, kind, name, payload)
     prog = LoadedProgram(name=name)
 
     sections = payload if kind == "program" else {kind: payload}
@@ -253,7 +253,7 @@ def load_program(
     return prog
 
 
-def _load_program_native(path, fmt, wavelength, prefix, kind, name, payload):
+def _load_program_native(wavelength, prefix, kind, name, payload):
     """Whole-document path: single native assembly, adopted here."""
     import json as _json
     from navette._structure import load_program as _native_load

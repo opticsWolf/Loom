@@ -857,6 +857,10 @@ impl PySpecProvider {
     use navette::structure::MaterialProvider as _MP;
     self.inner.contains(material_name)
   }
+
+  fn names(&self) -> Vec<String> {
+    self.inner.names()
+  }
 }
 
 /// Live n/k curves woven from a native `OpticalWeaver` backend (mirrors

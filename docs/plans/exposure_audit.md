@@ -6,7 +6,7 @@ cross-module plumbing) stay Rust-only but are catalogued, not hidden.
 
 **Enforcement:** `tools/check_exposure.py` (run in CI) fails on any pub
 fn that is neither referenced in `navette-py` nor listed in its audited
-`ALLOWLIST`. Status: **202 pub fns, 90 allowlisted internals, 0 gaps.**
+`ALLOWLIST`. Status: **203 pub fns, 90 allowlisted internals, 0 gaps.**
 
 ## Feature surface (bound 1:1 or via a composite entry point)
 
