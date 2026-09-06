@@ -16,6 +16,7 @@ pub mod specs;
 pub mod structure;
 pub mod validation;
 pub mod version;
+pub mod weaver;
 
 pub use architect::{Architect, Block, SharedStructure};
 pub use enums::{BlockKind, ErrorMask, ErrorType, LayerMask, LayerType, OptMask, RoughnessType};
@@ -31,5 +32,6 @@ pub use providers::{DictProvider, Entry, MaterialProvider, assert_provider_grid,
 pub use expansion::{ExpandOptions, SolverArrays, Span, expand};
 pub use structure::Structure;
 pub use specs::{MODELS, MaterialSpec};
+pub use weaver::{InterpSettings, WeaverProvider, WovenBackend};
 pub use validation::{Severity, ValidationIssue};
 pub use version::{SCHEMA_VERSION, check_schema_version};

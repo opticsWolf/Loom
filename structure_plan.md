@@ -1,3 +1,7 @@
+> SUPERSEDED (2026-09-06): history only. The live tracker is
+> `rust_first_plan.md` (§0.1 summarizes STRUCT-1..10). Everything below
+> is [V] and ported.
+
 # Structure work plan (Python side first, Rust-first port after)
 
 Scope: `src/navette/structure/` (`models.py`, `expander.py`, `structure.py`,
