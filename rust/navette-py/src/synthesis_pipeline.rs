@@ -193,6 +193,82 @@ struct PyFilmInput<'a> {
     needle: bool,
 }
 
+/// Assemble evaluated arrays into an expanded stack (thin over
+/// `driver::assemble_stack`): the `stack_from_layers` path without the run.
+/// Returns `(stack, contrast_map)`; warnings re-emit as Python warnings.
+#[pyfunction]
+#[pyo3(signature = (ambient_nk, ambient_name, substrate_nk, substrate_name, films, groups, seeds, wavelengths))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_design(
+    py: Python<'_>,
+    ambient_nk: Vec<Complex64>,
+    ambient_name: String,
+    substrate_nk: Vec<Complex64>,
+    substrate_name: String,
+    films: Vec<PyFilmInput<'_>>,
+    groups: std::collections::HashMap<String, Py<crate::structure::PyGroup>>,
+    seeds: Vec<(String, String, Vec<Complex64>)>,
+    wavelengths: PyReadonlyArray1<'_, f64>,
+) -> PyResult<(Py<PyDesignStack>, Py<PyDict>)> {
+    use navette::smatrix::synthesis::driver::{ArrayFilm, ArraySeed, assemble_stack};
+    let w = wavelengths.as_slice()?;
+    let af: Vec<ArrayFilm> = films
+        .iter()
+        .map(|f| ArrayFilm {
+            name: f.name.clone(),
+            nk: f.nk.as_slice().unwrap_or(&[]).to_vec(),
+            d_nm: f.d_nm,
+            coherent: f.coherent,
+            roughness: f.roughness,
+            rough_type: f.rough_type,
+            inhomogen: f.inhomogen,
+            inh_delta: f.inh_delta,
+            interface: f.interface,
+            interface_thickness: f.interface_thickness,
+            optimize: f.optimize,
+            needle: f.needle,
+        })
+        .collect();
+    let gm: std::collections::HashMap<String, navette::structure::Group> = groups
+        .iter()
+        .map(|(k, g)| (k.clone(), g.bind(py).borrow().inner_clone()))
+        .collect();
+    let mut cmap = navette::smatrix::synthesis::cycle::ContrastMap::new();
+    for (host, seed_name, nk) in &seeds {
+        if nk.len() != w.len() {
+            return Err(PyValueError::new_err(format!(
+                "contrast '{}': nk length {} != {} wavelengths",
+                host,
+                nk.len(),
+                w.len()
+            )));
+        }
+        cmap.insert(
+            std::sync::Arc::from(host.as_str()),
+            navette::smatrix::synthesis::structure::LayerSpec {
+                material: std::sync::Arc::from(seed_name.as_str()),
+                nk: std::sync::Arc::from(nk.as_slice()),
+                d_nm: 0.0,
+                coherent: true,
+                rough_type: 0,
+                rough_val: 0.0,
+                optimize: true,
+                needle: true,
+            },
+        );
+    }
+    let (stack, warnings) = assemble_stack(
+        &ambient_name, ambient_nk, &substrate_name, substrate_nk, &af, &gm, w,
+    )
+    .map_err(PyValueError::new_err)?;
+    crate::structure::emit_warnings(py, "assemble_design", &warnings)?;
+    let dict = PyDict::new(py);
+    for (k, v) in &cmap {
+        dict.set_item(k.to_string(), PyLayerSpec::from_inner(v.clone()))?;
+    }
+    Ok((Py::new(py, PyDesignStack::from_inner(stack))?, dict.into()))
+}
+
 /// End-to-end design run over evaluated arrays (thin over
 /// `driver::run_design`): assemble once, fold demands, macro-loop.
 /// `callback(macro_cycle, phase_dict)` aborts on raise (`USER_ABORT`).

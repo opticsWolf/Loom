@@ -80,6 +80,67 @@ def layer_from_material(material: Any, thickness: float, wavelengths,
     return LayerSpec(str(name), _eval_nk(material, wl), float(thickness), **flags)
 
 
+_LAYER_KEYS = ("roughness", "rough_type", "interface", "interface_thickness")
+_FILM_DEFAULTS = dict(coherent=True, optimize=True, needle=True,
+                      roughness=0.0, rough_type=0, inhomogen=False,
+                      inh_delta=0.1, interface=False,
+                      interface_thickness=0.0)
+
+
+def _film_dicts(layers, names, wl, film_flags=None, per_film_flags=None):
+    """Shape ``[(material, d)]`` films into native ``ArrayFilm`` dicts.
+
+    Merge order per film: defaults < global ``film_flags`` < per-film
+    override (``rough_val`` aliases ``roughness``); materials evaluate
+    to nk on ``wl``. Shared by ``stack_from_layers`` and ``run_needle``.
+    """
+    flags = dict(film_flags or {})
+    if "rough_val" in flags:
+        flags["roughness"] = flags.pop("rough_val")
+    unknown = set(flags) - set(_FILM_DEFAULTS)
+    if unknown:
+        raise TypeError(f"unknown film flags {sorted(unknown)}.")
+    overrides = per_film_flags or {}
+    out = []
+    for (mat, d), nm in zip(layers, names):
+        fd = dict(_FILM_DEFAULTS)
+        fd.update(flags)
+        local = dict(overrides.get(nm, {}))
+        if "rough_val" in local:
+            local["roughness"] = local.pop("rough_val")
+        unknown = set(local) - set(_FILM_DEFAULTS)
+        if unknown:
+            raise TypeError(f"film {nm!r}: unknown flags {sorted(unknown)}.")
+        fd.update(local)
+        out.append({
+            "name": str(nm), "nk": _eval_nk(mat, wl), "d_nm": float(d),
+            "coherent": bool(fd["coherent"]),
+            "roughness": float(fd["roughness"]),
+            "rough_type": int(fd["rough_type"]),
+            "inhomogen": bool(fd["inhomogen"]),
+            "inh_delta": float(fd["inh_delta"]),
+            "interface": bool(fd["interface"]),
+            "interface_thickness": float(fd["interface_thickness"]),
+            "optimize": bool(fd["optimize"]),
+            "needle": bool(fd["needle"]),
+        })
+    return out
+
+
+def _half_nk(value, wl):
+    """Half-space nk: constant indices broadcast (mirrors old ``fixed``)."""
+    if isinstance(value, (int, float, complex)):
+        return np.full(wl.shape, complex(value), dtype=np.complex128)
+    return _eval_nk(value, wl)
+
+
+def _group_map(groups):
+    """Bound groups pass through; param dicts construct natively."""
+    from navette._structure import Group as _RsGroup
+    return {str(name): (g if isinstance(g, _RsGroup) else _RsGroup(str(name), **dict(g)))
+            for name, g in (groups or {}).items()}
+
+
 def stack_from_layers(layers: Sequence[Tuple[Any, float]],
                       wavelengths, contrast: Mapping[Any, Any],
                       ambient: Tuple[Any, str] = (1.0, "air"),
@@ -109,63 +170,18 @@ def stack_from_layers(layers: Sequence[Tuple[Any, float]],
     ``film_flags`` per film name (e.g. grade only the substrate).
     Span-aware graded optimization is future work (D2).
     """
-    from navette._structure import Layer as RsLayer, Group as RsGroup
+    # Thin over native assemble_design: shaping here, expansion in Rust.
+    from navette._smatrix import assemble_design as _assemble
     wl = np.ascontiguousarray(np.asarray(wavelengths, dtype=np.float64))
-    flags = dict(coherent=True, optimize=True, needle=True)
-    flags.update(film_flags or {})
-    layer_flags = {k: flags.pop(k) for k in
-                   ("roughness", "rough_type", "interface", "interface_thickness")
-                   if k in flags}
-    if "rough_val" in flags:
-        layer_flags["roughness"] = flags.pop("rough_val")
-
-    def fixed(value, name):
-        nk = (np.full(wl.shape, complex(value), dtype=np.complex128)
-              if isinstance(value, (int, float, complex))
-              else _eval_nk(value, wl))
-        return LayerSpec(str(name), nk, 0.0,
-                         coherent=True, optimize=False, needle=False)
-
-    amb = fixed(ambient[0], ambient[1] if len(ambient) > 1 else "air")
-    sub = fixed(substrate[0], substrate[1] if len(substrate) > 1 else "sub")
     names = list(names) if names is not None else [f"film{i}" for i in range(len(layers))]
     if len(names) != len(layers):
         raise ValueError("names length must match layers length.")
-    if len(set(names)) != len(names):
-        raise ValueError("film names must be unique (they key the nk table).")
-    # Per-film flags: globals split once, then each film merges its
-    # override (if any) and re-splits. Single source for the split keys.
-    def _split(fd):
-        fd = dict(fd)
-        lf = {k: fd.pop(k) for k in
-              ("roughness", "rough_type", "interface", "interface_thickness")
-              if k in fd}
-        if "rough_val" in fd:
-            lf["roughness"] = fd.pop("rough_val")
-        return fd, lf
-    design, nk_map = [], {}
-    overrides = per_film_flags or {}
-    for (mat, d), nm in zip(layers, names):
-        nk_map[str(nm)] = _eval_nk(mat, wl)
-        if nm in overrides:
-            local, lf = _split({**flags, **layer_flags, **dict(overrides[nm])})
-        else:
-            local, lf = flags, layer_flags
-        design.append(RsLayer(float(d), str(nm), **local, **lf))
-    gmap = {}
-    for name, g in (groups or {}).items():
-        gmap[str(name)] = g if isinstance(g, RsGroup) else RsGroup(str(name), **dict(g))
-    # Background is implied, not declared: graded + pinned (both flags
-    # false) keeps its profile; any other graded film homogenizes loudly.
-    background = [str(nm) for layer, nm in zip(design, names)
-                  if layer.inhomogen and not layer.optimize and not layer.needle]
-    stack = DesignStack.from_design(
-        amb, sub, design, nk_map, gmap, wl, background=background)
-    cmap = {str(k): layer_from_material(v, 0.0, wl, name=f"{k}_seed",
-                                        coherent=True, optimize=True,
-                                        needle=True)
-            for k, v in contrast.items()}
-    return stack, cmap
+    films = _film_dicts(layers, names, wl, film_flags, per_film_flags)
+    seeds = [(str(k), f"{k}_seed", _eval_nk(v, wl)) for k, v in contrast.items()]
+    return _assemble(
+        _half_nk(ambient[0], wl), str(ambient[1] if len(ambient) > 1 else "air"),
+        _half_nk(substrate[0], wl), str(substrate[1] if len(substrate) > 1 else "sub"),
+        films, _group_map(groups), seeds, wl)
 
 
 def run_needle(layers: Sequence[Tuple[Any, float]],
@@ -220,58 +236,19 @@ def run_needle(layers: Sequence[Tuple[Any, float]],
         return s
     ambient = stack_kwargs.pop("ambient", (1.0, "air"))
     substrate = stack_kwargs.pop("substrate", (1.52, "sub"))
-    film_flags = stack_kwargs.pop("film_flags", None) or {}
-    groups = stack_kwargs.pop("groups", None) or {}
-    per_film_flags = stack_kwargs.pop("per_film_flags", None) or {}
+    film_flags = stack_kwargs.pop("film_flags", None)
+    groups = stack_kwargs.pop("groups", None)
+    per_film_flags = stack_kwargs.pop("per_film_flags", None)
     if stack_kwargs:
         raise TypeError(f"run_needle: unknown stack options {sorted(stack_kwargs)}.")
-    base = dict(coherent=True, optimize=True, needle=True,
-                roughness=0.0, rough_type=0, inhomogen=False, inh_delta=0.1,
-                interface=False, interface_thickness=0.0)
-    layer_keys = ("roughness", "rough_type", "interface", "interface_thickness")
-    if "rough_val" in film_flags:
-        film_flags = dict(film_flags)
-        base["roughness"] = film_flags.pop("rough_val")
-    for k in layer_keys:
-        if k in film_flags:
-            base[k] = film_flags[k]
-    rest_flags = {k: v for k, v in film_flags.items() if k not in layer_keys}
-    films = []
-    for (mat, d), nm in zip(layers, names):
-        fd = dict(base)
-        fd.update(rest_flags)
-        fd.update(dict(per_film_flags.get(nm, {})))
-        if "rough_val" in fd:
-            fd["roughness"] = fd.pop("rough_val")
-        films.append({
-            "name": str(nm), "nk": _eval_nk(mat, wl), "d_nm": float(d),
-            "coherent": bool(fd.get("coherent", True)),
-            "roughness": float(fd.get("roughness", 0.0)),
-            "rough_type": int(fd.get("rough_type", 0)),
-            "inhomogen": bool(fd.get("inhomogen", False)),
-            "inh_delta": float(fd.get("inh_delta", 0.1)),
-            "interface": bool(fd.get("interface", False)),
-            "interface_thickness": float(fd.get("interface_thickness", 0.0)),
-            "optimize": bool(fd.get("optimize", True)),
-            "needle": bool(fd.get("needle", True)),
-        })
-    from navette._structure import Group as _RsGroup
-    gmap = {}
-    for name, g in groups.items():
-        gmap[str(name)] = g if isinstance(g, _RsGroup) else _RsGroup(str(name), **dict(g))
-    seeds = []
-    for k, v in contrast.items():
-        host = _host_key(k)
-        seeds.append((host, f"{host}_seed", _eval_nk(v, wl)))
+    films = _film_dicts(layers, names, wl, film_flags, per_film_flags)
+    seeds = [(_host_key(k), f"{_host_key(k)}_seed", _eval_nk(v, wl))
+             for k, v in contrast.items()]
     spec = (_build_merit_spec(targets) if isinstance(targets, TargetCollection)
             else targets)
-    def _half_nk(value):
-        # Mirrors the old fixed() helper: constant indices broadcast.
-        if isinstance(value, (int, float, complex)):
-            return np.full(wl.shape, complex(value), dtype=np.complex128)
-        return _eval_nk(value, wl)
-    amb_nk = _half_nk(ambient[0])
-    sub_nk = _half_nk(substrate[0])
+    amb_nk = _half_nk(ambient[0], wl)
+    sub_nk = _half_nk(substrate[0], wl)
+    gmap = _group_map(groups)
     return _run_design(
         amb_nk, str(ambient[1] if len(ambient) > 1 else "air"),
         sub_nk, str(substrate[1] if len(substrate) > 1 else "sub"),
