@@ -483,6 +483,19 @@ layer_list` (legacy row adapter + cache side effect), chain surgery
 (insert/replace/move/remove/clear), `index`/label lookup (no callers),
 architect block-`__contains__`. 94 validation green.
 
+## 9.7 Open items (single consolidated list — update on change)
+
+Awaiting user: D2b definition; dead `tests/` dir (delete/keep);
+program Phases 2–4 go-ahead; D2a build go-ahead; release re-run
+outcome (v0.4.0 retagged on current main, hardened workflow).
+Ready on request: construction bench; config pipeline builder;
+leftover dropped surface (chain surgery, index/label lookup,
+simple_layer_list, architect block-contains).
+Housekeeping: stale 0.3.0 wheel in target/wheels/; registry names
+claim on first publish (6/7 crates live).
+Branch policy: dev_rust →(no-ff) dev →(ff-only) main; verify
+tree-identity after promotions.
+
 ## 10. Order of work
 
 A1 → A2 → A3 → A4 → A5 → A6 → A7 → B → C → D (→ E iff needed),
